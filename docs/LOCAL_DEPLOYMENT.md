@@ -25,7 +25,7 @@ C:\Users\asus\AppData\Local\Programs\Python\Python38\python.exe --version
 ## 2. 拉取代码
 
 ```powershell
-git clone https://github.com/taochengguo/erp-ledger-system.git
+git clone https://github.com/ND5-0348/erp-ledger-system.git
 cd erp-ledger-system
 ```
 
