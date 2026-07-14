@@ -1,0 +1,16 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+docs/*.xlsx
+backend/.venv/
+backend/backups/
+__pycache__/
+*.pyc
+.pytest_cache/
+业务台账管理系统/
+.codex/

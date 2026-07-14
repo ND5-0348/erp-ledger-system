@@ -1,0 +1,102 @@
+from __future__ import annotations
+
+import re
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Iterator
+
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Connection
+
+from .config import DOCS_DIR, settings
+
+
+engine = create_engine(settings.database_url, pool_pre_ping=True, future=True)
+server_engine = create_engine(settings.server_url, pool_pre_ping=True, future=True)
+
+
+@contextmanager
+def db() -> Iterator[Connection]:
+    with engine.begin() as conn:
+        yield conn
+
+
+def _split_sql(sql: str) -> list[str]:
+    cleaned = re.sub(r"^\s*--.*$", "", sql, flags=re.MULTILINE)
+    return [part.strip() for part in cleaned.split(";") if part.strip()]
+
+
+def initialize_schema() -> None:
+    schema_path = DOCS_DIR / "erp_ledger_schema.sql"
+    statements = _split_sql(schema_path.read_text(encoding="utf-8"))
+    with server_engine.begin() as conn:
+        for statement in statements:
+            conn.execute(text(statement))
+    apply_runtime_migrations()
+
+
+def apply_runtime_migrations() -> None:
+    phase_tables = [
+        "purchase_invoice",
+        "warehouse_entry",
+        "finance_invoice_check",
+        "purchase_payment",
+        "sales_invoice",
+        "sales_receipt",
+    ]
+    with engine.begin() as conn:
+        for table_name in phase_tables:
+            column_exists = conn.execute(
+                text(
+                    """
+                    SELECT COUNT(*)
+                    FROM information_schema.columns
+                    WHERE table_schema = DATABASE()
+                      AND table_name = :table_name
+                      AND column_name = 'active_phase_no'
+                    """
+                ),
+                {"table_name": table_name},
+            ).scalar()
+            if not column_exists:
+                conn.execute(
+                    text(
+                        f"""
+                        ALTER TABLE `{table_name}`
+                        ADD COLUMN active_phase_no INT
+                        GENERATED ALWAYS AS (CASE WHEN deleted_at IS NULL THEN phase_no ELSE NULL END) STORED
+                        """
+                    )
+                )
+            index_name = f"uk_{table_name}_active_phase"
+            index_exists = conn.execute(
+                text(
+                    """
+                    SELECT COUNT(*)
+                    FROM information_schema.statistics
+                    WHERE table_schema = DATABASE()
+                      AND table_name = :table_name
+                      AND index_name = :index_name
+                    """
+                ),
+                {"table_name": table_name, "index_name": index_name},
+            ).scalar()
+            if not index_exists:
+                conn.execute(
+                    text(
+                        f"""
+                        ALTER TABLE `{table_name}`
+                        ADD UNIQUE KEY `{index_name}` (order_line_id, active_phase_no)
+                        """
+                    )
+                )
+
+
+def table_count(table: str) -> int:
+    with db() as conn:
+        return int(conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar() or 0)
+
+
+def active_table_count(table: str) -> int:
+    with db() as conn:
+        return int(conn.execute(text(f"SELECT COUNT(*) FROM {table} WHERE deleted_at IS NULL")).scalar() or 0)

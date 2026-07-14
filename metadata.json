@@ -1,0 +1,6 @@
+{
+  "name": "业务台账管理系统",
+  "description": "提供首页仪表盘、台账详情、订单详情、采购详情、销售详情和系统管理的多屏幕企业业务管理平台",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
