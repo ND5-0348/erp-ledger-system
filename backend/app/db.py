@@ -45,6 +45,32 @@ def apply_runtime_migrations() -> None:
         "sales_receipt",
     ]
     with engine.begin() as conn:
+        precise_columns = {
+            "order_line": ["quantity"],
+            "delivery_record": ["delivery_quantity", "pending_delivery_quantity"],
+        }
+        for table_name, column_names in precise_columns.items():
+            for column_name in column_names:
+                column = conn.execute(
+                    text(
+                        """
+                        SELECT numeric_precision, numeric_scale
+                        FROM information_schema.columns
+                        WHERE table_schema = DATABASE()
+                          AND table_name = :table_name
+                          AND column_name = :column_name
+                        """
+                    ),
+                    {"table_name": table_name, "column_name": column_name},
+                ).mappings().first()
+                if column and (int(column["numeric_precision"] or 0), int(column["numeric_scale"] or 0)) != (20, 6):
+                    conn.execute(
+                        text(
+                            f"ALTER TABLE `{table_name}` "
+                            f"MODIFY COLUMN `{column_name}` DECIMAL(20,6) NULL"
+                        )
+                    )
+
         for table_name in phase_tables:
             column_exists = conn.execute(
                 text(

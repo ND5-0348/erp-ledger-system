@@ -60,9 +60,9 @@ Open:
 Default login:
 
 - Username: `admin`
-- Password: the value configured in `DEFAULT_ADMIN_PASSWORD`
+- Password: `admin123`
 
-The backend refuses to start with weak default credentials. Configure a random `AUTH_SECRET` of at least 32 characters and a strong `DEFAULT_ADMIN_PASSWORD` of at least 12 characters in `backend/.env`.
+Configure a random `AUTH_SECRET` of at least 32 characters in `backend/.env`. `DEFAULT_ADMIN_PASSWORD` must contain at least 6 characters; the default value is `admin123`.
 
 ## Permissions
 

@@ -51,7 +51,7 @@ class OrderLine(Base):
     sales_order_id = Column(Integer, ForeignKey("sales_order.id"), nullable=False)
     goods_name = Column(String(255))
     unit_name = Column(String(32))
-    quantity = Column(Numeric(18, 4))
+    quantity = Column(Numeric(20, 6))
     order_value = Column(Numeric(18, 2))
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
@@ -70,4 +70,3 @@ class OperationLog(Base):
     detail = Column(Text, nullable=False)
     status = Column(String(32), nullable=False)
     created_at = Column(DateTime, server_default=func.now())
-

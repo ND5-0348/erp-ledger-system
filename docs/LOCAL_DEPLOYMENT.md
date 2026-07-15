@@ -25,7 +25,7 @@ C:\Users\asus\AppData\Local\Programs\Python\Python38\python.exe --version
 ## 2. 拉取代码
 
 ```powershell
-git clone https://github.com/taochengguo/erp-ledger-system.git
+git clone https://github.com/ND5-0348/erp-ledger-system.git
 cd erp-ledger-system
 ```
 
@@ -69,14 +69,14 @@ MYSQL_PASSWORD=root
 MYSQL_DATABASE=erp_ledger
 FRONTEND_ORIGIN=http://127.0.0.1:3000
 AUTH_SECRET=至少32位随机字符串
-DEFAULT_ADMIN_PASSWORD=至少12位强密码
+DEFAULT_ADMIN_PASSWORD=admin123
 ```
 
 要求：
 
 - `MYSQL_USER` 需要有创建数据库、建表、写入数据的权限。
-- 当前本机开发账号为 `root/root`，仅用于本地运行；生产环境必须改用独立账号和强密码。
-- 后端会拒绝使用 `admin123` 或代码默认认证密钥启动。
+- 当前本机开发账号为 `root/root`，仅用于本地运行；生产环境应改用独立账号。
+- 默认管理员账号为 `admin/admin123`；密码至少 6 位，后端保留认证密钥长度校验。
 - 不要把 `backend\.env` 提交到 GitHub。
 - 数据库可以不用手动创建，后端启动时会执行 `docs/erp_ledger_schema.sql` 初始化 `erp_ledger`。
 

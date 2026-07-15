@@ -7,7 +7,7 @@ from typing import Any, Mapping
 
 def clean_value(value: Any) -> Any:
     if isinstance(value, Decimal):
-        return float(value)
+        return format(value, "f")
     if isinstance(value, (date, datetime)):
         return value.isoformat()
     return value
@@ -19,4 +19,3 @@ def clean_row(row: Mapping[str, Any]) -> dict[str, Any]:
 
 def clean_rows(rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return [clean_row(row) for row in rows]
-

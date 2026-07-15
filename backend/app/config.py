@@ -47,5 +47,5 @@ settings = Settings()
 def validate_security_settings() -> None:
     if len(settings.auth_secret) < 32 or settings.auth_secret == "erp-ledger-local-dev-secret":
         raise RuntimeError("AUTH_SECRET 必须设置为至少 32 位的随机字符串")
-    if len(settings.default_admin_password) < 12 or settings.default_admin_password == "admin123":
-        raise RuntimeError("DEFAULT_ADMIN_PASSWORD 必须设置为至少 12 位的强密码")
+    if len(settings.default_admin_password) < 6:
+        raise RuntimeError("DEFAULT_ADMIN_PASSWORD 必须设置为至少 6 位密码")

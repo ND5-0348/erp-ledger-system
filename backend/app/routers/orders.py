@@ -16,7 +16,7 @@ router = APIRouter(prefix="/api/orders", tags=["orders"])
 
 class OrderUpdate(BaseModel):
     amount_type: str | None = None
-    project_code: str | None = None
+    project_code: str | None = Field(default=None, max_length=64)
     project_name: str | None = None
     department: str | None = None
     branch_company: str | None = None

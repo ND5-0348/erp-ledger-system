@@ -8,6 +8,7 @@ coverage/
 !.env.example
 docs/*.xlsx
 backend/.venv/
+backend/.test-deps/
 backend/backups/
 __pycache__/
 *.pyc

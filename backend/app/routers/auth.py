@@ -31,7 +31,7 @@ class LoginRequest(BaseModel):
 
 class UserCreate(BaseModel):
     username: str = Field(min_length=2, max_length=64)
-    password: str = Field(min_length=10, max_length=128)
+    password: str = Field(min_length=6, max_length=128)
     display_name: str = Field(min_length=1, max_length=64)
     role_code: str
     permissions: list[str] = Field(default_factory=list)

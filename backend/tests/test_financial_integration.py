@@ -1,0 +1,545 @@
+from __future__ import annotations
+
+import os
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date
+from decimal import Decimal
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import text
+
+from app.auth import ALL_PERMISSIONS, CurrentUser, ensure_default_admin
+from app.config import ROOT_DIR, settings
+from app.db import _split_sql, db, engine, server_engine
+from app.main import app
+from app.routers import purchases
+
+TEST_DATABASE_PREFIX = "erp_ledger_test_"
+TEST_PASSWORD = "Integration-Test-20260714!"
+
+
+def _test_database_name() -> str:
+    name = settings.mysql_database
+    if not name.startswith(TEST_DATABASE_PREFIX):
+        raise RuntimeError(f"Set MYSQL_DATABASE to a name beginning with {TEST_DATABASE_PREFIX!r}.")
+    return name
+
+
+def _initialize_schema() -> None:
+    database = _test_database_name()
+    schema = (ROOT_DIR / "docs" / "erp_ledger_schema.sql").read_text(encoding="utf-8")
+    with server_engine.begin() as conn:
+        for statement in _split_sql(schema.replace("erp_ledger", database)):
+            conn.execute(text(statement))
+    ensure_default_admin()
+
+
+def _clear_business_data() -> None:
+    tables = (
+        "sales_receipt", "sales_invoice", "sales_contract", "purchase_payment",
+        "finance_invoice_check", "warehouse_entry", "purchase_invoice",
+        "purchase_contract", "delivery_record", "purchase_info", "order_line",
+        "sales_order", "ledger_raw_row", "project", "import_batch",
+        "backup_record", "operation_log",
+    )
+    with db() as conn:
+        for table in tables:
+            conn.execute(text(f"DELETE FROM `{table}`"))
+
+
+@pytest.fixture(scope="session", autouse=True)
+def test_database() -> None:
+    database = _test_database_name()
+    _initialize_schema()
+    yield
+    engine.dispose()
+    with server_engine.begin() as conn:
+        conn.execute(text(f"DROP DATABASE IF EXISTS `{database}`"))
+
+
+@pytest.fixture(autouse=True)
+def clean_database() -> None:
+    _clear_business_data()
+
+
+@pytest.fixture
+def client() -> TestClient:
+    return TestClient(app, raise_server_exceptions=False)
+
+
+@pytest.fixture
+def headers(client: TestClient) -> dict[str, str]:
+    response = client.post("/api/auth/login", json={"username": "admin", "password": TEST_PASSWORD})
+    assert response.status_code == 200, response.text
+    return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+
+def _payload(suffix: str) -> dict[str, str]:
+    return {
+        "amount_type": "gross",
+        "project_code": f"QA-{suffix}",
+        "project_name": "Financial Integration Test",
+        "department": "QA",
+        "branch_company": "QA Branch",
+        "account_manager": "QA Manager",
+        "order_no": f"SO-{suffix}",
+        "order_date": "2026-07-14",
+        "business_type": "QA",
+        "statistical_category": "QA",
+        "team_name": "QA Team",
+        "customer_unit_name": "QA Customer",
+        "user_name": "QA User",
+        "regional_platform": "QA Platform",
+        "goods_name": "QA Equipment",
+        "specification_model": "QA-SPEC",
+        "unit_name": "unit",
+        "quantity": "10.000000",
+        "net_unit_price": "100.000000",
+        "unit_price": "113.000000",
+        "net_revenue": "1000.00",
+        "order_value": "1130.00",
+        "supplier_name": "QA Supplier",
+        "purchase_unit_price_no_tax": "70.000000",
+        "purchase_unit_price": "79.100000",
+        "cost_no_tax": "700.00",
+        "purchase_amount": "791.00",
+        "delivery_date": "2026-07-15",
+        "delivery_quantity": "5.000000",
+        "delivery_revenue_no_tax": "500.00",
+        "delivery_value": "565.00",
+        "delivery_cost_no_tax": "350.00",
+        "delivery_cost": "395.50",
+        "pending_delivery_quantity": "5.000000",
+        "pending_delivery_amount_no_tax": "500.00",
+        "pending_delivery_amount": "565.00",
+    }
+
+
+def _create_order(client: TestClient, headers: dict[str, str], suffix: str, **updates: str) -> tuple[int, dict[str, str]]:
+    payload = _payload(suffix)
+    payload.update(updates)
+    response = client.post("/api/orders", json=payload, headers=headers)
+    assert response.status_code == 200, response.text
+    return int(response.json()["order_line_id"]), payload
+
+
+def _d(value: object) -> Decimal:
+    return Decimal(str(value))
+
+
+def _finance(order_line_id: int) -> dict:
+    with db() as conn:
+        row = conn.execute(
+            text("SELECT * FROM v_order_line_finance WHERE order_line_id = :id"),
+            {"id": order_line_id},
+        ).mappings().one()
+    return dict(row)
+
+
+def _ledger(project_code: str) -> dict:
+    with db() as conn:
+        row = conn.execute(
+            text("SELECT * FROM v_project_ledger_summary WHERE project_code = :code"),
+            {"code": project_code},
+        ).mappings().one()
+    return dict(row)
+
+
+def _count(table: str, condition: str = "1=1", **params: object) -> int:
+    with db() as conn:
+        return int(conn.execute(text(f"SELECT COUNT(*) FROM `{table}` WHERE {condition}"), params).scalar() or 0)
+
+
+def _action_count(action: str) -> int:
+    return _count("operation_log", "action_name = :action", action=action)
+
+
+def _dashboard(client: TestClient, headers: dict[str, str]) -> dict:
+    response = client.get("/api/dashboard/summary", headers=headers)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _payment(amount: str, payment_date: str = "2026-07-20") -> dict[str, str]:
+    return {
+        "due_payment_date": "2026-07-20",
+        "payment_date": payment_date,
+        "payment_voucher_no": f"PAY-{amount}",
+        "payment_amount": amount,
+    }
+
+
+def _receipt(amount: str, ratio: str = "0.000000") -> dict[str, str]:
+    return {
+        "receipt_date": "2026-07-30",
+        "payment_notice_no": f"RCPT-{amount}",
+        "receipt_amount": amount,
+        "receipt_ratio": ratio,
+    }
+
+
+def _admin_user() -> CurrentUser:
+    with db() as conn:
+        user_id = conn.execute(text("SELECT id FROM erp_user WHERE username = 'admin'")).scalar_one()
+    return CurrentUser(
+        id=int(user_id),
+        username="admin",
+        display_name="admin",
+        role_code="admin",
+        permissions=sorted(ALL_PERMISSIONS),
+        department_scope=[],
+        department_can_view=True,
+        department_can_entry=True,
+    )
+
+
+@pytest.mark.parametrize("case", [f"N-{index:02d}" for index in range(1, 13)])
+def test_normal_financial_cases(case: str, client: TestClient, headers: dict[str, str]) -> None:
+    order_line_id, payload = _create_order(client, headers, case)
+
+    if case == "N-01":
+        finance = _finance(order_line_id)
+        assert _d(finance["gross_profit_no_tax"]) == Decimal("300.00")
+        assert _d(finance["gross_profit"]) == Decimal("339.00")
+        assert _d(finance["accounts_receivable"]) == Decimal("1130.00")
+        assert _d(finance["accounts_payable"]) == Decimal("791.00")
+        assert _count("project") == _count("sales_order") == _count("order_line") == 1
+        assert _count("purchase_info", "order_line_id = :id", id=order_line_id) == 1
+        assert _count("delivery_record", "order_line_id = :id", id=order_line_id) == 1
+        assert _d(_ledger(payload["project_code"])["order_amount"]) == Decimal("1130.00")
+        assert _dashboard(client, headers) == {
+            "orderAmount": 1130.0, "grossProfit": 339.0, "orderCount": 1,
+            "accountsReceivable": 1130.0, "accountsPayable": 791.0, "closedCount": 0,
+        }
+        assert _action_count("create_order") == 1
+
+    elif case == "N-02":
+        response = client.post(
+            f"/api/purchases/{order_line_id}/contracts",
+            json={"purchase_contract_no": "PC-N02", "signed_amount": "791.00", "unsigned_amount": "0.00"},
+            headers=headers,
+        )
+        assert response.status_code == 200, response.text
+        assert _d(response.json()["summary"]["purchase_contract_signed_amount"]) == Decimal("791.00")
+        assert _d(_finance(order_line_id)["accounts_payable"]) == Decimal("791.00")
+        assert _action_count("create_purchase_contract") == 1
+
+    elif case == "N-03":
+        response = client.post(
+            f"/api/purchases/{order_line_id}/invoices",
+            json={"received_invoice_date": "2026-07-15", "invoice_no": "PI-N03", "invoice_amount": "791.00"},
+            headers=headers,
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["invoices"][0]["phase_no"] == 1
+        assert _d(response.json()["invoices"][0]["invoice_amount"]) == Decimal("791.00")
+        assert _d(_finance(order_line_id)["accounts_payable"]) == Decimal("791.00")
+        assert _action_count("create_purchase_invoice") == 1
+
+    elif case == "N-04":
+        response = client.post(f"/api/purchases/{order_line_id}/payments", json=_payment("300.00"), headers=headers)
+        assert response.status_code == 200, response.text
+        assert response.json()["payments"][0]["phase_no"] == 1
+        assert response.json()["payments"][0]["due_payment_date"] == "2026-07-20"
+        finance = _finance(order_line_id)
+        assert _d(finance["total_paid"]) == Decimal("300.00")
+        assert _d(finance["accounts_payable"]) == Decimal("491.00")
+        assert _dashboard(client, headers)["accountsPayable"] == 491.0
+
+    elif case == "N-05":
+        client.post(f"/api/purchases/{order_line_id}/payments", json=_payment("300.00"), headers=headers)
+        response = client.post(f"/api/purchases/{order_line_id}/payments", json=_payment("491.00", "2026-07-25"), headers=headers)
+        assert response.status_code == 200, response.text
+        assert response.json()["payments"][1]["phase_no"] == 2
+        assert response.json()["payments"][1]["due_payment_date"] is None
+        finance = _finance(order_line_id)
+        assert _d(finance["total_paid"]) == Decimal("791.00")
+        assert _d(finance["accounts_payable"]) == Decimal("0.00")
+
+    elif case == "N-06":
+        response = client.post(
+            f"/api/sales/{order_line_id}/contracts",
+            json={"sales_contract_no": "SC-N06", "contract_value": "1130.00", "unsigned_contract_amount": "0.00"},
+            headers=headers,
+        )
+        assert response.status_code == 200, response.text
+        assert _d(response.json()["summary"]["sales_contract_value"]) == Decimal("1130.00")
+        assert _d(_finance(order_line_id)["accounts_receivable"]) == Decimal("1130.00")
+        assert _action_count("create_sales_contract") == 1
+
+    elif case == "N-07":
+        response = client.post(
+            f"/api/sales/{order_line_id}/invoices",
+            json={
+                "invoice_doc_no": "SID-N07", "invoice_date": "2026-07-20", "invoice_no": "SI-N07",
+                "invoice_amount": "565.00", "pending_invoice_amount": "565.00",
+                "delivered_not_invoiced_amount": "0.00",
+            },
+            headers=headers,
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["invoices"][0]["phase_no"] == 1
+        assert _d(_finance(order_line_id)["sales_invoice_amount"]) == Decimal("565.00")
+        assert _d(_finance(order_line_id)["accounts_receivable"]) == Decimal("1130.00")
+
+    elif case == "N-08":
+        response = client.post(f"/api/sales/{order_line_id}/receipts", json=_receipt("400.00", "35.398230"), headers=headers)
+        assert response.status_code == 200, response.text
+        finance = _finance(order_line_id)
+        assert _d(finance["total_received"]) == Decimal("400.00")
+        assert _d(finance["accounts_receivable"]) == Decimal("730.00")
+        assert _dashboard(client, headers)["closedCount"] == 0
+
+    elif case == "N-09":
+        client.post(f"/api/sales/{order_line_id}/receipts", json=_receipt("400.00"), headers=headers)
+        response = client.post(f"/api/sales/{order_line_id}/receipts", json=_receipt("730.00"), headers=headers)
+        assert response.status_code == 200, response.text
+        finance = _finance(order_line_id)
+        assert _d(finance["total_received"]) == Decimal("1130.00")
+        assert _d(finance["accounts_receivable"]) == Decimal("0.00")
+        assert _ledger(payload["project_code"])["computed_close_status"] == "closed"
+        assert _dashboard(client, headers)["closedCount"] == 1
+
+    elif case == "N-10":
+        first = client.post(f"/api/purchases/{order_line_id}/payments", json=_payment("300.00"), headers=headers)
+        client.post(f"/api/purchases/{order_line_id}/payments", json=_payment("491.00"), headers=headers)
+        payment_id = first.json()["payments"][0]["id"]
+        response = client.put(f"/api/purchases/payments/{payment_id}", json=_payment("250.00"), headers=headers)
+        assert response.status_code == 200, response.text
+        assert _count("purchase_payment", "order_line_id = :id", id=order_line_id) == 2
+        finance = _finance(order_line_id)
+        assert _d(finance["total_paid"]) == Decimal("741.00")
+        assert _d(finance["accounts_payable"]) == Decimal("50.00")
+        with db() as conn:
+            detail = conn.execute(text("SELECT detail FROM operation_log WHERE action_name = 'update_purchase_payment'")).scalar_one()
+        assert '"300.00"' in detail and '"250.00"' in detail
+
+    elif case == "N-11":
+        client.post(f"/api/sales/{order_line_id}/receipts", json=_receipt("400.00"), headers=headers)
+        second = client.post(f"/api/sales/{order_line_id}/receipts", json=_receipt("730.00"), headers=headers)
+        receipt_id = second.json()["receipts"][1]["id"]
+        response = client.delete(f"/api/sales/receipts/{receipt_id}", headers=headers)
+        assert response.status_code == 200, response.text
+        assert _count("sales_receipt", "id = :id AND deleted_at IS NOT NULL", id=receipt_id) == 1
+        finance = _finance(order_line_id)
+        assert _d(finance["total_received"]) == Decimal("400.00")
+        assert _d(finance["accounts_receivable"]) == Decimal("730.00")
+        assert _dashboard(client, headers)["closedCount"] == 0
+
+    elif case == "N-12":
+        response = client.delete(f"/api/orders/{order_line_id}", headers=headers)
+        assert response.status_code == 200, response.text
+        assert _count("order_line", "id = :id AND deleted_at IS NOT NULL", id=order_line_id) == 1
+        assert _count("sales_order", "deleted_at IS NOT NULL") == 1
+        assert _count("v_order_line_finance", "order_line_id = :id", id=order_line_id) == 0
+        listed = client.get("/api/orders", params={"project_id": payload["project_code"]}, headers=headers)
+        assert listed.status_code == 200
+        assert listed.json()["total"] == 0
+        assert _action_count("delete_order") == 1
+
+
+@pytest.mark.parametrize("case", [f"B-{index:02d}" for index in range(1, 9)])
+def test_boundary_financial_cases(case: str, client: TestClient, headers: dict[str, str]) -> None:
+    if case == "B-01":
+        maximum = "9999999999999999.99"
+        order_line_id, payload = _create_order(client, headers, case, order_value=maximum, purchase_amount="0.00")
+        assert _d(_finance(order_line_id)["order_value"]) == Decimal(maximum)
+        response = client.get("/api/orders", params={"project_id": payload["project_code"]}, headers=headers)
+        assert response.status_code == 200, response.text
+        assert _d(response.json()["items"][0]["order_value"]) == Decimal(maximum)
+
+    elif case == "B-02":
+        quantity = "999999999999.999999"
+        order_line_id, _ = _create_order(
+            client, headers, case, quantity=quantity, net_unit_price=quantity, unit_price=quantity,
+            order_value="9999999999999999.99", purchase_amount="0.00",
+        )
+        with db() as conn:
+            stored = conn.execute(text("SELECT quantity FROM order_line WHERE id = :id"), {"id": order_line_id}).scalar_one()
+        assert _d(stored) == Decimal(quantity)
+
+    elif case == "B-03":
+        order_line_id, _ = _create_order(client, headers, case, quantity="0.000000", delivery_quantity="0.000000")
+        response = client.post(f"/api/sales/{order_line_id}/receipts", json=_receipt("0.00", "100.000000"), headers=headers)
+        assert response.status_code == 200, response.text
+        finance = _finance(order_line_id)
+        assert _d(finance["total_received"]) == Decimal("0.00")
+        assert _d(finance["accounts_receivable"]) == Decimal("1130.00")
+        assert _dashboard(client, headers)["closedCount"] == 0
+
+    elif case == "B-04":
+        _, payload = _create_order(client, headers, case, order_date="2099-12-31")
+        logs_before = _count("operation_log")
+        for limit in (1, 500):
+            response = client.get("/api/orders", params={"project_id": payload["project_code"], "limit": limit, "offset": 0}, headers=headers)
+            assert response.status_code == 200, response.text
+            assert len(response.json()["items"]) <= limit
+        assert _count("operation_log") == logs_before
+
+    elif case == "B-05":
+        order_line_id, _ = _create_order(client, headers, case)
+        client.post(f"/api/purchases/{order_line_id}/payments", json=_payment("100.00"), headers=headers)
+        second = client.post(f"/api/purchases/{order_line_id}/payments", json=_payment("100.00"), headers=headers)
+        payment_id = second.json()["payments"][1]["id"]
+        assert client.delete(f"/api/purchases/payments/{payment_id}", headers=headers).status_code == 200
+        third = client.post(f"/api/purchases/{order_line_id}/payments", json=_payment("100.00"), headers=headers)
+        assert [item["phase_no"] for item in third.json()["payments"]] == [1, 3]
+        assert _d(_finance(order_line_id)["total_paid"]) == Decimal("200.00")
+
+    elif case == "B-06":
+        order_line_id, _ = _create_order(client, headers, case)
+        record = purchases.PurchasePaymentCreate(payment_amount=Decimal("1.00"), payment_date=date(2026, 7, 20))
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = [pool.submit(purchases.add_purchase_payment, order_line_id, record, _admin_user()) for _ in range(2)]
+            [result.result() for result in results]
+        with db() as conn:
+            phases = conn.execute(
+                text("SELECT phase_no FROM purchase_payment WHERE order_line_id = :id AND deleted_at IS NULL ORDER BY phase_no"),
+                {"id": order_line_id},
+            ).scalars().all()
+        assert phases == [1, 2]
+        assert _d(_finance(order_line_id)["total_paid"]) == Decimal("2.00")
+
+    elif case == "B-07":
+        order_line_id, _ = _create_order(client, headers, case)
+        client.post(f"/api/sales/{order_line_id}/receipts", json=_receipt("1129.99"), headers=headers)
+        client.post(f"/api/sales/{order_line_id}/receipts", json=_receipt("0.01"), headers=headers)
+        client.post(f"/api/purchases/{order_line_id}/payments", json=_payment("790.99"), headers=headers)
+        client.post(f"/api/purchases/{order_line_id}/payments", json=_payment("0.01"), headers=headers)
+        finance = _finance(order_line_id)
+        assert _d(finance["accounts_receivable"]) == Decimal("0.00")
+        assert _d(finance["accounts_payable"]) == Decimal("0.00")
+        assert _dashboard(client, headers)["closedCount"] == 1
+
+    elif case == "B-08":
+        order_line_id, _ = _create_order(client, headers, case)
+        assert client.post(f"/api/sales/{order_line_id}/receipts", json=_receipt("1130.00"), headers=headers).status_code == 200
+        assert client.post(f"/api/purchases/{order_line_id}/payments", json=_payment("791.00"), headers=headers).status_code == 200
+        receipt_before = _count("sales_receipt", "order_line_id = :id", id=order_line_id)
+        payment_before = _count("purchase_payment", "order_line_id = :id", id=order_line_id)
+        receipt_response = client.post(f"/api/sales/{order_line_id}/receipts", json=_receipt("0.01"), headers=headers)
+        payment_response = client.post(f"/api/purchases/{order_line_id}/payments", json=_payment("0.01"), headers=headers)
+        receipt_after = _count("sales_receipt", "order_line_id = :id", id=order_line_id)
+        payment_after = _count("purchase_payment", "order_line_id = :id", id=order_line_id)
+        finance = _finance(order_line_id)
+        assert (receipt_response.status_code, payment_response.status_code) == (422, 422), {
+            "receipt_count_before_after": (receipt_before, receipt_after),
+            "payment_count_before_after": (payment_before, payment_after),
+            "accounts_receivable": str(finance["accounts_receivable"]),
+            "accounts_payable": str(finance["accounts_payable"]),
+        }
+        assert (receipt_after, payment_after) == (receipt_before, payment_before)
+        assert _d(finance["accounts_receivable"]) == Decimal("0.00")
+        assert _d(finance["accounts_payable"]) == Decimal("0.00")
+
+
+@pytest.mark.parametrize("case", [f"I-{index:02d}" for index in range(1, 13)])
+def test_invalid_input_cases(case: str, client: TestClient, headers: dict[str, str]) -> None:
+    if case == "I-01":
+        order_payload = {"project_code": "QA-I01", "order_no": "SO-I01", "goods_name": "x", "customer_unit_name": "y", "order_value": "-0.01"}
+        assert client.post("/api/orders", json=order_payload, headers=headers).status_code == 422
+        order_line_id, _ = _create_order(client, headers, case)
+        assert client.post(f"/api/purchases/{order_line_id}/payments", json=_payment("-1.00"), headers=headers).status_code == 422
+        assert client.post(f"/api/sales/{order_line_id}/receipts", json=_receipt("-1.00"), headers=headers).status_code == 422
+        assert _count("purchase_payment") == _count("sales_receipt") == 0
+        assert _d(_finance(order_line_id)["accounts_payable"]) == Decimal("791.00")
+
+    elif case == "I-02":
+        order_line_id, _ = _create_order(client, headers, case)
+        for amount in ("100.001", "99999999999999999.99", "NaN", "Infinity", "not-a-number"):
+            response = client.post(f"/api/purchases/{order_line_id}/payments", json=_payment(amount), headers=headers)
+            assert response.status_code == 422, response.text
+        assert _count("purchase_payment") == 0
+        assert _d(_finance(order_line_id)["accounts_payable"]) == Decimal("791.00")
+
+    elif case == "I-03":
+        payload = _payload(case)
+        payload["quantity"] = "1.0000001"
+        response = client.post("/api/orders", json=payload, headers=headers)
+        assert response.status_code == 422, response.text
+        assert _count("project") == _count("sales_order") == _count("order_line") == 0
+
+    elif case == "I-04":
+        for bad_date in ("not-a-date", "2026-02-30", "2100-01-01"):
+            payload = _payload(f"{case}-{bad_date[:4]}")
+            payload["order_date"] = bad_date
+            response = client.post("/api/orders", json=payload, headers=headers)
+            assert response.status_code == 422, response.text
+        assert _count("order_line") == 0
+        assert _action_count("create_order") == 0
+
+    elif case == "I-05":
+        order_line_id, _ = _create_order(client, headers, case)
+        for ratio in ("-0.000001", "100.000001", "1.0000001"):
+            response = client.post(f"/api/sales/{order_line_id}/receipts", json=_receipt("1.00", ratio), headers=headers)
+            assert response.status_code == 422, response.text
+        assert _count("sales_receipt") == 0
+
+    elif case == "I-06":
+        for field in ("project_code", "order_no", "goods_name", "customer_unit_name", "order_value"):
+            payload = _payload(f"{case}-{field}")
+            payload.pop(field)
+            response = client.post("/api/orders", json=payload, headers=headers)
+            assert response.status_code == 422, response.text
+        assert _count("project") == _count("sales_order") == _count("order_line") == 0
+
+    elif case == "I-07":
+        order_line_id, payload = _create_order(client, headers, case)
+        payload["quantity"] = "99.000000"
+        response = client.post("/api/orders", json=payload, headers=headers)
+        assert response.status_code == 409, response.text
+        with db() as conn:
+            quantity = conn.execute(text("SELECT quantity FROM order_line WHERE id = :id"), {"id": order_line_id}).scalar_one()
+        assert _d(quantity) == Decimal("10.0000")
+        assert _count("order_line") == 1
+        assert _action_count("create_order") == 1
+
+    elif case == "I-08":
+        valid = _payload("I08-valid")
+        invalid = _payload("I08-invalid")
+        invalid["order_value"] = "-1.00"
+        response = client.post("/api/orders/batch", json={"items": [valid, invalid]}, headers=headers)
+        assert response.status_code == 422, response.text
+        assert _count("project") == _count("sales_order") == _count("order_line") == 0
+        assert _action_count("batch_create_orders") == 0
+
+    elif case == "I-09":
+        response = client.post("/api/sales/999999/receipts", json=_receipt("1.00"), headers=headers)
+        assert response.status_code == 404, response.text
+        order_line_id, _ = _create_order(client, headers, case)
+        created = client.post(f"/api/sales/{order_line_id}/receipts", json=_receipt("1.00"), headers=headers)
+        receipt_id = created.json()["receipts"][0]["id"]
+        assert client.delete(f"/api/sales/receipts/{receipt_id}", headers=headers).status_code == 200
+        assert client.put(f"/api/sales/receipts/{receipt_id}", json=_receipt("2.00"), headers=headers).status_code == 404
+        assert _count("sales_receipt", "id = :id AND deleted_at IS NOT NULL", id=receipt_id) == 1
+
+    elif case == "I-10":
+        order_line_id, _ = _create_order(client, headers, case)
+        created = client.post(
+            "/api/auth/users",
+            json={"username": "viewer-i10", "password": "Viewer-Test-20260714!", "display_name": "Viewer", "role_code": "viewer"},
+            headers=headers,
+        )
+        assert created.status_code == 200, created.text
+        login = client.post("/api/auth/login", json={"username": "viewer-i10", "password": "Viewer-Test-20260714!"})
+        viewer_headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        response = client.post(f"/api/sales/{order_line_id}/receipts", json=_receipt("1.00"), headers=viewer_headers)
+        assert response.status_code == 403, response.text
+        assert _count("sales_receipt") == 0
+        assert _d(_finance(order_line_id)["accounts_receivable"]) == Decimal("1130.00")
+
+    elif case == "I-11":
+        _create_order(client, headers, case)
+        logs_before = _count("operation_log")
+        for params in ({"limit": 0}, {"limit": 501}, {"offset": -1}):
+            response = client.get("/api/orders", params=params, headers=headers)
+            assert response.status_code == 422, response.text
+        assert _count("operation_log") == logs_before
+
+    elif case == "I-12":
+        payload = _payload(case)
+        payload["project_code"] = "P" * 65
+        response = client.post("/api/orders", json=payload, headers=headers)
+        assert _count("project") == _count("sales_order") == _count("order_line") == 0
+        assert response.status_code == 422, response.text

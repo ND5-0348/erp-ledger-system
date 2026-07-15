@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import text
@@ -319,6 +321,7 @@ def add_purchase_payment(
     with db() as conn:
         phase_no = _next_phase(conn, "purchase_payment", order_line_id)
         data = _payload_dict(payload)
+        _validate_payment_total(conn, order_line_id, payload.payment_amount)
         if phase_no > 1:
             data["due_payment_date"] = None
         result = conn.execute(
@@ -352,6 +355,7 @@ def update_purchase_payment(
     with db() as conn:
         before = _record_snapshot(conn, "purchase_payment", payment_id)
         data = _payload_dict(payload)
+        _validate_payment_total(conn, order_line_id, payload.payment_amount, payment_id)
         conn.execute(
             text(
                 """
@@ -457,3 +461,31 @@ def _next_phase(conn, table_name: str, order_line_id: int) -> int:
         {"order_line_id": order_line_id},
     ).scalar()
     return int(phase or 1)
+
+
+def _validate_payment_total(conn, order_line_id: int, payment_amount: Decimal, payment_id: int | None = None) -> None:
+    conn.execute(
+        text("SELECT id FROM order_line WHERE id = :order_line_id FOR UPDATE"),
+        {"order_line_id": order_line_id},
+    ).scalar()
+    purchase_amount = conn.execute(
+        text(
+            "SELECT purchase_amount FROM purchase_info "
+            "WHERE order_line_id = :order_line_id AND deleted_at IS NULL"
+        ),
+        {"order_line_id": order_line_id},
+    ).scalar()
+    params: dict[str, object] = {"order_line_id": order_line_id}
+    exclude_clause = ""
+    if payment_id is not None:
+        exclude_clause = " AND id <> :payment_id"
+        params["payment_id"] = payment_id
+    paid = conn.execute(
+        text(
+            "SELECT COALESCE(SUM(payment_amount), 0) FROM purchase_payment "
+            "WHERE order_line_id = :order_line_id AND deleted_at IS NULL" + exclude_clause
+        ),
+        params,
+    ).scalar()
+    if Decimal(paid or 0) + payment_amount > Decimal(purchase_amount or 0):
+        raise HTTPException(status_code=422, detail="累计付款金额不能超过采购金额，数据有错误，请检查后重新提交。")

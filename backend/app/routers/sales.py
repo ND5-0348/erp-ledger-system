@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import text
@@ -424,6 +426,7 @@ def add_sales_receipt(
     _ensure_order_line(order_line_id, user, require_entry=True)
     with db() as conn:
         phase_no = _next_phase(conn, "sales_receipt", order_line_id)
+        _validate_receipt_total(conn, order_line_id, payload.receipt_amount)
         result = conn.execute(
             text(
                 """
@@ -454,6 +457,7 @@ def update_sales_receipt(
     order_line_id = _ensure_detail_record("sales_receipt", receipt_id, user, require_entry=True)
     with db() as conn:
         before = _record_snapshot(conn, "sales_receipt", receipt_id)
+        _validate_receipt_total(conn, order_line_id, payload.receipt_amount, receipt_id)
         conn.execute(
             text(
                 """
@@ -559,6 +563,27 @@ def _next_phase(conn, table_name: str, order_line_id: int) -> int:
         {"order_line_id": order_line_id},
     ).scalar()
     return int(phase or 1)
+
+
+def _validate_receipt_total(conn, order_line_id: int, receipt_amount: Decimal, receipt_id: int | None = None) -> None:
+    order_value = conn.execute(
+        text("SELECT order_value FROM order_line WHERE id = :order_line_id FOR UPDATE"),
+        {"order_line_id": order_line_id},
+    ).scalar()
+    params: dict[str, object] = {"order_line_id": order_line_id}
+    exclude_clause = ""
+    if receipt_id is not None:
+        exclude_clause = " AND id <> :receipt_id"
+        params["receipt_id"] = receipt_id
+    received = conn.execute(
+        text(
+            "SELECT COALESCE(SUM(receipt_amount), 0) FROM sales_receipt "
+            "WHERE order_line_id = :order_line_id AND deleted_at IS NULL" + exclude_clause
+        ),
+        params,
+    ).scalar()
+    if Decimal(received or 0) + receipt_amount > Decimal(order_value or 0):
+        raise HTTPException(status_code=422, detail="累计回款金额不能超过订单金额，数据有错误，请检查后重新提交。")
 
 
 def _aggregate_summary(rows) -> dict:

@@ -1,4 +1,11 @@
+from dataclasses import replace
+
+import pytest
+from pydantic import ValidationError
+
+from app import config
 from app.auth import CurrentUser, ROLE_PERMISSIONS, can_access_department, has_permission, normalize_permissions
+from app.routers.auth import UserCreate
 
 
 def test_admin_can_use_every_permission():
@@ -47,6 +54,29 @@ def test_custom_permissions_override_role_defaults():
     assert normalize_permissions("viewer", ["order_entry", "order_edit", "bad_permission"]) == ["order_edit", "order_entry"]
     assert has_permission("viewer", "order_edit", ["order_edit"])
     assert not has_permission("admin", "sales_entry", ["order_entry"])
+
+
+def test_default_admin_password_allows_admin123(monkeypatch):
+    monkeypatch.setattr(config, "settings", replace(config.settings, default_admin_password="admin123"))
+    config.validate_security_settings()
+
+
+def test_new_user_password_requires_at_least_six_characters():
+    user = UserCreate(
+        username="user6",
+        password="123456",
+        display_name="Test User",
+        role_code="viewer",
+    )
+    assert user.password == "123456"
+
+    with pytest.raises(ValidationError):
+        UserCreate(
+            username="user5",
+            password="12345",
+            display_name="Test User",
+            role_code="viewer",
+        )
 
 
 def test_department_scope_limits_view_and_entry():

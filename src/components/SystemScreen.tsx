@@ -335,7 +335,7 @@ export default function SystemScreen({
           </div>
 
           <div className="p-5 grid grid-cols-1 xl:grid-cols-[520px_1fr] gap-5">
-            <form onSubmit={handleUserSubmit} className="rounded-lg border border-slate-200 p-4 space-y-3">
+            <form onSubmit={handleUserSubmit} autoComplete="off" className="rounded-lg border border-slate-200 p-4 space-y-3">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <label className="space-y-1">
                   <span className="block text-xs font-semibold text-slate-600">登录账号</span>
@@ -348,7 +348,7 @@ export default function SystemScreen({
                 <label className="space-y-1">
                   <span className="block text-xs font-semibold text-slate-600">初始密码</span>
                   <div className="relative">
-                    <input required type={showPassword ? 'text' : 'password'} minLength={6} value={userForm.password} onChange={(e) => setUserForm({ ...userForm, password: e.target.value })} className="w-full px-3 py-2 pr-9 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500" />
+                    <input required type={showPassword ? 'text' : 'password'} autoComplete="new-password" minLength={6} value={userForm.password} onChange={(e) => setUserForm({ ...userForm, password: e.target.value })} className="w-full px-3 py-2 pr-9 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500" />
                     <button type="button" onClick={() => setShowPassword((value) => !value)} title={showPassword ? '隐藏密码' : '显示密码'} className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-700">
                       {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                     </button>
@@ -357,7 +357,7 @@ export default function SystemScreen({
                 <label className="space-y-1">
                   <span className="block text-xs font-semibold text-slate-600">确认密码</span>
                   <div className="relative">
-                    <input required type={showConfirmPassword ? 'text' : 'password'} minLength={6} value={userForm.confirm_password} onChange={(e) => setUserForm({ ...userForm, confirm_password: e.target.value })} className="w-full px-3 py-2 pr-9 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500" />
+                    <input required type={showConfirmPassword ? 'text' : 'password'} autoComplete="new-password" minLength={6} value={userForm.confirm_password} onChange={(e) => setUserForm({ ...userForm, confirm_password: e.target.value })} className="w-full px-3 py-2 pr-9 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500" />
                     <button type="button" onClick={() => setShowConfirmPassword((value) => !value)} title={showConfirmPassword ? '隐藏密码' : '显示密码'} className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-700">
                       {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                     </button>

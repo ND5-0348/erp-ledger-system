@@ -176,28 +176,20 @@ def ensure_default_admin() -> None:
             text("SELECT password_hash FROM erp_user WHERE username = 'admin'")
         ).mappings().first()
         if existing:
-            password_hash = str(existing["password_hash"])
-            rotated_password_hash = (
-                hash_password(settings.default_admin_password)
-                if verify_password("admin123", password_hash)
-                else password_hash
-            )
             conn.execute(
                 text(
                     """
                     UPDATE erp_user
-                    SET password_hash = :password_hash,
-                        role_code = 'admin',
+                    SET role_code = 'admin',
                         permissions_json = :permissions_json,
                         department_scope_json = :department_scope_json,
                         department_can_view = 1,
                         department_can_entry = 1,
                         is_active = 1
                     WHERE username = 'admin'
-                    """
+                """
                 ),
                 {
-                    "password_hash": rotated_password_hash,
                     "permissions_json": encode_json_list(sorted(ALL_PERMISSIONS)),
                     "department_scope_json": encode_json_list([]),
                 },
