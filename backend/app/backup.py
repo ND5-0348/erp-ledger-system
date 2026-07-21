@@ -28,6 +28,7 @@ BACKUP_TABLES = [
     "purchase_invoice",
     "warehouse_entry",
     "finance_invoice_check",
+    "finance_payment_entry",
     "purchase_payment",
     "sales_contract",
     "sales_invoice",
@@ -163,4 +164,3 @@ def restore_backup(conn: Connection, backup_id: int, user: CurrentUser) -> dict[
         after={"backup_id": backup_id, "restored_rows": restored_rows},
     )
     return {"restored": True, "backup_id": backup_id, "restored_rows": restored_rows}
-

@@ -24,7 +24,7 @@ interface PurchasesScreenProps {
   canDeletePurchases: boolean;
 }
 
-type EntryMode = 'contract' | 'invoice' | 'payment';
+type EntryMode = 'contract' | 'invoice' | 'warehouse' | 'financeCheck' | 'financePayment' | 'payment';
 type EditingRecord = { mode: EntryMode; id: number } | null;
 
 const moneyFormatter = new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2 });
@@ -77,6 +77,22 @@ export default function PurchasesScreen({ purchases, canEnterPurchases, canEditP
     received_invoice_date: '',
     invoice_no: '',
     invoice_amount: '',
+  });
+  const [warehouseForm, setWarehouseForm] = useState({
+    warehouse_date: '',
+    voucher_no: '',
+    warehouse_amount: '',
+    warehouse_amount_no_tax: '',
+  });
+  const [financeCheckForm, setFinanceCheckForm] = useState({
+    received_invoice_date: '',
+    received_invoice_amount: '',
+    voucher_code: '',
+  });
+  const [financePaymentForm, setFinancePaymentForm] = useState({
+    payment_date: '',
+    voucher_code: '',
+    booked_amount: '',
   });
   const [paymentForm, setPaymentForm] = useState({
     due_payment_date: '',
@@ -146,7 +162,7 @@ export default function PurchasesScreen({ purchases, canEnterPurchases, canEditP
       const data = await api.purchaseDetail(item.orderLineId);
       setDetail(data);
     } catch (error) {
-      setDetailError(error instanceof Error ? error.message : '采购详情加载失败');
+      setDetailError(error instanceof Error ? error.message : '采购信息加载失败');
     } finally {
       setDetailLoading(false);
     }
@@ -163,6 +179,9 @@ export default function PurchasesScreen({ purchases, canEnterPurchases, canEditP
   const resetEntryForms = () => {
     setContractForm({ purchase_contract_no: '', payment_terms: '', performance_period: '', signed_amount: '', unsigned_amount: '' });
     setInvoiceForm({ received_invoice_date: '', invoice_no: '', invoice_amount: '' });
+    setWarehouseForm({ warehouse_date: '', voucher_no: '', warehouse_amount: '', warehouse_amount_no_tax: '' });
+    setFinanceCheckForm({ received_invoice_date: '', received_invoice_amount: '', voucher_code: '' });
+    setFinancePaymentForm({ payment_date: '', voucher_code: '', booked_amount: '' });
     setPaymentForm({ due_payment_date: '', payment_date: '', payment_voucher_no: '', payment_amount: '' });
   };
 
@@ -172,7 +191,7 @@ export default function PurchasesScreen({ purchases, canEnterPurchases, canEditP
     resetEntryForms();
   };
 
-  const openEditEntry = (mode: EntryMode, item: BackendPurchaseDetail['contracts'][number] | BackendPurchaseDetail['invoices'][number] | BackendPurchaseDetail['payments'][number]) => {
+  const openEditEntry = (mode: EntryMode, item: { id: number }) => {
     setEditingRecord({ mode, id: item.id });
     setEntryMode(mode);
     if (mode === 'contract') {
@@ -190,6 +209,28 @@ export default function PurchasesScreen({ purchases, canEnterPurchases, canEditP
         received_invoice_date: invoice.received_invoice_date || '',
         invoice_no: invoice.invoice_no || '',
         invoice_amount: invoice.invoice_amount === null || invoice.invoice_amount === undefined ? '' : String(invoice.invoice_amount),
+      });
+    } else if (mode === 'warehouse') {
+      const entry = item as BackendPurchaseDetail['warehouse_entries'][number];
+      setWarehouseForm({
+        warehouse_date: entry.warehouse_date || '',
+        voucher_no: entry.voucher_no || '',
+        warehouse_amount: entry.warehouse_amount === null ? '' : String(entry.warehouse_amount),
+        warehouse_amount_no_tax: entry.warehouse_amount_no_tax === null ? '' : String(entry.warehouse_amount_no_tax),
+      });
+    } else if (mode === 'financeCheck') {
+      const check = item as BackendPurchaseDetail['finance_invoice_checks'][number];
+      setFinanceCheckForm({
+        received_invoice_date: check.received_invoice_date || '',
+        received_invoice_amount: check.received_invoice_amount === null ? '' : String(check.received_invoice_amount),
+        voucher_code: check.voucher_code || '',
+      });
+    } else if (mode === 'financePayment') {
+      const payment = item as BackendPurchaseDetail['finance_payments'][number];
+      setFinancePaymentForm({
+        payment_date: payment.payment_date || '',
+        voucher_code: payment.voucher_code || '',
+        booked_amount: payment.booked_amount === null ? '' : String(payment.booked_amount),
       });
     } else {
       const payment = item as BackendPurchaseDetail['payments'][number];
@@ -212,7 +253,13 @@ export default function PurchasesScreen({ purchases, canEnterPurchases, canEditP
         ? await api.deletePurchaseContract(id)
         : mode === 'invoice'
           ? await api.deletePurchaseInvoice(id)
-          : await api.deletePurchasePayment(id);
+          : mode === 'warehouse'
+            ? await api.deleteWarehouseEntry(id)
+            : mode === 'financeCheck'
+              ? await api.deleteFinanceInvoiceCheck(id)
+              : mode === 'financePayment'
+                ? await api.deleteFinancePayment(id)
+                : await api.deletePurchasePayment(id);
       setDetail(updated);
     } catch (error) {
       setDetailError(error instanceof Error ? error.message : '删除失败');
@@ -248,6 +295,34 @@ export default function PurchasesScreen({ purchases, canEnterPurchases, canEditP
         updated = editingRecord
           ? await api.updatePurchaseInvoice(editingRecord.id, data)
           : await api.addPurchaseInvoice(selectedPurchase.orderLineId, data);
+      } else if (entryMode === 'warehouse') {
+        const data = {
+          warehouse_date: warehouseForm.warehouse_date || null,
+          voucher_no: warehouseForm.voucher_no || null,
+          warehouse_amount: parseAmount(warehouseForm.warehouse_amount),
+          warehouse_amount_no_tax: parseAmount(warehouseForm.warehouse_amount_no_tax),
+        };
+        updated = editingRecord
+          ? await api.updateWarehouseEntry(editingRecord.id, data)
+          : await api.addWarehouseEntry(selectedPurchase.orderLineId, data);
+      } else if (entryMode === 'financeCheck') {
+        const data = {
+          received_invoice_date: financeCheckForm.received_invoice_date || null,
+          received_invoice_amount: parseAmount(financeCheckForm.received_invoice_amount),
+          voucher_code: financeCheckForm.voucher_code || null,
+        };
+        updated = editingRecord
+          ? await api.updateFinanceInvoiceCheck(editingRecord.id, data)
+          : await api.addFinanceInvoiceCheck(selectedPurchase.orderLineId, data);
+      } else if (entryMode === 'financePayment') {
+        const data = {
+          payment_date: financePaymentForm.payment_date || null,
+          voucher_code: financePaymentForm.voucher_code || null,
+          booked_amount: parseAmount(financePaymentForm.booked_amount),
+        };
+        updated = editingRecord
+          ? await api.updateFinancePayment(editingRecord.id, data)
+          : await api.addFinancePayment(selectedPurchase.orderLineId, data);
       } else {
         const data = {
           due_payment_date: nextPaymentPhase === 1 ? paymentForm.due_payment_date || null : null,
@@ -276,7 +351,7 @@ export default function PurchasesScreen({ purchases, canEnterPurchases, canEditP
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900 font-sans">采购详情</h1>
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900 font-sans">采购信息</h1>
           <p className="text-sm text-slate-500 font-sans mt-1">管理采购合同、收票记录及付款计划</p>
         </div>
       </div>
@@ -284,9 +359,9 @@ export default function PurchasesScreen({ purchases, canEnterPurchases, canEditP
       <section className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm space-y-4">
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
           <FilterInput label="项目编号" placeholder="输入项目编号" value={projectId} onChange={setProjectId} />
-          <FilterInput label="订单号" placeholder="输入订单号" value={orderId} onChange={setOrderId} />
+          <FilterInput label="销售订单号" placeholder="输入销售订单号" value={orderId} onChange={setOrderId} />
           <FilterInput label="客户经理" placeholder="输入经理姓名" value={manager} onChange={setManager} />
-          <FilterInput label="采购厂家" placeholder="输入采购厂家" value={supplier} onChange={setSupplier} />
+          <FilterInput label="采购厂商" placeholder="输入采购厂商" value={supplier} onChange={setSupplier} />
           <FilterInput label="公司合同号" placeholder="输入公司合同号" value={contractNo} onChange={setContractNo} />
           <div className="space-y-1.5 md:col-span-2">
             <label className="text-xs font-medium text-slate-500">回款时间</label>
@@ -343,7 +418,7 @@ export default function PurchasesScreen({ purchases, canEnterPurchases, canEditP
             <thead>
               <tr className="bg-slate-50/75 border-b border-slate-200">
                 <TableHeader className="w-[140px]">项目编号</TableHeader>
-                <TableHeader className="w-[140px]">订单号</TableHeader>
+                <TableHeader className="w-[140px]">销售订单号</TableHeader>
                 <TableHeader className="w-[120px]">客户经理</TableHeader>
                 <TableHeader className="w-[160px]">公司合同号</TableHeader>
                 <TableHeader className="text-right w-[140px]">合同金额</TableHeader>
@@ -371,7 +446,7 @@ export default function PurchasesScreen({ purchases, canEnterPurchases, canEditP
                       <button
                         type="button"
                         onClick={() => loadDetail(item)}
-                        title="查看采购详情"
+                        title="查看采购信息"
                         aria-label={`查看采购 ${item.orderId} 的详情`}
                         className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-blue-100 bg-blue-50 text-blue-600 hover:bg-blue-100 hover:border-blue-200 transition-colors"
                       >
@@ -434,7 +509,7 @@ export default function PurchasesScreen({ purchases, canEnterPurchases, canEditP
             <div className="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
               <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
                 <Briefcase className="w-4 h-4 text-blue-600" />
-                <span>采购详情</span>
+                <span>采购信息</span>
               </h2>
               <button onClick={closeDetail} className="p-1 text-slate-400 hover:text-slate-700">
                 <X className="w-5 h-5" />
@@ -444,29 +519,36 @@ export default function PurchasesScreen({ purchases, canEnterPurchases, canEditP
             <div className="p-6 overflow-y-auto space-y-5">
               {detailError && <div className="px-4 py-3 rounded-lg bg-red-50 border border-red-100 text-xs text-red-600">{detailError}</div>}
               {detailLoading ? (
-                <div className="py-16 text-center text-sm text-slate-400">正在加载采购详情...</div>
+                <div className="py-16 text-center text-sm text-slate-400">正在加载采购信息...</div>
               ) : (
                 <>
                   <InfoSection title="当前订单信息" items={[
                     ['项目编号', summary?.project_code ?? selectedPurchase.projectId],
                     ['项目名称', summary?.project_name],
-                    ['订单号', summary?.order_no ?? selectedPurchase.orderId],
+                    ['销售订单号', summary?.order_no ?? selectedPurchase.orderId],
                     ['订单日期', summary?.order_date],
-                    ['客户单位', summary?.customer_unit_name],
+                    ['客户单位名称', summary?.customer_unit_name],
                     ['客户经理', summary?.account_manager ?? selectedPurchase.manager],
                     ['部门', summary?.department ?? selectedPurchase.department],
-                    ['货物名称', summary?.goods_name],
+                    ['物资/服务名称', summary?.goods_name],
                     ['规格型号', summary?.specification_model],
-                    ['订单金额', formatMoney(Number(summary?.order_value || 0))],
+                    ['销售订单金额', formatMoney(Number(summary?.order_value || 0))],
                   ]} />
 
                   <InfoSection title="采购信息" items={[
-                    ['供应商', summary?.supplier_name ?? selectedPurchase.supplier],
-                    ['采购金额', formatMoney(Number(summary?.purchase_amount || selectedPurchase.invoiceAmount || 0))],
-                    ['不含税成本', formatMoney(Number(summary?.cost_no_tax || 0))],
+                    ['采购厂商', summary?.supplier_name ?? selectedPurchase.supplier],
+                    ['采购税率', `${Number(summary?.purchase_tax_rate || 0)}%`],
+                    ['含税采购金额', formatMoney(Number(summary?.purchase_amount || selectedPurchase.invoiceAmount || 0))],
+                    ['不含税采购金额', formatMoney(Number(summary?.cost_no_tax || 0))],
+                    ['采购税金', formatMoney(Number(summary?.purchase_tax_amount || 0))],
+                    ['人工成本', formatMoney(Number(summary?.labor_cost || 0))],
+                    ['其他成本', formatMoney(Number(summary?.other_cost || 0))],
                     ['付款合计', formatMoney(Number(summary?.total_paid || selectedPurchase.paymentAmount || 0))],
-                    ['应付余额', formatMoney(Number(summary?.accounts_payable || 0))],
-                    ['毛利润', formatMoney(Number(summary?.gross_profit || 0))],
+                    ['应付账款（自动）', formatMoney(Number(summary?.accounts_payable || 0))],
+                    ['财务入账付款合计', formatMoney(Number(summary?.total_finance_paid || 0))],
+                    ['应付账款（财务账面）', formatMoney(Number(summary?.financial_accounts_payable || 0))],
+                    ['不含税毛利润', formatMoney(Number(summary?.gross_profit_no_tax || 0))],
+                    ['不含税毛利率', `${Number(summary?.gross_profit_margin_no_tax || 0).toFixed(2)}%`],
                   ]} />
 
                   <DataBlock title="采购合同" emptyText="暂无采购合同记录">
@@ -506,6 +588,40 @@ export default function PurchasesScreen({ purchases, canEnterPurchases, canEditP
                     ))}
                   </DataBlock>
 
+                  <DataBlock title="入库情况（市场 + 财务）" emptyText="暂无入库记录">
+                    {detail?.warehouse_entries.map((item) => (
+                      <RecordRow key={item.id} values={[
+                        ['期次', `第 ${item.phase_no} 期`],
+                        ['入库日期', item.warehouse_date_text || item.warehouse_date],
+                        ['凭证号', item.voucher_no],
+                        ['入库成本金额（含税）', formatMoney(item.warehouse_amount)],
+                        ['入库成本（不含税）', formatMoney(item.warehouse_amount_no_tax)],
+                      ]} actions={<RecordActions canEdit={canEditPurchases} canDelete={canDeletePurchases} onEdit={() => openEditEntry('warehouse', item)} onDelete={() => handleDeleteEntry('warehouse', item.id)} />} />
+                    ))}
+                  </DataBlock>
+
+                  <DataBlock title="发票校验（财务入账）" emptyText="暂无发票校验记录">
+                    {detail?.finance_invoice_checks.map((item) => (
+                      <RecordRow key={item.id} values={[
+                        ['期次', `第 ${item.phase_no} 期`],
+                        ['收票日期', item.received_invoice_date_text || item.received_invoice_date],
+                        ['收票金额', formatMoney(item.received_invoice_amount)],
+                        ['凭证编码', item.voucher_code],
+                      ]} actions={<RecordActions canEdit={canEditPurchases} canDelete={canDeletePurchases} onEdit={() => openEditEntry('financeCheck', item)} onDelete={() => handleDeleteEntry('financeCheck', item.id)} />} />
+                    ))}
+                  </DataBlock>
+
+                  <DataBlock title="付款情况（财务入账）" emptyText="暂无财务入账付款记录">
+                    {detail?.finance_payments.map((item) => (
+                      <RecordRow key={item.id} values={[
+                        ['期次', `第 ${item.phase_no} 期`],
+                        ['付款日期', item.payment_date_text || item.payment_date],
+                        ['凭证编码', item.voucher_code],
+                        ['入账金额', formatMoney(item.booked_amount)],
+                      ]} actions={<RecordActions canEdit={canEditPurchases} canDelete={canDeletePurchases} onEdit={() => openEditEntry('financePayment', item)} onDelete={() => handleDeleteEntry('financePayment', item.id)} />} />
+                    ))}
+                  </DataBlock>
+
                   <DataBlock title="付款情况" emptyText="暂无付款记录">
                     {detail?.payments.map((item) => (
                       <RecordRow key={item.id} values={[
@@ -528,6 +644,9 @@ export default function PurchasesScreen({ purchases, canEnterPurchases, canEditP
                   {canEnterPurchases && <div className="flex flex-wrap justify-end gap-2 pt-2 border-t border-slate-100">
                     <EntryButton icon={<FileText className="w-4 h-4" />} label="录入采购合同" onClick={() => openCreateEntry('contract')} />
                     <EntryButton icon={<ReceiptText className="w-4 h-4" />} label="录入收票情况" onClick={() => openCreateEntry('invoice')} />
+                    <EntryButton icon={<FileText className="w-4 h-4" />} label="录入入库情况" onClick={() => openCreateEntry('warehouse')} />
+                    <EntryButton icon={<ReceiptText className="w-4 h-4" />} label="录入发票校验" onClick={() => openCreateEntry('financeCheck')} />
+                    <EntryButton icon={<CreditCard className="w-4 h-4" />} label="录入财务付款" onClick={() => openCreateEntry('financePayment')} />
                     <EntryButton icon={<CreditCard className="w-4 h-4" />} label="录入付款情况" onClick={() => openCreateEntry('payment')} />
                   </div>}
                 </>
@@ -539,7 +658,7 @@ export default function PurchasesScreen({ purchases, canEnterPurchases, canEditP
             <div className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-900/50 p-4">
               <form onSubmit={handleEntrySubmit} className="bg-white rounded-xl shadow-2xl border border-slate-200 w-full max-w-xl overflow-hidden">
                 <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
-                  <h3 className="text-sm font-bold text-slate-900">{editingRecord ? '修改采购信息' : entryMode === 'contract' ? '录入采购合同' : entryMode === 'invoice' ? '录入收票情况' : `录入付款情况（第 ${nextPaymentPhase} 期）`}</h3>
+                  <h3 className="text-sm font-bold text-slate-900">{editingRecord ? '修改采购信息' : entryMode === 'contract' ? '录入采购合同' : entryMode === 'invoice' ? '录入收票情况' : entryMode === 'warehouse' ? '录入入库情况' : entryMode === 'financeCheck' ? '录入发票校验' : entryMode === 'financePayment' ? '录入财务入账付款' : `录入付款情况（第 ${nextPaymentPhase} 期）`}</h3>
                   <button type="button" onClick={() => { setEntryMode(null); setEditingRecord(null); }} className="p-1 text-slate-400 hover:text-slate-700">
                     <X className="w-5 h-5" />
                   </button>
@@ -559,6 +678,28 @@ export default function PurchasesScreen({ purchases, canEnterPurchases, canEditP
                       <FormInput label="收票日期" type="date" value={invoiceForm.received_invoice_date} onChange={(value) => setInvoiceForm({ ...invoiceForm, received_invoice_date: value })} />
                       <FormInput label="发票号码" value={invoiceForm.invoice_no} onChange={(value) => setInvoiceForm({ ...invoiceForm, invoice_no: value })} />
                       <FormInput label="收票金额" type="number" value={invoiceForm.invoice_amount} onChange={(value) => setInvoiceForm({ ...invoiceForm, invoice_amount: value })} className="sm:col-span-2" />
+                    </div>
+                  )}
+                  {entryMode === 'warehouse' && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <FormInput label="入库日期" type="date" value={warehouseForm.warehouse_date} onChange={(value) => setWarehouseForm({ ...warehouseForm, warehouse_date: value })} />
+                      <FormInput label="凭证号" value={warehouseForm.voucher_no} onChange={(value) => setWarehouseForm({ ...warehouseForm, voucher_no: value })} />
+                      <FormInput label="入库成本金额（含税）" type="number" value={warehouseForm.warehouse_amount} onChange={(value) => setWarehouseForm({ ...warehouseForm, warehouse_amount: value })} />
+                      <FormInput label="入库成本（不含税）" type="number" value={warehouseForm.warehouse_amount_no_tax} onChange={(value) => setWarehouseForm({ ...warehouseForm, warehouse_amount_no_tax: value })} />
+                    </div>
+                  )}
+                  {entryMode === 'financeCheck' && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <FormInput label="收票日期" type="date" value={financeCheckForm.received_invoice_date} onChange={(value) => setFinanceCheckForm({ ...financeCheckForm, received_invoice_date: value })} />
+                      <FormInput label="凭证编码" value={financeCheckForm.voucher_code} onChange={(value) => setFinanceCheckForm({ ...financeCheckForm, voucher_code: value })} />
+                      <FormInput label="收票金额" type="number" value={financeCheckForm.received_invoice_amount} onChange={(value) => setFinanceCheckForm({ ...financeCheckForm, received_invoice_amount: value })} className="sm:col-span-2" />
+                    </div>
+                  )}
+                  {entryMode === 'financePayment' && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <FormInput label="付款日期" type="date" value={financePaymentForm.payment_date} onChange={(value) => setFinancePaymentForm({ ...financePaymentForm, payment_date: value })} />
+                      <FormInput label="凭证编码" value={financePaymentForm.voucher_code} onChange={(value) => setFinancePaymentForm({ ...financePaymentForm, voucher_code: value })} />
+                      <FormInput label="入账金额" type="number" value={financePaymentForm.booked_amount} onChange={(value) => setFinancePaymentForm({ ...financePaymentForm, booked_amount: value })} className="sm:col-span-2" />
                     </div>
                   )}
                   {entryMode === 'payment' && (

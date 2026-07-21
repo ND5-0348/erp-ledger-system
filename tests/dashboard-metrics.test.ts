@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 
-import { getDashboardDepartments, getDashboardMetrics } from '../src/lib/dashboardMetrics';
+import { getDashboardDepartments, getDashboardMetrics, getDashboardSalesRanking } from '../src/lib/dashboardMetrics';
 import { OrderRecord, ProjectLedger } from '../src/types';
 
 const ledgers: ProjectLedger[] = [
@@ -49,6 +49,7 @@ const orders: OrderRecord[] = [
   {
     projectId: 'P-1',
     department: '科贸部',
+    teamName: '商贸集成团队',
     orderId: 'SO-1',
     orderDate: '2026-01-01',
     goodsName: '设备',
@@ -61,6 +62,7 @@ const orders: OrderRecord[] = [
   {
     projectId: 'P-2',
     department: '物流部',
+    teamName: '集客物流团队',
     orderId: 'SO-2',
     orderDate: '2026-01-02',
     goodsName: '材料',
@@ -73,6 +75,7 @@ const orders: OrderRecord[] = [
   {
     projectId: 'P-3',
     department: '科贸部',
+    teamName: '创新业务团队',
     orderId: 'SO-3',
     orderDate: '2026-01-03',
     goodsName: '服务',
@@ -84,7 +87,17 @@ const orders: OrderRecord[] = [
   },
 ];
 
-assert.deepEqual(getDashboardDepartments(ledgers), ['科贸部', '物流部']);
+assert.deepEqual(getDashboardDepartments(orders), ['科贸部', '物流部']);
+
+assert.deepEqual(getDashboardSalesRanking(orders, ''), [
+  { label: '科贸部', amount: 1300 },
+  { label: '物流部', amount: 500 },
+]);
+
+assert.deepEqual(getDashboardSalesRanking(orders, '科贸部'), [
+  { label: '商贸集成团队', amount: 1000 },
+  { label: '创新业务团队', amount: 300 },
+]);
 
 assert.deepEqual(getDashboardMetrics({ ledgers, orders, department: '' }), {
   totalOrderAmount: 1800,

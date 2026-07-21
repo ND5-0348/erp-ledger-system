@@ -6,8 +6,9 @@ import {
   ChevronLeft, 
   ChevronRight, 
   ShoppingBag,
-  Upload,
-  Download,
+  FileUp,
+  FileOutput,
+  FileSpreadsheet,
   Eye,
   Pencil,
   Trash2,
@@ -17,16 +18,20 @@ import { OrderRecord } from '../types';
 import {
   ORDER_DETAIL_TABLE_WIDTHS,
 } from '../lib/orderDetailTables';
-import { ORDER_IMPORT_TEMPLATE_CSV, parseOrderImportCsv } from '../lib/orderImportTemplate';
+import { calculateTaxAmounts, editableNumber } from '../lib/orderAmounts';
 import { applyOrderFilters, emptyOrderFilters, submitQueryFilters } from '../lib/queryFilterModel';
 
 interface OrderPurchaseEntry {
   id: string;
   supplier: string;
+  purchaseTaxRate?: number;
   netPurchaseUnitPrice?: number;
   purchaseUnitPrice?: number;
   netCost?: number;
   purchaseAmount?: number;
+  purchaseTaxAmount?: number;
+  laborCost?: number;
+  otherCost?: number;
 }
 
 interface OrderDeliveryEntry {
@@ -45,7 +50,9 @@ interface OrderDeliveryEntry {
 interface OrdersScreenProps {
   orders: OrderRecord[];
   onAddOrder: (order: OrderRecord) => Promise<void>;
-  onImportOrders: (orders: OrderRecord[]) => Promise<number>;
+  onImportExcel: (file: File) => Promise<number>;
+  onDownloadTemplate: () => Promise<Blob>;
+  onExportExcel: () => Promise<Blob>;
   onUpdateOrder: (target: OrderRecord, order: OrderRecord) => Promise<void>;
   onDeleteOrder: (target: OrderRecord) => Promise<void>;
   canEnterOrders: boolean;
@@ -60,7 +67,13 @@ function getPaginationItems(totalPages: number): Array<number | 'ellipsis'> {
   return [1, 2, 'ellipsis', totalPages - 1, totalPages];
 }
 
-export default function OrdersScreen({ orders, onAddOrder, onImportOrders, onUpdateOrder, onDeleteOrder, canEnterOrders, canEditOrders, canDeleteOrders }: OrdersScreenProps) {
+function optionalFormNumber(value: string) {
+  if (!value.trim()) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onDownloadTemplate, onExportExcel, onUpdateOrder, onDeleteOrder, canEnterOrders, canEditOrders, canDeleteOrders }: OrdersScreenProps) {
   // Query Filters State
   const [projectId, setProjectId] = useState('');
   const [orderId, setOrderId] = useState('');
@@ -103,20 +116,26 @@ export default function OrdersScreen({ orders, onAddOrder, onImportOrders, onUpd
     specModel: '',
     quantityVal: '',
     quantityUnit: '套',
+    salesTaxRate: '',
     netUnitPrice: '',
     unitPrice: '',
     netRevenue: '',
     orderValue: '',
+    salesTaxAmount: '',
     deliveredQty: '0',
     businessType: '咨询服务',
     clientUnit: ''
   });
   const [newPurchase, setNewPurchase] = useState({
     supplier: '',
+    purchaseTaxRate: '',
     netPurchaseUnitPrice: '',
     purchaseUnitPrice: '',
     netCost: '',
     purchaseAmount: '',
+    purchaseTaxAmount: '',
+    laborCost: '',
+    otherCost: '',
   });
   const [newDelivery, setNewDelivery] = useState({
     deliveryDate: new Date().toISOString().split('T')[0],
@@ -176,18 +195,25 @@ export default function OrdersScreen({ orders, onAddOrder, onImportOrders, onUpd
   const selectedOrderKey = selectedOrder ? `${selectedOrder.projectId}-${selectedOrder.orderId}` : '';
   const backendPurchase = selectedOrder && (
     selectedOrder.supplierName ||
+    selectedOrder.purchaseTaxRate ||
     selectedOrder.purchaseUnitPriceNoTax ||
     selectedOrder.purchaseUnitPrice ||
     selectedOrder.costNoTax ||
-    selectedOrder.purchaseAmount
+    selectedOrder.purchaseAmount ||
+    selectedOrder.laborCost ||
+    selectedOrder.otherCost
   )
     ? [{
         id: 'backend-purchase',
         supplier: selectedOrder.supplierName || '',
+        purchaseTaxRate: selectedOrder.purchaseTaxRate,
         netPurchaseUnitPrice: selectedOrder.purchaseUnitPriceNoTax,
         purchaseUnitPrice: selectedOrder.purchaseUnitPrice,
         netCost: selectedOrder.costNoTax,
         purchaseAmount: selectedOrder.purchaseAmount,
+        purchaseTaxAmount: selectedOrder.purchaseTaxAmount,
+        laborCost: selectedOrder.laborCost,
+        otherCost: selectedOrder.otherCost,
       }]
     : [];
   const backendDelivery = selectedOrder && (
@@ -225,7 +251,17 @@ export default function OrdersScreen({ orders, onAddOrder, onImportOrders, onUpd
   const canManageOrderRows = canEditOrders || canDeleteOrders;
 
   const resetNewPurchase = () => {
-    setNewPurchase({ supplier: '', netPurchaseUnitPrice: '', purchaseUnitPrice: '', netCost: '', purchaseAmount: '' });
+    setNewPurchase({
+      supplier: '',
+      purchaseTaxRate: '',
+      netPurchaseUnitPrice: '',
+      purchaseUnitPrice: '',
+      netCost: '',
+      purchaseAmount: '',
+      purchaseTaxAmount: '',
+      laborCost: '',
+      otherCost: '',
+    });
   };
 
   const resetNewDelivery = () => {
@@ -244,10 +280,14 @@ export default function OrdersScreen({ orders, onAddOrder, onImportOrders, onUpd
 
   const purchaseEntryToForm = (item: OrderPurchaseEntry) => ({
     supplier: item.supplier || '',
+    purchaseTaxRate: blank(item.purchaseTaxRate),
     netPurchaseUnitPrice: blank(item.netPurchaseUnitPrice),
     purchaseUnitPrice: blank(item.purchaseUnitPrice),
     netCost: blank(item.netCost),
     purchaseAmount: blank(item.purchaseAmount),
+    purchaseTaxAmount: blank(item.purchaseTaxAmount),
+    laborCost: blank(item.laborCost),
+    otherCost: blank(item.otherCost),
   });
 
   const deliveryEntryToForm = (item: OrderDeliveryEntry) => ({
@@ -288,10 +328,12 @@ export default function OrdersScreen({ orders, onAddOrder, onImportOrders, onUpd
       specModel: '',
       quantityVal: '',
       quantityUnit: '套',
+      salesTaxRate: '',
       netUnitPrice: '',
       unitPrice: '',
       netRevenue: '',
       orderValue: '',
+      salesTaxAmount: '',
       deliveredQty: '0',
       businessType: '咨询服务',
       clientUnit: '',
@@ -318,10 +360,12 @@ export default function OrdersScreen({ orders, onAddOrder, onImportOrders, onUpd
       specModel: order.specModel || '',
       quantityVal: quantityMatch ? quantityMatch[0] : '',
       quantityUnit: unit,
+      salesTaxRate: order.salesTaxRate === undefined ? '' : String(order.salesTaxRate),
       netUnitPrice: order.netUnitPrice === undefined ? '' : String(order.netUnitPrice),
       unitPrice: order.unitPrice === undefined ? '' : String(order.unitPrice),
       netRevenue: order.netRevenue === undefined ? '' : String(order.netRevenue),
       orderValue: String(order.orderValue || ''),
+      salesTaxAmount: order.salesTaxAmount === undefined ? '' : String(order.salesTaxAmount),
       deliveredQty: String(order.deliveredQty || 0),
       businessType: order.businessType,
       clientUnit: order.clientUnit,
@@ -346,18 +390,24 @@ export default function OrdersScreen({ orders, onAddOrder, onImportOrders, onUpd
     specModel: form.specModel,
     unitName: form.quantityUnit,
     quantity: `${form.quantityVal} ${form.quantityUnit}`,
-    netUnitPrice: parseFloat(form.netUnitPrice) || 0,
-    unitPrice: parseFloat(form.unitPrice) || 0,
-    netRevenue: parseFloat(form.netRevenue) || 0,
+    salesTaxRate: optionalFormNumber(form.salesTaxRate),
+    netUnitPrice: optionalFormNumber(form.netUnitPrice),
+    unitPrice: optionalFormNumber(form.unitPrice),
+    netRevenue: optionalFormNumber(form.netRevenue),
     orderValue: parseFloat(form.orderValue) || 0,
+    salesTaxAmount: optionalFormNumber(form.salesTaxAmount),
     deliveredQty: parseFloat(form.deliveredQty) || 0,
     businessType: form.businessType,
     clientUnit: form.clientUnit,
     supplierName: existing?.supplierName,
+    purchaseTaxRate: existing?.purchaseTaxRate,
     purchaseUnitPriceNoTax: existing?.purchaseUnitPriceNoTax,
     purchaseUnitPrice: existing?.purchaseUnitPrice,
     costNoTax: existing?.costNoTax,
     purchaseAmount: existing?.purchaseAmount,
+    purchaseTaxAmount: existing?.purchaseTaxAmount,
+    laborCost: existing?.laborCost,
+    otherCost: existing?.otherCost,
     deliveryDate: existing?.deliveryDate,
     deliveryRevenueNoTax: existing?.deliveryRevenueNoTax,
     deliveryValue: existing?.deliveryValue,
@@ -367,6 +417,41 @@ export default function OrdersScreen({ orders, onAddOrder, onImportOrders, onUpd
     pendingDeliveryAmountNoTax: existing?.pendingDeliveryAmountNoTax,
     pendingDeliveryAmount: existing?.pendingDeliveryAmount,
   });
+
+  const updateSalesCalculation = (updates: Partial<typeof newOrder>) => {
+    const next = { ...newOrder, ...updates };
+    const calculated = calculateTaxAmounts({
+      quantity: next.quantityVal,
+      taxRate: next.salesTaxRate,
+      unitPriceNoTax: next.netUnitPrice,
+      unitPrice: next.unitPrice,
+    });
+    setNewOrder({
+      ...next,
+      unitPrice: editableNumber(calculated.unitPrice),
+      netRevenue: editableNumber(calculated.amountNoTax, 2),
+      orderValue: editableNumber(calculated.amount, 2),
+      salesTaxAmount: editableNumber(calculated.taxAmount, 2),
+    });
+  };
+
+  const updatePurchaseCalculation = (updates: Partial<typeof newPurchase>) => {
+    const next = { ...newPurchase, ...updates };
+    const quantity = Number(String(selectedOrder?.quantity || '').match(/[\d.]+/)?.[0] || 0);
+    const calculated = calculateTaxAmounts({
+      quantity,
+      taxRate: next.purchaseTaxRate,
+      unitPriceNoTax: next.netPurchaseUnitPrice,
+      unitPrice: next.purchaseUnitPrice,
+    });
+    setNewPurchase({
+      ...next,
+      purchaseUnitPrice: editableNumber(calculated.unitPrice),
+      netCost: editableNumber(calculated.amountNoTax, 2),
+      purchaseAmount: editableNumber(calculated.amount, 2),
+      purchaseTaxAmount: editableNumber(calculated.taxAmount, 2),
+    });
+  };
 
   // Form submit handler
   const handleSubmit = async (e: React.FormEvent) => {
@@ -430,30 +515,38 @@ export default function OrdersScreen({ orders, onAddOrder, onImportOrders, onUpd
     }
   };
 
-  const handleDownloadTemplate = () => {
-    const blob = new Blob([`\uFEFF${ORDER_IMPORT_TEMPLATE_CSV}`], { type: 'text/csv;charset=utf-8' });
+  const downloadBlob = (blob: Blob, fileName: string) => {
     const url = window.URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = '订单批量导入模板.csv';
+    link.download = fileName;
     link.click();
     window.URL.revokeObjectURL(url);
+  };
+
+  const handleDownloadTemplate = async () => {
+    try {
+      downloadBlob(await onDownloadTemplate(), '市场部业务台账模板.xlsx');
+    } catch (error) {
+      alert(error instanceof Error ? error.message : '模板下载失败');
+    }
+  };
+
+  const handleExportExcel = async () => {
+    try {
+      downloadBlob(await onExportExcel(), '市场部业务台账.xlsx');
+    } catch (error) {
+      alert(error instanceof Error ? error.message : '台账导出失败');
+    }
   };
 
   const handleBatchImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
-    const content = await file.text();
-    const importedOrders = parseOrderImportCsv(content, new Date().toISOString().split('T')[0]);
-    if (importedOrders.length === 0) {
-      event.target.value = '';
-      alert('导入文件中没有有效订单。');
-      return;
-    }
     try {
-      const created = await onImportOrders(importedOrders);
+      const created = await onImportExcel(file);
       setCurrentPage(1);
-      alert(`批量导入完成：成功导入 ${created} 条客户订单。`);
+      alert(`批量导入完成：成功导入 ${created} 条业务台账明细。`);
     } catch (error) {
       alert(error instanceof Error ? error.message : '批量导入失败，未写入任何数据');
     } finally {
@@ -470,20 +563,28 @@ export default function OrdersScreen({ orders, onAddOrder, onImportOrders, onUpd
     const entry: OrderPurchaseEntry = {
       id: `purchase-${Date.now()}`,
       supplier: newPurchase.supplier,
-      netPurchaseUnitPrice: parseFloat(newPurchase.netPurchaseUnitPrice) || 0,
-      purchaseUnitPrice: parseFloat(newPurchase.purchaseUnitPrice) || 0,
-      netCost: parseFloat(newPurchase.netCost) || 0,
-      purchaseAmount: parseFloat(newPurchase.purchaseAmount) || 0,
+      purchaseTaxRate: optionalFormNumber(newPurchase.purchaseTaxRate),
+      netPurchaseUnitPrice: optionalFormNumber(newPurchase.netPurchaseUnitPrice),
+      purchaseUnitPrice: optionalFormNumber(newPurchase.purchaseUnitPrice),
+      netCost: optionalFormNumber(newPurchase.netCost),
+      purchaseAmount: optionalFormNumber(newPurchase.purchaseAmount),
+      purchaseTaxAmount: optionalFormNumber(newPurchase.purchaseTaxAmount),
+      laborCost: optionalFormNumber(newPurchase.laborCost),
+      otherCost: optionalFormNumber(newPurchase.otherCost),
     };
 
     if (editingPurchaseId === 'backend-purchase') {
       const updatedOrder: OrderRecord = {
         ...selectedOrder,
         supplierName: entry.supplier,
+        purchaseTaxRate: entry.purchaseTaxRate,
         purchaseUnitPriceNoTax: entry.netPurchaseUnitPrice,
         purchaseUnitPrice: entry.purchaseUnitPrice,
         costNoTax: entry.netCost,
         purchaseAmount: entry.purchaseAmount,
+        purchaseTaxAmount: entry.purchaseTaxAmount,
+        laborCost: entry.laborCost,
+        otherCost: entry.otherCost,
       };
       try {
         await onUpdateOrder(selectedOrder, updatedOrder);
@@ -657,8 +758,8 @@ export default function OrdersScreen({ orders, onAddOrder, onImportOrders, onUpd
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900 font-sans">订单详情列表</h1>
-          <p className="text-sm text-slate-500 font-sans mt-1">查看和管理全平台的客户订单与项目进度详情</p>
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900 font-sans">基本信息列表</h1>
+          <p className="text-sm text-slate-500 font-sans mt-1">查看和管理客户订单的基础业务信息</p>
         </div>
         <div className="flex items-center gap-2 self-start sm:self-center">
           <button
@@ -666,15 +767,23 @@ export default function OrdersScreen({ orders, onAddOrder, onImportOrders, onUpd
             onClick={handleDownloadTemplate}
             className="flex items-center gap-1.5 px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-lg shadow-sm transition-all text-xs font-semibold"
           >
-            <Download className="w-4 h-4 text-slate-400" />
+            <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
             <span>下载模板</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleExportExcel}
+            className="flex items-center gap-1.5 px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-lg shadow-sm transition-all text-xs font-semibold"
+          >
+            <FileOutput className="w-4 h-4 text-blue-600" />
+            <span>导出台账</span>
           </button>
           {canEnterOrders && (
             <>
               <label className="flex items-center gap-1.5 px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-lg shadow-sm transition-all text-xs font-semibold cursor-pointer">
-                <Upload className="w-4 h-4 text-slate-400" />
+                <FileUp className="w-4 h-4 text-blue-600" />
                 <span>批量导入</span>
-                <input type="file" accept=".csv,text/csv" onChange={handleBatchImport} className="hidden" />
+                <input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={handleBatchImport} className="hidden" />
               </label>
               <button 
                 onClick={() => {
@@ -709,10 +818,10 @@ export default function OrdersScreen({ orders, onAddOrder, onImportOrders, onUpd
 
           {/* Order ID */}
           <div className="space-y-1.5">
-            <label className="text-xs font-medium text-slate-500">订单号</label>
+            <label className="text-xs font-medium text-slate-500">销售订单号</label>
             <input 
               type="text" 
-              placeholder="输入订单号"
+              placeholder="输入销售订单号"
               value={orderId}
               onChange={e => setOrderId(e.target.value)}
               className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-xs text-slate-700"
@@ -745,7 +854,7 @@ export default function OrdersScreen({ orders, onAddOrder, onImportOrders, onUpd
 
           {/* Client Unit */}
           <div className="space-y-1.5">
-            <label className="text-xs font-medium text-slate-500">客户单位</label>
+            <label className="text-xs font-medium text-slate-500">客户单位名称</label>
             <input 
               type="text" 
               placeholder="输入客户名称"
@@ -814,11 +923,11 @@ export default function OrdersScreen({ orders, onAddOrder, onImportOrders, onUpd
             <thead>
               <tr className="bg-slate-50/75 border-b border-slate-200">
                 <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 w-[140px]">项目编号</th>
-                <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 w-[160px]">订单号</th>
+                <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 w-[160px]">销售订单号</th>
                 <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 w-[120px]">订单日期</th>
-                <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 w-[240px]">货物名称</th>
+                <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 w-[240px]">物资/服务名称</th>
                 <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 text-center w-[90px]">数量</th>
-                <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 text-right w-[140px]">订单价值</th>
+                <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 text-right w-[140px]">销售订单金额</th>
                 <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 text-center w-[90px]">交付数量</th>
                 <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 text-center w-[132px]">操作</th>
               </tr>
@@ -950,7 +1059,7 @@ export default function OrdersScreen({ orders, onAddOrder, onImportOrders, onUpd
                   setActiveEntryModal(null);
                 }}
                 className="inline-flex items-center justify-center w-8 h-8 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
-                aria-label="关闭订单详情"
+                aria-label="关闭基本信息"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -973,16 +1082,18 @@ export default function OrdersScreen({ orders, onAddOrder, onImportOrders, onUpd
                     ['客户单位名称', selectedOrder.clientUnit],
                     ['用户', selectedOrder.userName || ''],
                     ['区域平台', selectedOrder.regionalPlatform || ''],
-                    ['订单号', selectedOrder.orderId],
+                    ['销售订单号', selectedOrder.orderId],
                     ['项目名称', selectedOrder.projectName || ''],
-                    ['货物名称', selectedOrder.goodsName],
+                    ['物资/服务名称', selectedOrder.goodsName],
                     ['规格型号', selectedOrder.specModel || ''],
                     ['单位', selectedOrder.unitName || selectedOrder.quantity.replace(/^[\d.]+\s*/, '') || ''],
                     ['数量', selectedOrder.quantity],
-                    ['不含税单价', formatOptionalMoney(selectedOrder.netUnitPrice)],
-                    ['单价', formatOptionalMoney(selectedOrder.unitPrice)],
-                    ['不含税收入', formatOptionalMoney(selectedOrder.netRevenue)],
-                    ['订单价值', `¥${formatMoney(selectedOrder.orderValue)}`],
+                    ['销售税率', selectedOrder.salesTaxRate === undefined ? '' : `${selectedOrder.salesTaxRate}%`],
+                    ['不含税销售单价', formatOptionalMoney(selectedOrder.netUnitPrice)],
+                    ['销售单价', formatOptionalMoney(selectedOrder.unitPrice)],
+                    ['不含税订单金额', formatOptionalMoney(selectedOrder.netRevenue)],
+                    ['销售税金', formatOptionalMoney(selectedOrder.salesTaxAmount)],
+                    ['销售订单金额', `¥${formatMoney(selectedOrder.orderValue)}`],
                   ].map(([label, value]) => (
                     <div key={label} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
                       <p className="text-[11px] font-medium text-slate-400">{label}</p>
@@ -1001,26 +1112,34 @@ export default function OrdersScreen({ orders, onAddOrder, onImportOrders, onUpd
                     <thead className="bg-slate-50 text-xs text-slate-500">
                       <tr>
                         <th className="px-4 py-2 font-semibold whitespace-nowrap">采购厂商</th>
+                        <th className="px-4 py-2 font-semibold text-right whitespace-nowrap">采购税率</th>
                         <th className="px-4 py-2 font-semibold text-right whitespace-nowrap">不含税采购单价</th>
                         <th className="px-4 py-2 font-semibold text-right whitespace-nowrap">采购单价</th>
-                        <th className="px-4 py-2 font-semibold text-right whitespace-nowrap">不含税成本</th>
-                        <th className="px-4 py-2 font-semibold text-right whitespace-nowrap">采购金额</th>
+                        <th className="px-4 py-2 font-semibold text-right whitespace-nowrap">不含税采购金额</th>
+                        <th className="px-4 py-2 font-semibold text-right whitespace-nowrap">含税采购金额</th>
+                        <th className="px-4 py-2 font-semibold text-right whitespace-nowrap">采购税金</th>
+                        <th className="px-4 py-2 font-semibold text-right whitespace-nowrap">人工成本</th>
+                        <th className="px-4 py-2 font-semibold text-right whitespace-nowrap">其他成本</th>
                         {canManageOrderRows && <th className="px-4 py-2 font-semibold text-right whitespace-nowrap">操作</th>}
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
                       {selectedPurchases.length === 0 ? (
                         <tr>
-                          <td colSpan={canManageOrderRows ? 6 : 5} className="px-4 py-6 text-center text-xs text-slate-400">暂无采购信息</td>
+                          <td colSpan={canManageOrderRows ? 11 : 10} className="px-4 py-6 text-center text-xs text-slate-400">暂无采购信息</td>
                         </tr>
                       ) : (
                         selectedPurchases.map((item) => (
                           <tr key={item.id} className="text-xs text-slate-700">
                             <td className="px-4 py-2 whitespace-nowrap">{item.supplier}</td>
+                            <td className="px-4 py-2 text-right font-mono whitespace-nowrap">{item.purchaseTaxRate === undefined ? '' : `${item.purchaseTaxRate}%`}</td>
                             <td className="px-4 py-2 text-right font-mono whitespace-nowrap">{formatOptionalMoney(item.netPurchaseUnitPrice)}</td>
                             <td className="px-4 py-2 text-right font-mono whitespace-nowrap">{formatOptionalMoney(item.purchaseUnitPrice)}</td>
                             <td className="px-4 py-2 text-right font-mono whitespace-nowrap">{formatOptionalMoney(item.netCost)}</td>
                             <td className="px-4 py-2 text-right font-mono whitespace-nowrap">{formatOptionalMoney(item.purchaseAmount)}</td>
+                            <td className="px-4 py-2 text-right font-mono whitespace-nowrap">{formatOptionalMoney(item.purchaseTaxAmount)}</td>
+                            <td className="px-4 py-2 text-right font-mono whitespace-nowrap">{formatOptionalMoney(item.laborCost)}</td>
+                            <td className="px-4 py-2 text-right font-mono whitespace-nowrap">{formatOptionalMoney(item.otherCost)}</td>
                             {canManageOrderRows && (
                               <td className="px-4 py-2">
                                 <div className="flex items-center justify-end gap-1">
@@ -1161,20 +1280,36 @@ export default function OrdersScreen({ orders, onAddOrder, onImportOrders, onUpd
                   <input required value={newPurchase.supplier} onChange={e => setNewPurchase({...newPurchase, supplier: e.target.value})} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500" />
                 </div>
                 <div className="space-y-1">
+                  <label className="text-xs font-semibold text-slate-600">采购税率 (%)</label>
+                  <input type="number" min="0" max="100" step="0.000001" value={newPurchase.purchaseTaxRate} onChange={e => updatePurchaseCalculation({ purchaseTaxRate: e.target.value })} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500" />
+                </div>
+                <div className="space-y-1">
                   <label className="text-xs font-semibold text-slate-600">不含税采购单价</label>
-                  <input type="number" value={newPurchase.netPurchaseUnitPrice} onChange={e => setNewPurchase({...newPurchase, netPurchaseUnitPrice: e.target.value})} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500" />
+                  <input type="number" min="0" step="0.000001" value={newPurchase.netPurchaseUnitPrice} onChange={e => updatePurchaseCalculation({ netPurchaseUnitPrice: e.target.value })} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500" />
                 </div>
                 <div className="space-y-1">
                   <label className="text-xs font-semibold text-slate-600">采购单价</label>
-                  <input type="number" value={newPurchase.purchaseUnitPrice} onChange={e => setNewPurchase({...newPurchase, purchaseUnitPrice: e.target.value})} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500" />
+                  <input type="number" readOnly value={newPurchase.purchaseUnitPrice} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs bg-slate-50 text-slate-600" />
                 </div>
                 <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-600">不含税成本</label>
-                  <input type="number" value={newPurchase.netCost} onChange={e => setNewPurchase({...newPurchase, netCost: e.target.value})} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500" />
+                  <label className="text-xs font-semibold text-slate-600">不含税采购金额</label>
+                  <input type="number" readOnly value={newPurchase.netCost} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs bg-slate-50 text-slate-600" />
                 </div>
                 <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-600">采购金额</label>
-                  <input type="number" value={newPurchase.purchaseAmount} onChange={e => setNewPurchase({...newPurchase, purchaseAmount: e.target.value})} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500" />
+                  <label className="text-xs font-semibold text-slate-600">含税采购金额</label>
+                  <input type="number" readOnly value={newPurchase.purchaseAmount} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs bg-slate-50 text-slate-600" />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-semibold text-slate-600">采购税金</label>
+                  <input type="number" readOnly value={newPurchase.purchaseTaxAmount} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs bg-slate-50 text-slate-600" />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-semibold text-slate-600">人工成本</label>
+                  <input type="number" min="0" value={newPurchase.laborCost} onChange={e => setNewPurchase({...newPurchase, laborCost: e.target.value})} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500" />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-semibold text-slate-600">其他成本</label>
+                  <input type="number" min="0" value={newPurchase.otherCost} onChange={e => setNewPurchase({...newPurchase, otherCost: e.target.value})} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500" />
                 </div>
               </div>
               <div className="flex justify-end gap-2 pt-4 border-t border-slate-100">
@@ -1281,7 +1416,7 @@ export default function OrdersScreen({ orders, onAddOrder, onImportOrders, onUpd
 
                 {/* Order Id */}
                 <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-600">订单号 *</label>
+                  <label className="text-xs font-semibold text-slate-600">销售订单号 *</label>
                   <input 
                     type="text" 
                     required
@@ -1413,7 +1548,7 @@ export default function OrdersScreen({ orders, onAddOrder, onImportOrders, onUpd
 
                 {/* Goods Name */}
                 <div className="lg:col-span-2 space-y-1">
-                  <label className="text-xs font-semibold text-slate-600">货物名称 *</label>
+                  <label className="text-xs font-semibold text-slate-600">物资/服务名称 *</label>
                   <input 
                     type="text" 
                     required
@@ -1443,7 +1578,7 @@ export default function OrdersScreen({ orders, onAddOrder, onImportOrders, onUpd
                       required
                       placeholder="1"
                       value={newOrder.quantityVal}
-                      onChange={e => setNewOrder({...newOrder, quantityVal: e.target.value})}
+                      onChange={e => updateSalesCalculation({ quantityVal: e.target.value })}
                       className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500"
                     />
                     <select 
@@ -1462,44 +1597,69 @@ export default function OrdersScreen({ orders, onAddOrder, onImportOrders, onUpd
 
                 {/* Order Value */}
                 <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-600">订单价值 (元) *</label>
+                  <label className="text-xs font-semibold text-slate-600">销售订单金额 (元) *</label>
                   <input 
                     type="number" 
                     required
+                    readOnly
                     placeholder="0.00"
                     value={newOrder.orderValue}
-                    onChange={e => setNewOrder({...newOrder, orderValue: e.target.value})}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs bg-slate-50 text-slate-600"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-xs font-semibold text-slate-600">销售税率 (%)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value={newOrder.salesTaxRate}
+                    onChange={e => updateSalesCalculation({ salesTaxRate: e.target.value })}
                     className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500"
                   />
                 </div>
 
                 <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-600">不含税单价</label>
+                  <label className="text-xs font-semibold text-slate-600">不含税销售单价</label>
                   <input
                     type="number"
+                    min="0"
+                    step="0.000001"
                     value={newOrder.netUnitPrice}
-                    onChange={e => setNewOrder({...newOrder, netUnitPrice: e.target.value})}
+                    onChange={e => updateSalesCalculation({ netUnitPrice: e.target.value })}
                     className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500"
                   />
                 </div>
 
                 <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-600">单价</label>
+                  <label className="text-xs font-semibold text-slate-600">销售单价</label>
                   <input
                     type="number"
+                    readOnly
                     value={newOrder.unitPrice}
-                    onChange={e => setNewOrder({...newOrder, unitPrice: e.target.value})}
-                    className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500"
+                    className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs bg-slate-50 text-slate-600"
                   />
                 </div>
 
                 <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-600">不含税收入</label>
+                  <label className="text-xs font-semibold text-slate-600">不含税订单金额</label>
                   <input
                     type="number"
+                    readOnly
                     value={newOrder.netRevenue}
-                    onChange={e => setNewOrder({...newOrder, netRevenue: e.target.value})}
-                    className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500"
+                    className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs bg-slate-50 text-slate-600"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-xs font-semibold text-slate-600">销售税金</label>
+                  <input
+                    type="number"
+                    readOnly
+                    value={newOrder.salesTaxAmount}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs bg-slate-50 text-slate-600"
                   />
                 </div>
 

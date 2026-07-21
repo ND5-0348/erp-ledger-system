@@ -4,14 +4,14 @@
 
 export interface ProjectLedger {
   id: string; // 项目编号 (e.g. PJ-2023-001)
-  clientUnit: string; // 客户单位
+  clientUnit: string; // 客户单位名称
   projectName: string; // 项目名称
-  orderAmount: number; // 订单金额
-  purchaseAmount: number; // 采购金额
+  orderAmount: number; // 销售订单金额
+  purchaseAmount: number; // 含税采购金额
   totalReceived: number; // 回款合计
   department: string; // 部门
   manager: string; // 客户经理
-  orderId: string; // 订单号
+  orderId: string; // 销售订单号
   orderStatus: string; // 订单状态
   orderDate: string; // 订单日期
 }
@@ -23,29 +23,35 @@ export interface OrderRecord {
   department?: string; // 部门
   branchCompany?: string; // 分公司
   manager?: string; // 客户经理
-  orderId: string; // 订单号
+  orderId: string; // 销售订单号
   orderDate: string; // 订单日期
   statisticalCategory?: string; // 统计类别
   teamName?: string; // 三级团队名称
-  goodsName: string; // 货物名称
+  goodsName: string; // 物资/服务名称
   projectName?: string; // 项目名称
   userName?: string; // 用户
   regionalPlatform?: string; // 区域平台
   specModel?: string; // 规格型号
   unitName?: string; // 单位
   quantity: string; // 数量 (e.g. "1 套", "5 节点")
-  netUnitPrice?: number; // 不含税单价
-  unitPrice?: number; // 单价
-  netRevenue?: number; // 不含税收入
-  orderValue: number; // 订单价值 (订单金额)
+  salesTaxRate?: number; // 销售税率（百分数）
+  netUnitPrice?: number; // 不含税销售单价
+  unitPrice?: number; // 销售单价
+  netRevenue?: number; // 不含税订单金额
+  orderValue: number; // 销售订单金额
+  salesTaxAmount?: number; // 销售税金
   deliveredQty: number; // 交付数量
   businessType: string; // 业务类型
-  clientUnit: string; // 客户单位
+  clientUnit: string; // 客户单位名称
   supplierName?: string; // 采购厂商
+  purchaseTaxRate?: number; // 采购税率（百分数）
   purchaseUnitPriceNoTax?: number; // 不含税采购单价
   purchaseUnitPrice?: number; // 采购单价
-  costNoTax?: number; // 不含税成本
-  purchaseAmount?: number; // 采购金额
+  costNoTax?: number; // 不含税采购金额
+  purchaseAmount?: number; // 含税采购金额
+  purchaseTaxAmount?: number; // 采购税金
+  laborCost?: number; // 人工成本（预留）
+  otherCost?: number; // 其他成本（预留）
   deliveryDate?: string; // 交付日期
   deliveryRevenueNoTax?: number; // 交付不含税收入
   deliveryValue?: number; // 交付价值
@@ -59,31 +65,32 @@ export interface OrderRecord {
 export interface PurchaseRecord {
   orderLineId?: number; // 订单明细ID
   projectId: string; // 项目编号
-  orderId: string; // 订单号
+  orderId: string; // 销售订单号
   manager: string; // 客户经理
   department: string; // 部门
   contractNo: string; // 公司合同号
   contractAmount: number; // 合同金额
   invoiceAmount: number; // 收票金额
   paymentAmount: number; // 付款金额
-  supplier: string; // 供应商
+  supplier: string; // 采购厂商
   paymentDate?: string; // 付款/回款时间
 }
 
 export interface SalesRecord {
   orderLineId?: number; // 订单明细ID
   projectId: string; // 项目编号
-  orderId: string; // 订单号
+  orderId: string; // 销售订单号
   manager: string; // 客户经理
   department: string; // 部门
   contractNo: string; // 公司合同号
   contractDate: string; // 合同签订日期
-  contractValue: number; // 合同价值
+  contractValue: number; // 合同金额
   invoiceAmount: number; // 开票金额
   totalReceived?: number; // 回款合计
   accountsReceivable?: number; // 应收款
-  supplierName?: string; // 采购厂家
+  supplierName?: string; // 采购厂商
   receiptDate?: string; // 回款时间
+  invoiceDates?: string[]; // 销售开票日期
 }
 
 export interface OperationLog {

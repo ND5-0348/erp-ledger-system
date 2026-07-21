@@ -184,6 +184,8 @@ CREATE TABLE IF NOT EXISTS purchase_info (
   purchase_unit_price DECIMAL(18,6) NULL,
   cost_no_tax DECIMAL(18,2) NULL,
   purchase_amount DECIMAL(18,2) NULL,
+  labor_cost DECIMAL(18,2) NULL,
+  other_cost DECIMAL(18,2) NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   deleted_at DATETIME NULL,
@@ -313,6 +315,26 @@ CREATE TABLE IF NOT EXISTS purchase_payment (
   CONSTRAINT fk_purchase_payment_line FOREIGN KEY (order_line_id) REFERENCES order_line(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
+CREATE TABLE IF NOT EXISTS finance_payment_entry (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  order_line_id BIGINT UNSIGNED NOT NULL,
+  phase_no INT UNSIGNED NOT NULL DEFAULT 1,
+  payment_date DATE NULL,
+  payment_date_text VARCHAR(255) NULL,
+  voucher_code VARCHAR(128) NULL,
+  booked_amount DECIMAL(18,2) NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  deleted_at DATETIME NULL,
+  active_phase_no INT GENERATED ALWAYS AS (CASE WHEN deleted_at IS NULL THEN phase_no ELSE NULL END) STORED,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_finance_payment_entry_active_phase (order_line_id, active_phase_no),
+  KEY idx_finance_payment_line_phase (order_line_id, phase_no),
+  KEY idx_finance_payment_date (payment_date),
+  KEY idx_finance_payment_voucher (voucher_code),
+  CONSTRAINT fk_finance_payment_entry_line FOREIGN KEY (order_line_id) REFERENCES order_line(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
 CREATE TABLE IF NOT EXISTS sales_contract (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   order_line_id BIGINT UNSIGNED NOT NULL,
@@ -396,24 +418,48 @@ SELECT
   ol.specification_model,
   ol.unit_name,
   ol.quantity,
+  ol.sales_tax_rate,
+  ol.sales_unit_price_no_tax,
+  ol.sales_unit_price,
   ol.revenue_no_tax,
   ol.order_value,
+  COALESCE(ol.order_value, 0) - COALESCE(ol.revenue_no_tax, 0) AS sales_tax_amount,
   pi.supplier_name,
+  pi.purchase_tax_rate,
+  pi.purchase_unit_price_no_tax,
+  pi.purchase_unit_price,
   pi.cost_no_tax,
   pi.purchase_amount,
+  COALESCE(pi.purchase_amount, 0) - COALESCE(pi.cost_no_tax, 0) AS purchase_tax_amount,
+  pi.labor_cost,
+  pi.other_cost,
+  dr.delivery_date,
   dr.delivery_quantity,
+  dr.delivery_revenue_no_tax,
   dr.delivery_value,
+  dr.delivery_cost_no_tax,
+  dr.delivery_cost,
+  dr.pending_delivery_quantity,
+  dr.pending_delivery_amount_no_tax,
+  dr.pending_delivery_amount,
   pc.purchase_contract_no,
   pc.signed_amount AS purchase_contract_signed_amount,
   sc.sales_contract_no,
   sc.contract_signed_date AS sales_contract_signed_date,
   sc.contract_value AS sales_contract_value,
   COALESCE(si_total.invoice_amount, 0) AS sales_invoice_amount,
+  COALESCE(fic_total.received_invoice_amount, 0) AS total_finance_checked,
+  COALESCE(fpe_total.booked_amount, 0) AS total_finance_paid,
   COALESCE(sr_total.receipt_amount, 0) AS total_received,
   COALESCE(pay_total.payment_amount, 0) AS total_paid,
   COALESCE(ol.order_value, 0) - COALESCE(sr_total.receipt_amount, 0) AS accounts_receivable,
   COALESCE(pi.purchase_amount, 0) - COALESCE(pay_total.payment_amount, 0) AS accounts_payable,
+  COALESCE(pi.purchase_amount, 0) - COALESCE(fpe_total.booked_amount, 0) AS financial_accounts_payable,
   COALESCE(ol.revenue_no_tax, 0) - COALESCE(pi.cost_no_tax, 0) AS gross_profit_no_tax,
+  CASE
+    WHEN COALESCE(ol.revenue_no_tax, 0) = 0 THEN 0
+    ELSE (COALESCE(ol.revenue_no_tax, 0) - COALESCE(pi.cost_no_tax, 0)) / ol.revenue_no_tax * 100
+  END AS gross_profit_margin_no_tax,
   COALESCE(ol.order_value, 0) - COALESCE(pi.purchase_amount, 0) AS gross_profit
 FROM project p
 JOIN sales_order so ON so.project_id = p.id AND so.deleted_at IS NULL
@@ -446,6 +492,18 @@ LEFT JOIN (
   GROUP BY order_line_id
 ) si_total ON si_total.order_line_id = ol.id
 LEFT JOIN (
+  SELECT order_line_id, SUM(COALESCE(received_invoice_amount, 0)) AS received_invoice_amount
+  FROM finance_invoice_check
+  WHERE deleted_at IS NULL
+  GROUP BY order_line_id
+) fic_total ON fic_total.order_line_id = ol.id
+LEFT JOIN (
+  SELECT order_line_id, SUM(COALESCE(booked_amount, 0)) AS booked_amount
+  FROM finance_payment_entry
+  WHERE deleted_at IS NULL
+  GROUP BY order_line_id
+) fpe_total ON fpe_total.order_line_id = ol.id
+LEFT JOIN (
   SELECT order_line_id, SUM(COALESCE(receipt_amount, 0)) AS receipt_amount
   FROM sales_receipt
   WHERE deleted_at IS NULL
@@ -473,6 +531,10 @@ SELECT
   COUNT(DISTINCT v.order_no) AS order_count,
   SUM(COALESCE(v.order_value, 0)) AS order_amount,
   SUM(COALESCE(v.purchase_amount, 0)) AS purchase_amount,
+  SUM(COALESCE(v.labor_cost, 0)) AS labor_cost,
+  SUM(COALESCE(v.other_cost, 0)) AS other_cost,
+  SUM(COALESCE(v.total_finance_paid, 0)) AS total_finance_paid,
+  SUM(COALESCE(v.financial_accounts_payable, 0)) AS financial_accounts_payable,
   SUM(COALESCE(v.total_received, 0)) AS total_received,
   SUM(COALESCE(v.accounts_receivable, 0)) AS accounts_receivable,
   SUM(COALESCE(v.accounts_payable, 0)) AS accounts_payable,
@@ -501,6 +563,10 @@ SELECT
   COUNT(v.order_line_id) AS line_count,
   SUM(COALESCE(v.order_value, 0)) AS order_amount,
   SUM(COALESCE(v.purchase_amount, 0)) AS purchase_amount,
+  SUM(COALESCE(v.labor_cost, 0)) AS labor_cost,
+  SUM(COALESCE(v.other_cost, 0)) AS other_cost,
+  SUM(COALESCE(v.total_finance_paid, 0)) AS total_finance_paid,
+  SUM(COALESCE(v.financial_accounts_payable, 0)) AS financial_accounts_payable,
   SUM(COALESCE(v.total_received, 0)) AS total_received,
   SUM(COALESCE(v.accounts_receivable, 0)) AS accounts_receivable,
   SUM(COALESCE(v.accounts_payable, 0)) AS accounts_payable,

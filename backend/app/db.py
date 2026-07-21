@@ -29,10 +29,15 @@ def _split_sql(sql: str) -> list[str]:
 def initialize_schema() -> None:
     schema_path = DOCS_DIR / "erp_ledger_schema.sql"
     statements = _split_sql(schema_path.read_text(encoding="utf-8"))
+    view_statements = [statement for statement in statements if statement.lstrip().upper().startswith(("DROP VIEW", "CREATE VIEW"))]
+    table_statements = [statement for statement in statements if statement not in view_statements]
     with server_engine.begin() as conn:
-        for statement in statements:
+        for statement in table_statements:
             conn.execute(text(statement))
     apply_runtime_migrations()
+    with engine.begin() as conn:
+        for statement in view_statements:
+            conn.execute(text(statement))
 
 
 def apply_runtime_migrations() -> None:
@@ -40,11 +45,42 @@ def apply_runtime_migrations() -> None:
         "purchase_invoice",
         "warehouse_entry",
         "finance_invoice_check",
+        "finance_payment_entry",
         "purchase_payment",
         "sales_invoice",
         "sales_receipt",
     ]
     with engine.begin() as conn:
+        additional_columns = {
+            "order_line": {
+                "sales_tax_rate": "DECIMAL(10,6) NULL",
+            },
+            "purchase_info": {
+                "purchase_tax_rate": "DECIMAL(10,6) NULL",
+                "labor_cost": "DECIMAL(18,2) NULL",
+                "other_cost": "DECIMAL(18,2) NULL",
+            },
+            "warehouse_entry": {
+                "warehouse_amount_no_tax": "DECIMAL(18,2) NULL",
+            },
+        }
+        for table_name, columns in additional_columns.items():
+            for column_name, definition in columns.items():
+                column_exists = conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(*)
+                        FROM information_schema.columns
+                        WHERE table_schema = DATABASE()
+                          AND table_name = :table_name
+                          AND column_name = :column_name
+                        """
+                    ),
+                    {"table_name": table_name, "column_name": column_name},
+                ).scalar()
+                if not column_exists:
+                    conn.execute(text(f"ALTER TABLE `{table_name}` ADD COLUMN `{column_name}` {definition}"))
+
         precise_columns = {
             "order_line": ["quantity"],
             "delivery_record": ["delivery_quantity", "pending_delivery_quantity"],

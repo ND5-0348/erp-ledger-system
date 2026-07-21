@@ -1,13 +1,14 @@
 from datetime import date
+from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
 
-from app.routers.orders import OrderUpdate
+from app.routers.orders import OrderUpdate, _calculated_payload_data
 from app.routers.purchases import PurchaseInvoiceCreate, PurchasePaymentCreate
 from app.routers.sales import SalesInvoiceCreate, SalesReceiptCreate
 from app.validation import validation_error_message
-from app.importer import _as_date
+from app.importer import _as_date, _as_tax_rate, _column_position, _is_latest_layout
 
 
 @pytest.mark.parametrize(
@@ -48,3 +49,36 @@ def test_valid_financial_values_are_normalized():
     order = OrderUpdate(order_date="2026-07-14", order_value="123.45")
     assert order.order_date == date(2026, 7, 14)
     assert str(order.order_value) == "123.45"
+
+
+def test_tax_rates_recalculate_unit_prices_and_amounts():
+    payload = OrderUpdate(
+        quantity="2.000000",
+        sales_tax_rate="13.000000",
+        net_unit_price="100.000000",
+        purchase_tax_rate="6.000000",
+        purchase_unit_price_no_tax="50.000000",
+    )
+    data = _calculated_payload_data(payload)
+    assert data["unit_price"] == Decimal("113.000000")
+    assert data["net_revenue"] == Decimal("200.00")
+    assert data["order_value"] == Decimal("226.00")
+    assert data["purchase_unit_price"] == Decimal("53.000000")
+    assert data["cost_no_tax"] == Decimal("100.00")
+    assert data["purchase_amount"] == Decimal("106.00")
+
+
+def test_excel_tax_rate_is_normalized_to_percent_value():
+    assert _as_tax_rate(Decimal("0.13")) == Decimal("13.00")
+    assert _as_tax_rate(Decimal("13")) == Decimal("13")
+    assert _as_tax_rate(Decimal("0")) == Decimal("0")
+
+
+def test_import_layout_detection_and_column_compatibility():
+    assert _is_latest_layout(["项目编号", "物资/服务名称", "销售税率"])
+    assert _is_latest_layout(["项目编号", "采购税率"])
+    assert not _is_latest_layout(["项目编号", "货物名称", "不含税单价"])
+
+    assert _column_position(True, 19, 0) == 19
+    assert _column_position(False, 20, 19) == 19
+    assert _column_position(False, 19) == 0

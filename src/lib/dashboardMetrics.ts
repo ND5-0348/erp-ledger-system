@@ -15,6 +15,11 @@ export interface DashboardMetrics {
   closedCount: number;
 }
 
+export interface DashboardRankingItem {
+  label: string;
+  amount: number;
+}
+
 function isClosedLedger(item: ProjectLedger) {
   const status = item.orderStatus.trim().toLowerCase();
   return ['closed', '已关闭', '关闭', '已闭合', '已结案'].includes(status);
@@ -24,10 +29,30 @@ function belongsToDepartment(department: string) {
   return (item: ProjectLedger | OrderRecord) => !department || item.department === department;
 }
 
-export function getDashboardDepartments(ledgers: ProjectLedger[]) {
-  return Array.from(new Set(ledgers.map((item) => item.department).filter(Boolean))).sort((a, b) =>
+export function getDashboardDepartments(items: Array<ProjectLedger | OrderRecord>) {
+  const departments = items
+    .map((item) => item.department?.trim())
+    .filter((department): department is string => Boolean(department));
+  return Array.from(new Set(departments)).sort((a, b) =>
     a.localeCompare(b, 'zh-CN'),
   );
+}
+
+export function getDashboardSalesRanking(orders: OrderRecord[], department: string): DashboardRankingItem[] {
+  const totals = new Map<string, number>();
+  orders.forEach((item) => {
+    if (department && item.department !== department) return;
+    const label = department
+      ? item.teamName?.trim() || '未登记三级团队'
+      : item.department?.trim() || '未登记部门';
+    totals.set(label, (totals.get(label) || 0) + Number(item.orderValue || 0));
+  });
+
+  return Array.from(totals.entries())
+    .map(([label, amount]) => ({ label, amount }))
+    .filter((item) => item.amount > 0)
+    .sort((a, b) => b.amount - a.amount || a.label.localeCompare(b.label, 'zh-CN'))
+    .slice(0, 5);
 }
 
 export function getDashboardMetrics({ ledgers, orders, department }: DashboardMetricsInput): DashboardMetrics {

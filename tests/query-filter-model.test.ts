@@ -118,6 +118,7 @@ const sales = [
     invoiceAmount: 20,
     supplierName: '供应商A',
     receiptDate: '2026-06-01',
+    invoiceDates: ['2026-06-05'],
   },
   {
     projectId: 'P-2',
@@ -130,6 +131,7 @@ const sales = [
     invoiceAmount: 40,
     supplierName: '供应商B',
     receiptDate: '2026-06-10',
+    invoiceDates: ['2026-06-10', '2026-07-10'],
   },
   {
     projectId: 'P-3',
@@ -142,6 +144,7 @@ const sales = [
     invoiceAmount: 60,
     supplierName: '供应商C',
     receiptDate: '2026-06-20',
+    invoiceDates: ['2026-06-20'],
   },
 ];
 
@@ -152,6 +155,20 @@ assert.equal(applyLedgerFilters(ledgers, submittedLedgerFilters).length, 2);
 submittedLedgerFilters = submitQueryFilters(draftLedgerFilters);
 assert.deepEqual(
   applyLedgerFilters(ledgers, submittedLedgerFilters).map((item) => item.id),
+  ['P-2'],
+);
+
+assert.deepEqual(
+  applyLedgerFilters(ledgers, { ...emptyLedgerFilters, supplierName: '供应商B' }, { purchases, sales }).map((item) => item.id),
+  ['P-2'],
+);
+
+assert.deepEqual(
+  applyLedgerFilters(
+    ledgers,
+    { ...emptyLedgerFilters, invoiceStartDate: '2026-07-01', invoiceEndDate: '2026-07-31' },
+    { purchases, sales },
+  ).map((item) => item.id),
   ['P-2'],
 );
 

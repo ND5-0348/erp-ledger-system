@@ -7,8 +7,11 @@ export type LedgerFilters = {
   clientUnit: string;
   orderId: string;
   orderStatus: string;
+  supplierName: string;
   startDate: string;
   endDate: string;
+  invoiceStartDate: string;
+  invoiceEndDate: string;
 };
 
 export type OrderFilters = {
@@ -51,8 +54,11 @@ export const emptyLedgerFilters: LedgerFilters = {
   clientUnit: '',
   orderId: '',
   orderStatus: '',
+  supplierName: '',
   startDate: '',
   endDate: '',
+  invoiceStartDate: '',
+  invoiceEndDate: '',
 };
 
 export const emptyOrderFilters: OrderFilters = {
@@ -105,7 +111,31 @@ function normalizeStatus(status: string) {
   return 'open';
 }
 
-export function applyLedgerFilters(ledgers: ProjectLedger[], filters: LedgerFilters) {
+export function applyLedgerFilters(
+  ledgers: ProjectLedger[],
+  filters: LedgerFilters,
+  related: { purchases?: PurchaseRecord[]; sales?: SalesRecord[] } = {},
+) {
+  const supplierProjectIds = filters.supplierName
+    ? new Set(
+        (related.purchases || [])
+          .filter((item) => item.supplier.toLowerCase().includes(filters.supplierName.toLowerCase()))
+          .map((item) => item.projectId),
+      )
+    : null;
+  const invoiceProjectIds = filters.invoiceStartDate || filters.invoiceEndDate
+    ? new Set(
+        (related.sales || [])
+          .filter((item) =>
+            (item.invoiceDates || []).some((date) =>
+              (!filters.invoiceStartDate || date >= filters.invoiceStartDate)
+              && (!filters.invoiceEndDate || date <= filters.invoiceEndDate),
+            ),
+          )
+          .map((item) => item.projectId),
+      )
+    : null;
+
   return ledgers.filter((item) => {
     if (filters.projectId && !item.id.toLowerCase().includes(filters.projectId.toLowerCase())) return false;
     if (filters.department && item.department !== filters.department) return false;
@@ -113,8 +143,10 @@ export function applyLedgerFilters(ledgers: ProjectLedger[], filters: LedgerFilt
     if (filters.clientUnit && !item.clientUnit.toLowerCase().includes(filters.clientUnit.toLowerCase())) return false;
     if (filters.orderId && !item.orderId.toLowerCase().includes(filters.orderId.toLowerCase())) return false;
     if (filters.orderStatus && normalizeStatus(item.orderStatus) !== filters.orderStatus) return false;
+    if (supplierProjectIds && !supplierProjectIds.has(item.id)) return false;
     if (filters.startDate && item.orderDate < filters.startDate) return false;
     if (filters.endDate && item.orderDate > filters.endDate) return false;
+    if (invoiceProjectIds && !invoiceProjectIds.has(item.id)) return false;
     return true;
   });
 }

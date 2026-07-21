@@ -156,7 +156,7 @@ export default function SalesScreen({ sales, canEnterSales, canEditSales, canDel
         : await api.salesDetailByOrder(item.projectId, item.orderId);
       setDetail(data);
     } catch (error) {
-      setDetailError(error instanceof Error ? error.message : '销售详情加载失败');
+      setDetailError(error instanceof Error ? error.message : '销售信息加载失败');
     } finally {
       setDetailLoading(false);
     }
@@ -301,7 +301,7 @@ export default function SalesScreen({ sales, canEnterSales, canEditSales, canDel
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900 font-sans">销售详情</h1>
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900 font-sans">销售信息</h1>
           <p className="text-sm text-slate-500 font-sans mt-1">核算与监控销售收入、合同账期与开票情况</p>
         </div>
       </div>
@@ -309,9 +309,9 @@ export default function SalesScreen({ sales, canEnterSales, canEditSales, canDel
       <section className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm space-y-4">
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
           <FilterInput label="项目编号" placeholder="输入项目编号" value={projectId} onChange={setProjectId} />
-          <FilterInput label="订单号" placeholder="输入订单号" value={orderId} onChange={setOrderId} />
+          <FilterInput label="销售订单号" placeholder="输入销售订单号" value={orderId} onChange={setOrderId} />
           <FilterInput label="客户经理" placeholder="请输入客户经理姓名" value={manager} onChange={setManager} />
-          <FilterInput label="采购厂家" placeholder="输入采购厂家" value={supplier} onChange={setSupplier} />
+          <FilterInput label="采购厂商" placeholder="输入采购厂商" value={supplier} onChange={setSupplier} />
           <FilterInput label="公司合同号" placeholder="输入公司合同号" value={contractNo} onChange={setContractNo} />
           <div className="space-y-1.5 md:col-span-2">
             <label className="text-xs font-medium text-slate-500">回款时间</label>
@@ -371,11 +371,11 @@ export default function SalesScreen({ sales, canEnterSales, canEditSales, canDel
             <thead>
               <tr className="bg-slate-50/75 border-b border-slate-200">
                 <TableHeader className="w-[140px]">项目编号</TableHeader>
-                <TableHeader className="w-[160px]">订单号</TableHeader>
+                <TableHeader className="w-[160px]">销售订单号</TableHeader>
                 <TableHeader className="w-[120px]">客户经理</TableHeader>
                 <TableHeader className="w-[140px]">公司合同号</TableHeader>
                 <TableHeader className="w-[120px]">合同签订日期</TableHeader>
-                <TableHeader className="text-right w-[140px]">合同价值</TableHeader>
+                <TableHeader className="text-right w-[140px]">合同金额</TableHeader>
                 <TableHeader className="text-right w-[140px]">开票金额</TableHeader>
                 <TableHeader className="text-center w-[80px]">操作</TableHeader>
               </tr>
@@ -396,7 +396,7 @@ export default function SalesScreen({ sales, canEnterSales, canEditSales, canDel
                     <td className="px-6 py-4 text-xs text-right font-mono font-medium text-slate-900">{formatMoney(item.contractValue)}</td>
                     <td className="px-6 py-4 text-xs text-right font-mono text-emerald-600 font-medium">{formatMoney(item.invoiceAmount)}</td>
                     <td className="px-6 py-4 text-center">
-                      <button type="button" onClick={() => loadDetail(item)} title="查看销售详情" aria-label={`查看销售 ${item.orderId} 的详情`} className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-blue-100 bg-blue-50 text-blue-600 hover:bg-blue-100 hover:border-blue-200 transition-colors">
+                      <button type="button" onClick={() => loadDetail(item)} title="查看销售信息" aria-label={`查看销售 ${item.orderId} 的信息`} className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-blue-100 bg-blue-50 text-blue-600 hover:bg-blue-100 hover:border-blue-200 transition-colors">
                         <Eye className="w-4 h-4" />
                       </button>
                     </td>
@@ -445,7 +445,7 @@ export default function SalesScreen({ sales, canEnterSales, canEditSales, canDel
             <div className="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
               <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
                 <Briefcase className="w-4 h-4 text-blue-600" />
-                <span>销售详情</span>
+                <span>销售信息</span>
               </h2>
               <button onClick={closeDetail} className="p-1 text-slate-400 hover:text-slate-700">
                 <X className="w-5 h-5" />
@@ -455,28 +455,33 @@ export default function SalesScreen({ sales, canEnterSales, canEditSales, canDel
             <div className="p-6 overflow-y-auto space-y-5">
               {detailError && <div className="px-4 py-3 rounded-lg bg-red-50 border border-red-100 text-xs text-red-600">{detailError}</div>}
               {detailLoading ? (
-                <div className="py-16 text-center text-sm text-slate-400">正在加载销售详情...</div>
+                <div className="py-16 text-center text-sm text-slate-400">正在加载销售信息...</div>
               ) : (
                 <>
                   <InfoSection title="当前订单信息" items={[
                     ['项目编号', summary?.project_code ?? selectedSale.projectId],
                     ['项目名称', summary?.project_name],
-                    ['订单号', summary?.order_no ?? selectedSale.orderId],
+                    ['销售订单号', summary?.order_no ?? selectedSale.orderId],
                     ['订单日期', summary?.order_date],
-                    ['客户单位', summary?.customer_unit_name],
+                    ['客户单位名称', summary?.customer_unit_name],
                     ['客户经理', summary?.account_manager ?? selectedSale.manager],
                     ['部门', summary?.department ?? selectedSale.department],
-                    ['货物名称', summary?.goods_name],
+                    ['物资/服务名称', summary?.goods_name],
                     ['规格型号', summary?.specification_model],
-                    ['订单金额', formatMoney(Number(summary?.order_value || 0))],
+                    ['销售税率', `${Number(summary?.sales_tax_rate || 0)}%`],
+                    ['不含税销售单价', formatMoney(Number(summary?.sales_unit_price_no_tax || 0))],
+                    ['销售单价', formatMoney(Number(summary?.sales_unit_price || 0))],
+                    ['不含税订单金额', formatMoney(Number(summary?.revenue_no_tax || 0))],
+                    ['销售税金', formatMoney(Number(summary?.sales_tax_amount || 0))],
+                    ['销售订单金额', formatMoney(Number(summary?.order_value || 0))],
                     ['明细行数', summary?.matched_line_count],
                   ]} />
 
                   <InfoSection title="采购信息" items={[
-                    ['供应商', summary?.supplier_name],
+                    ['采购厂商', summary?.supplier_name],
                     ['采购合同号', summary?.purchase_contract_no],
                     ['采购合同金额', formatMoney(Number(summary?.purchase_contract_signed_amount || 0))],
-                    ['采购金额', formatMoney(Number(summary?.purchase_amount || 0))],
+                    ['含税采购金额', formatMoney(Number(summary?.purchase_amount || 0))],
                     ['交付数量', summary?.delivery_quantity],
                     ['交付价值', formatMoney(Number(summary?.delivery_value || 0))],
                     ['毛利润', formatMoney(Number(summary?.gross_profit || 0))],
@@ -487,7 +492,7 @@ export default function SalesScreen({ sales, canEnterSales, canEditSales, canDel
                       <RecordRow key={item.id} values={[
                         ['合同签订日期', item.contract_signed_date_text || item.contract_signed_date],
                         ['公司合同号', item.sales_contract_no],
-                        ['合同价值', formatMoney(item.contract_value)],
+                        ['合同金额', formatMoney(item.contract_value)],
                         ['履行期限', item.performance_period],
                         ['待签合同金额', formatMoney(item.unsigned_contract_amount)],
                       ]} actions={
@@ -565,7 +570,7 @@ export default function SalesScreen({ sales, canEnterSales, canEditSales, canDel
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <FormInput label="合同签订日期" type="date" value={contractForm.contract_signed_date} onChange={(value) => setContractForm({ ...contractForm, contract_signed_date: value })} />
                       <FormInput label="公司合同号" value={contractForm.sales_contract_no} onChange={(value) => setContractForm({ ...contractForm, sales_contract_no: value })} />
-                      <FormInput label="合同价值" type="number" value={contractForm.contract_value} onChange={(value) => setContractForm({ ...contractForm, contract_value: value })} />
+                      <FormInput label="合同金额" type="number" value={contractForm.contract_value} onChange={(value) => setContractForm({ ...contractForm, contract_value: value })} />
                       <FormInput label="履行期限" value={contractForm.performance_period} onChange={(value) => setContractForm({ ...contractForm, performance_period: value })} />
                       <FormInput label="待签合同金额" type="number" value={contractForm.unsigned_contract_amount} onChange={(value) => setContractForm({ ...contractForm, unsigned_contract_amount: value })} className="sm:col-span-2" />
                     </div>

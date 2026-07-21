@@ -8,6 +8,7 @@ import {
   Settings,
   Menu,
   LogOut,
+  CircleUserRound,
 } from 'lucide-react';
 import {
   ProjectLedger,
@@ -31,6 +32,7 @@ import {
   UNAUTHORIZED_EVENT,
 } from './api';
 import { AuthUser, hasPermission, normalizeUser } from './lib/permissions';
+import { formatOperationLogDetails } from './lib/operationLogDisplay';
 
 import DashboardScreen from './components/DashboardScreen';
 import LedgerScreen from './components/LedgerScreen';
@@ -85,18 +87,24 @@ function mapOrder(item: BackendOrderRecord): OrderRecord {
     specModel: item.spec_model || '',
     unitName: item.unit_name || '',
     quantity: `${Number(item.quantity || 0)} ${item.unit_name || ''}`.trim(),
+    salesTaxRate: optionalNumber(item.sales_tax_rate),
     netUnitPrice: optionalNumber(item.net_unit_price),
     unitPrice: optionalNumber(item.unit_price),
     netRevenue: optionalNumber(item.net_revenue),
     orderValue: Number(item.order_value || 0),
+    salesTaxAmount: optionalNumber(item.sales_tax_amount),
     deliveredQty: Number(item.delivery_quantity || 0),
     businessType: item.business_type || fallbackText,
     clientUnit: item.customer_unit_name || fallbackText,
     supplierName: item.supplier_name || '',
+    purchaseTaxRate: optionalNumber(item.purchase_tax_rate),
     purchaseUnitPriceNoTax: optionalNumber(item.purchase_unit_price_no_tax),
     purchaseUnitPrice: optionalNumber(item.purchase_unit_price),
     costNoTax: optionalNumber(item.cost_no_tax),
     purchaseAmount: optionalNumber(item.purchase_amount),
+    purchaseTaxAmount: optionalNumber(item.purchase_tax_amount),
+    laborCost: optionalNumber(item.labor_cost),
+    otherCost: optionalNumber(item.other_cost),
     deliveryDate: dateOnly(item.delivery_date),
     deliveryRevenueNoTax: optionalNumber(item.delivery_revenue_no_tax),
     deliveryValue: optionalNumber(item.delivery_value),
@@ -139,6 +147,7 @@ function mapSale(item: BackendSalesRecord): SalesRecord {
     accountsReceivable: Number(item.accounts_receivable || 0),
     supplierName: item.supplier_name || '',
     receiptDate: dateOnly(item.latest_receipt_date),
+    invoiceDates: (item.invoice_dates || '').split(',').map((value) => value.trim()).filter(Boolean),
   };
 }
 
@@ -147,7 +156,7 @@ function mapLog(item: BackendOperationLog): OperationLog {
     id: String(item.id),
     user: item.user_name || 'system',
     module: item.module_name,
-    details: `${item.action_name}：${item.detail}`,
+    details: formatOperationLogDetails(item),
     status: item.status === 'success' ? '成功' : item.status === 'failed' ? '失败' : '进行中',
     time: dateOnly(item.created_at),
   };
@@ -168,7 +177,7 @@ function mapAuthUser(item: BackendAuthUser): AuthUser {
 
 export default function App() {
   const [currentScreen, setCurrentScreen] = useState<ScreenType>('dashboard');
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.matchMedia('(max-width: 767px)').matches);
   const [ledgers, setLedgers] = useState<ProjectLedger[]>([]);
   const [orders, setOrders] = useState<OrderRecord[]>([]);
   const [purchases, setPurchases] = useState<PurchaseRecord[]>([]);
@@ -258,6 +267,16 @@ export default function App() {
     return () => window.removeEventListener(UNAUTHORIZED_EVENT, handleUnauthorized);
   }, []);
 
+  useEffect(() => {
+    const mobileViewport = window.matchMedia('(max-width: 767px)');
+    const collapseOnMobile = (event: MediaQueryListEvent | MediaQueryList) => {
+      if (event.matches) setSidebarCollapsed(true);
+    };
+    collapseOnMobile(mobileViewport);
+    mobileViewport.addEventListener('change', collapseOnMobile);
+    return () => mobileViewport.removeEventListener('change', collapseOnMobile);
+  }, []);
+
   const handleLogin = async (username: string, password: string) => {
     setLoginError('');
     try {
@@ -316,10 +335,10 @@ export default function App() {
     await loadBackendData();
   };
 
-  const handleImportOrders = async (items: OrderRecord[]) => {
-    const result = await api.createOrdersBatch(items.map(orderToPayload));
+  const handleImportExcel = async (file: File) => {
+    const result = await api.importOrdersExcel(file);
     await loadBackendData();
-    return result.created;
+    return result.success_rows;
   };
 
   const handleUpdateOrder = async (target: OrderRecord, updatedItem: OrderRecord) => {
@@ -369,12 +388,17 @@ export default function App() {
     return baseClass + 'text-slate-300 hover:bg-slate-800 hover:text-white';
   };
 
+  const navigateFromSidebar = (screen: ScreenType) => {
+    setCurrentScreen(screen);
+    if (window.matchMedia('(max-width: 767px)').matches) setSidebarCollapsed(true);
+  };
+
   const screenNameMap: Record<ScreenType, string> = {
     dashboard: '首页仪表盘',
     ledger: '台账管理',
-    orders: '订单详情',
-    purchases: '采购详情',
-    sales: '销售详情',
+    orders: '基本信息',
+    purchases: '采购信息',
+    sales: '销售信息',
     system: '系统管理',
   };
 
@@ -401,8 +425,8 @@ export default function App() {
     <div className="min-h-screen bg-[#F3F4F6] flex font-sans text-slate-900 select-none overflow-hidden">
       <aside
         id="sidebar"
-        className={`fixed left-0 top-0 h-full bg-[#0F172A] text-slate-300 border-r border-slate-800 z-[60] flex flex-col transition-all duration-300 ${
-          sidebarCollapsed ? 'w-[72px]' : 'w-56'
+        className={`fixed left-0 top-0 h-full bg-[#0F172A] text-slate-300 border-r border-slate-800 z-[60] flex flex-col overflow-hidden transition-all duration-300 ${
+          sidebarCollapsed ? 'w-0 md:w-[72px]' : 'w-56'
         }`}
       >
         <div className="h-14 flex items-center px-4 gap-2.5 border-b border-slate-800 overflow-hidden shrink-0">
@@ -421,16 +445,16 @@ export default function App() {
           {[
             ['dashboard', '首页仪表盘', <LayoutDashboard className="w-4 h-4 shrink-0 mr-1" />],
             ['ledger', '台账管理', <BookOpen className="w-4 h-4 shrink-0 mr-1" />],
-            ['orders', '订单详情', <FileText className="w-4 h-4 shrink-0 mr-1" />],
-            ['purchases', '采购详情', <ShoppingBag className="w-4 h-4 shrink-0 mr-1" />],
-            ['sales', '销售详情', <DollarSign className="w-4 h-4 shrink-0 mr-1" />],
+            ['orders', '基本信息', <FileText className="w-4 h-4 shrink-0 mr-1" />],
+            ['sales', '销售信息', <DollarSign className="w-4 h-4 shrink-0 mr-1" />],
+            ['purchases', '采购信息', <ShoppingBag className="w-4 h-4 shrink-0 mr-1" />],
           ].map(([key, label, icon]) => (
             <a
               key={key as string}
               href={`#${key}`}
               onClick={(event) => {
                 event.preventDefault();
-                setCurrentScreen(key as ScreenType);
+                navigateFromSidebar(key as ScreenType);
               }}
               className={getSidebarLinkClass(key as ScreenType)}
             >
@@ -448,7 +472,7 @@ export default function App() {
               href="#system"
               onClick={(event) => {
                 event.preventDefault();
-                setCurrentScreen('system');
+                navigateFromSidebar('system');
               }}
               className={getSidebarLinkClass('system')}
             >
@@ -460,7 +484,7 @@ export default function App() {
 
         <div className="p-4 border-t border-slate-800 flex items-center space-x-3 shrink-0 overflow-hidden">
           <div className="w-8 h-8 rounded-full bg-slate-700 shrink-0 flex items-center justify-center font-bold text-slate-300 text-xs">
-            管
+            {currentUser.displayName.charAt(0) || currentUser.username.charAt(0)}
           </div>
           {!sidebarCollapsed && (
             <div className="overflow-hidden">
@@ -473,18 +497,21 @@ export default function App() {
 
       <div
         id="main-content"
-        className="flex-1 min-w-0 flex flex-col min-h-screen transition-all duration-300"
-        style={{ marginLeft: sidebarCollapsed ? '72px' : '224px' }}
+        className={`flex-1 min-w-0 flex flex-col min-h-screen transition-all duration-300 ${
+          sidebarCollapsed ? 'ml-0 md:ml-[72px]' : 'ml-0 md:ml-56'
+        }`}
       >
         <header
           id="top-nav"
-          className="fixed top-0 right-0 z-50 bg-white border-b border-slate-200 px-6 flex items-center justify-between h-14 shrink-0 shadow-sm transition-all duration-300"
-          style={{ left: sidebarCollapsed ? '72px' : '224px' }}
+          className={`fixed top-0 right-0 z-50 bg-white border-b border-slate-200 px-3 sm:px-6 flex items-center justify-between h-14 shrink-0 shadow-sm transition-all duration-300 ${
+            sidebarCollapsed ? 'left-0 md:left-[72px]' : 'left-0 md:left-56'
+          }`}
         >
           <div className="flex items-center space-x-4">
             <button
               id="toggle-sidebar"
               onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+              aria-label={sidebarCollapsed ? '展开侧栏' : '收起侧栏'}
               className="p-1 text-slate-400 hover:text-slate-600 transition-colors cursor-pointer"
             >
               <Menu className="w-5 h-5" />
@@ -498,7 +525,15 @@ export default function App() {
             </nav>
           </div>
 
-          <div className="flex items-center space-x-4 text-xs">
+          <div className="flex items-center gap-2 sm:gap-4 text-xs min-w-0">
+            <div
+              className="inline-flex items-center gap-1.5 min-w-0 text-sm font-semibold text-slate-800"
+              title={`当前登录用户：${currentUser.username}（${currentUser.displayName}）`}
+            >
+              <CircleUserRound className="w-[18px] h-[18px] text-blue-600 shrink-0" />
+              <span className="max-w-[88px] sm:max-w-[128px] truncate">{currentUser.username}</span>
+              <span className="hidden xl:inline text-xs font-medium text-slate-400">{currentUser.displayName}</span>
+            </div>
             <span className="text-slate-500 font-mono hidden sm:inline">最后更新: {lastUpdated || '--:--:--'}</span>
             <button
               type="button"
@@ -511,7 +546,7 @@ export default function App() {
           </div>
         </header>
 
-        <main className="flex-1 min-w-0 p-6 space-y-6 mt-14 overflow-y-auto overflow-x-hidden w-full max-w-[1600px] mx-auto bg-[#F3F4F6]">
+        <main className="flex-1 min-w-0 p-3 sm:p-6 space-y-6 mt-14 overflow-y-auto overflow-x-hidden w-full max-w-[1600px] mx-auto bg-[#F3F4F6]">
           {error && (
             <div className="bg-rose-50 border border-rose-200 text-rose-700 rounded-xl px-4 py-3 text-sm font-medium">
               {error}
@@ -533,7 +568,9 @@ export default function App() {
             <OrdersScreen
               orders={orders}
               onAddOrder={handleAddOrder}
-              onImportOrders={handleImportOrders}
+              onImportExcel={handleImportExcel}
+              onDownloadTemplate={api.downloadOrderTemplate}
+              onExportExcel={api.exportOrdersExcel}
               onUpdateOrder={handleUpdateOrder}
               onDeleteOrder={handleDeleteOrder}
               canEnterOrders={canEnterOrders}
@@ -590,15 +627,19 @@ function orderToPayload(item: OrderRecord) {
     specification_model: item.specModel || null,
     unit_name: item.unitName || item.quantity.replace(/^[\d.]+\s*/, '') || null,
     quantity: numericQuantity(item.quantity),
+    sales_tax_rate: item.salesTaxRate ?? null,
     net_unit_price: item.netUnitPrice ?? null,
     unit_price: item.unitPrice ?? null,
     net_revenue: item.netRevenue ?? null,
     order_value: item.orderValue,
     supplier_name: item.supplierName || null,
+    purchase_tax_rate: item.purchaseTaxRate ?? null,
     purchase_unit_price_no_tax: item.purchaseUnitPriceNoTax ?? null,
     purchase_unit_price: item.purchaseUnitPrice ?? null,
     cost_no_tax: item.costNoTax ?? null,
     purchase_amount: item.purchaseAmount ?? null,
+    labor_cost: item.laborCost ?? null,
+    other_cost: item.otherCost ?? null,
     delivery_date: item.deliveryDate || null,
     delivery_quantity: item.deliveredQty ?? null,
     delivery_revenue_no_tax: item.deliveryRevenueNoTax ?? null,

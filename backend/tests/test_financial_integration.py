@@ -4,15 +4,18 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from decimal import Decimal
+from io import BytesIO
 
 import pytest
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
 from sqlalchemy import text
 
 from app.auth import ALL_PERMISSIONS, CurrentUser, ensure_default_admin
 from app.config import ROOT_DIR, settings
 from app.db import _split_sql, db, engine, server_engine
 from app.main import app
+from app.ledger_excel import TEMPLATE_HEADERS
 from app.routers import purchases
 
 TEST_DATABASE_PREFIX = "erp_ledger_test_"
@@ -37,7 +40,7 @@ def _initialize_schema() -> None:
 
 def _clear_business_data() -> None:
     tables = (
-        "sales_receipt", "sales_invoice", "sales_contract", "purchase_payment",
+        "sales_receipt", "sales_invoice", "sales_contract", "purchase_payment", "finance_payment_entry",
         "finance_invoice_check", "warehouse_entry", "purchase_invoice",
         "purchase_contract", "delivery_record", "purchase_info", "order_line",
         "sales_order", "ledger_raw_row", "project", "import_batch",
@@ -179,6 +182,120 @@ def _receipt(amount: str, ratio: str = "0.000000") -> dict[str, str]:
     }
 
 
+def _excel_import_file() -> bytes:
+    template_path = ROOT_DIR / "backend" / "templates" / "市场部业务台账模板.xlsx"
+    workbook = load_workbook(template_path)
+    worksheet = workbook["Sheet1"]
+    values = [
+        "全额", "XL-IMPORT-001", "QA", "QA Branch", "QA Manager", date(2026, 7, 21), "商品销售", "常规",
+        "QA Team", "QA Customer", "QA User", "QA Platform", "SO-XL-IMPORT-001", "Excel Import Project",
+        "Excel Equipment", "XL-SPEC", "台", 2, Decimal("100.00"), Decimal("113.00"), Decimal("200.00"),
+        Decimal("226.00"), "Excel Supplier", Decimal("70.00"), Decimal("79.10"), Decimal("140.00"),
+        Decimal("158.20"), date(2026, 7, 22), 1, Decimal("100.00"), Decimal("113.00"), Decimal("70.00"),
+        Decimal("79.10"), 1, Decimal("100.00"), Decimal("113.00"), "PC-XL-001", "验收后付款", "30天",
+        Decimal("158.20"), Decimal("0.00"), date(2026, 7, 23), "PINV-XL-001", Decimal("158.20"),
+        date(2026, 7, 24), "WH-XL-001", Decimal("158.20"), date(2026, 7, 25), "BOOK-XL-001",
+        Decimal("158.20"), Decimal("0.00"), date(2026, 7, 25), date(2026, 7, 26), "PAY-XL-001",
+        Decimal("100.00"), date(2026, 7, 27), "PAY-XL-002", Decimal("58.20"), Decimal("158.20"),
+        Decimal("0.00"), Decimal("60.00"), Decimal("7.80"), Decimal("0.00"), Decimal("67.80"),
+        Decimal("0.30"), date(2026, 7, 21), "SC-XL-001", Decimal("226.00"), "30天", Decimal("0.00"),
+        "DOC-XL-001", date(2026, 7, 28), "SINV-XL-001", Decimal("226.00"), Decimal("0.00"),
+        Decimal("0.00"), date(2026, 7, 29), "REC-XL-001", Decimal("100.00"), Decimal("44.2478"),
+        date(2026, 7, 30), "REC-XL-002", Decimal("126.00"), Decimal("55.7522"), Decimal("226.00"),
+        Decimal("0.00"), "进行中",
+    ]
+    assert len(values) == len(TEMPLATE_HEADERS) == 87
+    for column, value in enumerate(values, start=1):
+        worksheet.cell(2, column, value)
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    return output.getvalue()
+
+
+def test_excel_template_import_export_round_trip(client: TestClient, headers: dict[str, str]) -> None:
+    template_response = client.get("/api/orders/template", headers=headers)
+    assert template_response.status_code == 200, template_response.text
+    template = load_workbook(BytesIO(template_response.content), read_only=True, data_only=True)
+    assert [template["Sheet1"].cell(1, column).value for column in range(1, 88)] == TEMPLATE_HEADERS
+    template.close()
+
+    content = _excel_import_file()
+    import_response = client.post(
+        "/api/orders/import-excel?filename=市场部业务台账模板.xlsx",
+        content=content,
+        headers={**headers, "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+    )
+    assert import_response.status_code == 200, import_response.text
+    assert import_response.json()["success_rows"] == 1
+    assert _count("order_line") == 1
+    assert _count("finance_payment_entry") == 1
+    assert _count("purchase_payment") == 2
+    assert _count("sales_receipt") == 2
+    with db() as conn:
+        booked = conn.execute(text("SELECT booked_amount FROM finance_payment_entry")).scalar_one()
+        supplier = conn.execute(text("SELECT supplier_name FROM purchase_info")).scalar_one()
+    assert _d(booked) == Decimal("158.20")
+    assert supplier == "Excel Supplier"
+
+    duplicate_response = client.post(
+        "/api/orders/import-excel?filename=市场部业务台账模板.xlsx",
+        content=content,
+        headers={**headers, "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+    )
+    assert duplicate_response.status_code == 422, duplicate_response.text
+    assert "整批回滚" in duplicate_response.json()["detail"]
+    assert _count("order_line") == 1
+
+    create_scoped_user = client.post(
+        "/api/auth/users",
+        json={
+            "username": "excel-scope-user",
+            "password": "Excel-Scope-Test-20260721!",
+            "display_name": "Excel Scope User",
+            "role_code": "order_entry",
+            "permissions": ["order_entry"],
+            "department_scope": ["OTHER"],
+            "department_can_view": True,
+            "department_can_entry": True,
+        },
+        headers=headers,
+    )
+    assert create_scoped_user.status_code == 200, create_scoped_user.text
+    scoped_login = client.post(
+        "/api/auth/login",
+        json={"username": "excel-scope-user", "password": "Excel-Scope-Test-20260721!"},
+    )
+    assert scoped_login.status_code == 200, scoped_login.text
+    scoped_headers = {"Authorization": f"Bearer {scoped_login.json()['access_token']}"}
+
+    scoped_export_response = client.get("/api/orders/export", headers=scoped_headers)
+    assert scoped_export_response.status_code == 200, scoped_export_response.text
+    scoped_export = load_workbook(BytesIO(scoped_export_response.content), read_only=True, data_only=True)
+    assert scoped_export["Sheet1"].max_row == 1
+    scoped_export.close()
+
+    forbidden_import = client.post(
+        "/api/orders/import-excel?filename=市场部业务台账模板.xlsx",
+        content=content,
+        headers={**scoped_headers, "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+    )
+    assert forbidden_import.status_code == 403, forbidden_import.text
+    assert "无权向部门" in forbidden_import.json()["detail"]
+    assert _count("order_line") == 1
+
+    export_response = client.get("/api/orders/export", headers=headers)
+    assert export_response.status_code == 200, export_response.text
+    exported = load_workbook(BytesIO(export_response.content), read_only=True, data_only=True)
+    worksheet = exported["Sheet1"]
+    assert [worksheet.cell(1, column).value for column in range(1, 88)] == TEMPLATE_HEADERS
+    assert worksheet.cell(2, 2).value == "XL-IMPORT-001"
+    assert worksheet.cell(2, 23).value == "Excel Supplier"
+    assert Decimal(str(worksheet.cell(2, 50).value)) == Decimal("158.2")
+    assert Decimal(str(worksheet.cell(2, 85).value)) == Decimal("226")
+    exported.close()
+
+
 def _admin_user() -> CurrentUser:
     with db() as conn:
         user_id = conn.execute(text("SELECT id FROM erp_user WHERE username = 'admin'")).scalar_one()
@@ -192,6 +309,66 @@ def _admin_user() -> CurrentUser:
         department_can_view=True,
         department_can_entry=True,
     )
+
+
+def test_tax_calculation_and_finance_entry_mapping(client: TestClient, headers: dict[str, str]) -> None:
+    payload = _payload("TAX-MAP")
+    payload.update(
+        {
+            "sales_tax_rate": "13.000000",
+            "net_unit_price": "100.000000",
+            "unit_price": "0.000000",
+            "net_revenue": "0.00",
+            "order_value": "0.00",
+            "purchase_tax_rate": "13.000000",
+            "purchase_unit_price_no_tax": "70.000000",
+            "purchase_unit_price": "0.000000",
+            "cost_no_tax": "0.00",
+            "purchase_amount": "0.00",
+            "labor_cost": "12.34",
+            "other_cost": "5.67",
+        }
+    )
+    created = client.post("/api/orders", json=payload, headers=headers)
+    assert created.status_code == 200, created.text
+    order_line_id = int(created.json()["order_line_id"])
+    finance = _finance(order_line_id)
+    assert _d(finance["sales_unit_price"]) == Decimal("113.000000")
+    assert _d(finance["revenue_no_tax"]) == Decimal("1000.00")
+    assert _d(finance["order_value"]) == Decimal("1130.00")
+    assert _d(finance["sales_tax_amount"]) == Decimal("130.00")
+    assert _d(finance["purchase_unit_price"]) == Decimal("79.100000")
+    assert _d(finance["cost_no_tax"]) == Decimal("700.00")
+    assert _d(finance["purchase_amount"]) == Decimal("791.00")
+    assert _d(finance["purchase_tax_amount"]) == Decimal("91.00")
+    assert _d(finance["labor_cost"]) == Decimal("12.34")
+    assert _d(finance["other_cost"]) == Decimal("5.67")
+
+    warehouse = client.post(
+        f"/api/purchases/{order_line_id}/warehouse-entries",
+        json={"warehouse_date": "2026-07-16", "voucher_no": "WH-TAX", "warehouse_amount": "791.00", "warehouse_amount_no_tax": "700.00"},
+        headers=headers,
+    )
+    assert warehouse.status_code == 200, warehouse.text
+    checked = client.post(
+        f"/api/purchases/{order_line_id}/finance-invoice-checks",
+        json={"received_invoice_date": "2026-07-17", "received_invoice_amount": "791.00", "voucher_code": "FI-TAX"},
+        headers=headers,
+    )
+    assert checked.status_code == 200, checked.text
+    paid = client.post(
+        f"/api/purchases/{order_line_id}/finance-payments",
+        json={"payment_date": "2026-07-18", "voucher_code": "FP-TAX", "booked_amount": "300.00"},
+        headers=headers,
+    )
+    assert paid.status_code == 200, paid.text
+    detail = paid.json()
+    assert len(detail["warehouse_entries"]) == 1
+    assert len(detail["finance_invoice_checks"]) == 1
+    assert len(detail["finance_payments"]) == 1
+    assert _d(detail["summary"]["total_finance_checked"]) == Decimal("791.00")
+    assert _d(detail["summary"]["total_finance_paid"]) == Decimal("300.00")
+    assert _d(detail["summary"]["financial_accounts_payable"]) == Decimal("491.00")
 
 
 @pytest.mark.parametrize("case", [f"N-{index:02d}" for index in range(1, 13)])
@@ -282,6 +459,10 @@ def test_normal_financial_cases(case: str, client: TestClient, headers: dict[str
         assert response.json()["invoices"][0]["phase_no"] == 1
         assert _d(_finance(order_line_id)["sales_invoice_amount"]) == Decimal("565.00")
         assert _d(_finance(order_line_id)["accounts_receivable"]) == Decimal("1130.00")
+        sales_rows = client.get("/api/sales", headers=headers)
+        assert sales_rows.status_code == 200, sales_rows.text
+        sales_row = next(item for item in sales_rows.json()["items"] if item["order_line_id"] == order_line_id)
+        assert sales_row["invoice_dates"] == "2026-07-20"
 
     elif case == "N-08":
         response = client.post(f"/api/sales/{order_line_id}/receipts", json=_receipt("400.00", "35.398230"), headers=headers)

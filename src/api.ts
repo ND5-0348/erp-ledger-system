@@ -68,20 +68,26 @@ export interface BackendOrderRecord {
   spec_model?: string | null;
   unit_name: string | null;
   quantity: number | null;
+  sales_tax_rate?: number | null;
   net_unit_price?: number | null;
   unit_price?: number | null;
   net_revenue?: number | null;
   order_value: number | null;
+  sales_tax_amount?: number | null;
   delivery_quantity: number | null;
   business_type: string | null;
   customer_unit_name: string | null;
   user_name?: string | null;
   regional_platform?: string | null;
   supplier_name?: string | null;
+  purchase_tax_rate?: number | null;
   purchase_unit_price_no_tax?: number | null;
   purchase_unit_price?: number | null;
   cost_no_tax?: number | null;
   purchase_amount?: number | null;
+  purchase_tax_amount?: number | null;
+  labor_cost?: number | null;
+  other_cost?: number | null;
   delivery_date?: string | null;
   delivery_revenue_no_tax?: number | null;
   delivery_value?: number | null;
@@ -135,10 +141,41 @@ export interface BackendPurchasePayment {
   payment_amount: number | null;
 }
 
+export interface BackendWarehouseEntry {
+  id: number;
+  phase_no: number;
+  warehouse_date: string | null;
+  warehouse_date_text: string | null;
+  voucher_no: string | null;
+  warehouse_amount: number | null;
+  warehouse_amount_no_tax: number | null;
+}
+
+export interface BackendFinanceInvoiceCheck {
+  id: number;
+  phase_no: number;
+  received_invoice_date: string | null;
+  received_invoice_date_text: string | null;
+  received_invoice_amount: number | null;
+  voucher_code: string | null;
+}
+
+export interface BackendFinancePayment {
+  id: number;
+  phase_no: number;
+  payment_date: string | null;
+  payment_date_text: string | null;
+  voucher_code: string | null;
+  booked_amount: number | null;
+}
+
 export interface BackendPurchaseDetail {
   summary: Record<string, string | number | null>;
   contracts: BackendPurchaseContract[];
   invoices: BackendPurchaseInvoice[];
+  warehouse_entries: BackendWarehouseEntry[];
+  finance_invoice_checks: BackendFinanceInvoiceCheck[];
+  finance_payments: BackendFinancePayment[];
   payments: BackendPurchasePayment[];
 }
 
@@ -156,6 +193,7 @@ export interface BackendSalesRecord {
   accounts_receivable: number | null;
   supplier_name?: string | null;
   latest_receipt_date?: string | null;
+  invoice_dates?: string | null;
 }
 
 export interface BackendSalesContract {
@@ -268,6 +306,43 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function requestBlob(path: string): Promise<Blob> {
+  const headers: Record<string, string> = {};
+  if (authToken) {
+    headers.Authorization = `Bearer ${authToken}`;
+  }
+  const response = await fetch(`${API_BASE}${path}`, { headers });
+  await ensureSuccessfulResponse(response);
+  return response.blob();
+}
+
+async function uploadExcel<T>(path: string, file: File): Promise<T> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  };
+  if (authToken) {
+    headers.Authorization = `Bearer ${authToken}`;
+  }
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    headers,
+    body: file,
+  });
+  await ensureSuccessfulResponse(response);
+  return response.json() as Promise<T>;
+}
+
+async function ensureSuccessfulResponse(response: Response) {
+  if (response.ok) return;
+  const body = await response.text();
+  const message = parseErrorMessage(body) || `HTTP ${response.status}`;
+  if (response.status === 401) {
+    authToken = '';
+    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+  }
+  throw new ApiError(response.status, message);
+}
+
 function parseErrorMessage(body: string) {
   if (!body) {
     return '';
@@ -336,6 +411,13 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ items }),
     }),
+  downloadOrderTemplate: () => requestBlob('/orders/template'),
+  exportOrdersExcel: () => requestBlob('/orders/export'),
+  importOrdersExcel: (file: File) =>
+    uploadExcel<{ batch_id: number; source_file: string; success_rows: number; failed_rows: number }>(
+      `/orders/import-excel${query({ filename: file.name })}`,
+      file,
+    ),
   updateOrder: (orderLineId: number, data: Record<string, string | number | null>) =>
     request<BackendOrderRecord>(`/orders/${orderLineId}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteOrder: (orderLineId: number) => request<{ deleted: boolean; order_line_id: number }>(`/orders/${orderLineId}`, { method: 'DELETE' }),
@@ -354,6 +436,24 @@ export const api = {
     request<BackendPurchaseDetail>(`/purchases/invoices/${invoiceId}`, { method: 'PUT', body: JSON.stringify(data) }),
   deletePurchaseInvoice: (invoiceId: number) =>
     request<BackendPurchaseDetail>(`/purchases/invoices/${invoiceId}`, { method: 'DELETE' }),
+  addWarehouseEntry: (orderLineId: number, data: Record<string, string | number | null>) =>
+    request<BackendPurchaseDetail>(`/purchases/${orderLineId}/warehouse-entries`, { method: 'POST', body: JSON.stringify(data) }),
+  updateWarehouseEntry: (entryId: number, data: Record<string, string | number | null>) =>
+    request<BackendPurchaseDetail>(`/purchases/warehouse-entries/${entryId}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteWarehouseEntry: (entryId: number) =>
+    request<BackendPurchaseDetail>(`/purchases/warehouse-entries/${entryId}`, { method: 'DELETE' }),
+  addFinanceInvoiceCheck: (orderLineId: number, data: Record<string, string | number | null>) =>
+    request<BackendPurchaseDetail>(`/purchases/${orderLineId}/finance-invoice-checks`, { method: 'POST', body: JSON.stringify(data) }),
+  updateFinanceInvoiceCheck: (checkId: number, data: Record<string, string | number | null>) =>
+    request<BackendPurchaseDetail>(`/purchases/finance-invoice-checks/${checkId}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteFinanceInvoiceCheck: (checkId: number) =>
+    request<BackendPurchaseDetail>(`/purchases/finance-invoice-checks/${checkId}`, { method: 'DELETE' }),
+  addFinancePayment: (orderLineId: number, data: Record<string, string | number | null>) =>
+    request<BackendPurchaseDetail>(`/purchases/${orderLineId}/finance-payments`, { method: 'POST', body: JSON.stringify(data) }),
+  updateFinancePayment: (paymentId: number, data: Record<string, string | number | null>) =>
+    request<BackendPurchaseDetail>(`/purchases/finance-payments/${paymentId}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteFinancePayment: (paymentId: number) =>
+    request<BackendPurchaseDetail>(`/purchases/finance-payments/${paymentId}`, { method: 'DELETE' }),
   addPurchasePayment: (orderLineId: number, data: Record<string, string | number | null>) =>
     request<BackendPurchaseDetail>(`/purchases/${orderLineId}/payments`, { method: 'POST', body: JSON.stringify(data) }),
   updatePurchasePayment: (paymentId: number, data: Record<string, string | number | null>) =>

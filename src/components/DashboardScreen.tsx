@@ -14,7 +14,7 @@ import {
   Wallet,
 } from 'lucide-react';
 import { OperationLog, OrderRecord, ProjectLedger, ScreenType } from '../types';
-import { getDashboardDepartments, getDashboardMetrics } from '../lib/dashboardMetrics';
+import { getDashboardDepartments, getDashboardMetrics, getDashboardSalesRanking } from '../lib/dashboardMetrics';
 
 interface DashboardScreenProps {
   logs: OperationLog[];
@@ -88,8 +88,10 @@ export default function DashboardScreen({ logs, ledgers, orders, onNavigate }: D
     return () => window.clearInterval(interval);
   }, []);
 
-  const departmentOptions = getDashboardDepartments(ledgers);
+  const departmentOptions = getDashboardDepartments(orders);
   const dashboardMetrics = getDashboardMetrics({ ledgers, orders, department: selectedDepartment });
+  const salesRanking = getDashboardSalesRanking(orders, selectedDepartment);
+  const salesRankingTitle = selectedDepartment ? '三级团队销售订单金额排行' : '部门销售订单金额排行';
   const recentLogs = logs.slice(0, 5);
 
   const trendTotals = new Map<string, { orderAmount: number; profit: number }>();
@@ -122,16 +124,7 @@ export default function DashboardScreen({ logs, ledgers, orders, onNavigate }: D
   const tooltipX = hoveredPoint ? Math.min(Math.max(hoveredPoint.x, 88), 512) : 0;
   const tooltipY = hoveredPoint ? Math.max(hoveredPoint.y - 54, 8) : 0;
 
-  const departmentTotals = new Map<string, number>();
-  ledgers.forEach((item) => {
-    const department = item.department || '未登记部门';
-    departmentTotals.set(department, (departmentTotals.get(department) || 0) + item.orderAmount);
-  });
-  const departmentRanking = Array.from(departmentTotals.entries())
-    .map(([department, amount]) => ({ department, amount }))
-    .sort((a, b) => b.amount - a.amount)
-    .slice(0, 5);
-  const maxDepartmentAmount = Math.max(...departmentRanking.map((item) => item.amount), 1);
+  const maxRankingAmount = Math.max(...salesRanking.map((item) => item.amount), 1);
 
   const metrics = [
     { label: '订单总金额', value: compactMoney(dashboardMetrics.totalOrderAmount), icon: Wallet, trend: '实时', trendType: 'up' },
@@ -287,23 +280,27 @@ export default function DashboardScreen({ logs, ledgers, orders, onNavigate }: D
 
         <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm flex flex-col justify-between">
           <div>
-            <h3 className="font-semibold text-slate-900 text-sm mb-5">部门订单排行</h3>
+            <h3 className="font-semibold text-slate-900 text-sm mb-5">{salesRankingTitle}</h3>
             <div className="space-y-4">
-              {departmentRanking.map((item) => (
-                <div key={item.department} className="space-y-1.5">
+              {salesRanking.map((item) => (
+                <div key={item.label} className="space-y-1.5">
                   <div className="flex justify-between text-xs font-medium gap-3">
-                    <span className="text-slate-700 truncate">{item.department}</span>
+                    <span className="text-slate-700 truncate">{item.label}</span>
                     <span className="text-slate-900 font-mono shrink-0">{compactMoney(item.amount)}</span>
                   </div>
                   <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
                     <div
                       className="bg-blue-600 h-full rounded-full transition-all duration-500"
-                      style={{ width: `${Math.max((item.amount / maxDepartmentAmount) * 100, 4)}%` }}
+                      style={{ width: `${Math.max((item.amount / maxRankingAmount) * 100, 4)}%` }}
                     />
                   </div>
                 </div>
               ))}
-              {departmentRanking.length === 0 && <div className="text-xs text-slate-400 py-4 text-center">暂无部门排行数据</div>}
+              {salesRanking.length === 0 && (
+                <div className="text-xs text-slate-400 py-4 text-center">
+                  {selectedDepartment ? '暂无三级团队排行数据' : '暂无部门排行数据'}
+                </div>
+              )}
             </div>
           </div>
           <div className="mt-5 pt-4 border-t border-slate-100 text-center text-xs text-slate-400 font-sans">

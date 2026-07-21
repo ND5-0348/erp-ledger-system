@@ -21,8 +21,12 @@ BusinessDate = Annotated[date, AfterValidator(validate_business_date)]
 
 
 FIELD_LABELS = {
-    "order_value": "订单金额",
-    "purchase_amount": "采购金额",
+    "order_value": "销售订单金额",
+    "purchase_amount": "含税采购金额",
+    "sales_tax_rate": "销售税率",
+    "purchase_tax_rate": "采购税率",
+    "labor_cost": "人工成本",
+    "other_cost": "其他成本",
     "signed_amount": "合同签订金额",
     "unsigned_amount": "待签合同金额",
     "contract_value": "合同金额",
@@ -32,8 +36,8 @@ FIELD_LABELS = {
     "delivered_not_invoiced_amount": "已交付未开票金额",
     "payment_amount": "付款金额",
     "receipt_amount": "回款金额",
-    "net_revenue": "不含税收入",
-    "cost_no_tax": "不含税成本",
+    "net_revenue": "不含税订单金额",
+    "cost_no_tax": "不含税采购金额",
     "delivery_value": "交付金额",
     "delivery_cost": "交付成本",
     "pending_delivery_amount": "待交付金额",

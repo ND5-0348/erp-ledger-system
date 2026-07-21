@@ -29,6 +29,25 @@ class PurchaseInvoiceCreate(BaseModel):
     invoice_amount: Money
 
 
+class WarehouseEntryCreate(BaseModel):
+    warehouse_date: BusinessDate | None = None
+    voucher_no: str | None = None
+    warehouse_amount: Money | None = None
+    warehouse_amount_no_tax: Money | None = None
+
+
+class FinanceInvoiceCheckCreate(BaseModel):
+    received_invoice_date: BusinessDate | None = None
+    received_invoice_amount: Money | None = None
+    voucher_code: str | None = None
+
+
+class FinancePaymentEntryCreate(BaseModel):
+    payment_date: BusinessDate | None = None
+    voucher_code: str | None = None
+    booked_amount: Money | None = None
+
+
 class PurchasePaymentCreate(BaseModel):
     due_payment_date: BusinessDate | None = None
     payment_date: BusinessDate | None = None
@@ -112,10 +131,16 @@ def get_purchase_detail(order_line_id: int, user: CurrentUser = Depends(get_curr
                 SELECT order_line_id, project_code, order_no, department, branch_company,
                        account_manager, order_date, business_type, statistic_category,
                        customer_unit_name, project_name, close_status, goods_name,
-                       specification_model, unit_name, quantity, revenue_no_tax, order_value,
-                       supplier_name, cost_no_tax, purchase_amount, delivery_quantity,
-                       delivery_value, purchase_contract_no, purchase_contract_signed_amount,
-                       total_paid, accounts_payable, gross_profit
+                       specification_model, unit_name, quantity, sales_tax_rate,
+                       sales_unit_price_no_tax, sales_unit_price, revenue_no_tax, order_value,
+                       sales_tax_amount, supplier_name, purchase_tax_rate,
+                       purchase_unit_price_no_tax, purchase_unit_price, cost_no_tax,
+                       purchase_amount, purchase_tax_amount, labor_cost, other_cost,
+                       delivery_quantity, delivery_value, purchase_contract_no,
+                       purchase_contract_signed_amount, total_finance_checked,
+                       total_finance_paid, financial_accounts_payable,
+                       total_paid, accounts_payable, gross_profit_no_tax,
+                       gross_profit_margin_no_tax, gross_profit
                 FROM v_order_line_finance
                 WHERE order_line_id = :order_line_id
                 """
@@ -151,6 +176,42 @@ def get_purchase_detail(order_line_id: int, user: CurrentUser = Depends(get_curr
             ),
             {"order_line_id": order_line_id},
         ).mappings().all()
+        warehouse_entries = conn.execute(
+            text(
+                """
+                SELECT id, phase_no, warehouse_date, warehouse_date_text, voucher_no,
+                       warehouse_amount, warehouse_amount_no_tax, created_at
+                FROM warehouse_entry
+                WHERE order_line_id = :order_line_id AND deleted_at IS NULL
+                ORDER BY phase_no, id
+                """
+            ),
+            {"order_line_id": order_line_id},
+        ).mappings().all()
+        finance_invoice_checks = conn.execute(
+            text(
+                """
+                SELECT id, phase_no, received_invoice_date, received_invoice_date_text,
+                       received_invoice_amount, voucher_code, created_at
+                FROM finance_invoice_check
+                WHERE order_line_id = :order_line_id AND deleted_at IS NULL
+                ORDER BY phase_no, id
+                """
+            ),
+            {"order_line_id": order_line_id},
+        ).mappings().all()
+        finance_payments = conn.execute(
+            text(
+                """
+                SELECT id, phase_no, payment_date, payment_date_text, voucher_code,
+                       booked_amount, created_at
+                FROM finance_payment_entry
+                WHERE order_line_id = :order_line_id AND deleted_at IS NULL
+                ORDER BY phase_no, id
+                """
+            ),
+            {"order_line_id": order_line_id},
+        ).mappings().all()
         payments = conn.execute(
             text(
                 """
@@ -168,6 +229,9 @@ def get_purchase_detail(order_line_id: int, user: CurrentUser = Depends(get_curr
         "summary": clean_row(summary),
         "contracts": clean_rows(contracts),
         "invoices": clean_rows(invoices),
+        "warehouse_entries": clean_rows(warehouse_entries),
+        "finance_invoice_checks": clean_rows(finance_invoice_checks),
+        "finance_payments": clean_rows(finance_payments),
         "payments": clean_rows(payments),
     }
 
@@ -308,6 +372,185 @@ def delete_purchase_invoice(
 ) -> dict:
     order_line_id = _ensure_detail_record("purchase_invoice", invoice_id, user, require_entry=True)
     _soft_delete_detail("purchase_invoice", invoice_id, user, "delete_purchase_invoice", "采购收票")
+    return get_purchase_detail(order_line_id, user)
+
+
+@router.post("/{order_line_id}/warehouse-entries")
+def add_warehouse_entry(
+    order_line_id: int,
+    payload: WarehouseEntryCreate,
+    user: CurrentUser = Depends(require_permission("purchase_entry")),
+) -> dict:
+    _ensure_order_line(order_line_id, user, require_entry=True)
+    with db() as conn:
+        phase_no = _next_phase(conn, "warehouse_entry", order_line_id)
+        result = conn.execute(
+            text(
+                """
+                INSERT INTO warehouse_entry
+                  (order_line_id, phase_no, warehouse_date, warehouse_date_text,
+                   voucher_no, warehouse_amount, warehouse_amount_no_tax)
+                VALUES
+                  (:order_line_id, :phase_no, :warehouse_date, :warehouse_date,
+                   :voucher_no, :warehouse_amount, :warehouse_amount_no_tax)
+                """
+            ),
+            {"order_line_id": order_line_id, "phase_no": phase_no, **_payload_dict(payload)},
+        )
+        record_id = int(result.lastrowid or 0)
+        write_operation_log(conn, user, "采购管理", "create_warehouse_entry", f"新增入库记录 {record_id}", after=_record_snapshot(conn, "warehouse_entry", record_id))
+    return get_purchase_detail(order_line_id, user)
+
+
+@router.put("/warehouse-entries/{entry_id}")
+def update_warehouse_entry(
+    entry_id: int,
+    payload: WarehouseEntryCreate,
+    user: CurrentUser = Depends(require_permission("purchase_edit")),
+) -> dict:
+    order_line_id = _ensure_detail_record("warehouse_entry", entry_id, user, require_entry=True)
+    with db() as conn:
+        before = _record_snapshot(conn, "warehouse_entry", entry_id)
+        conn.execute(
+            text(
+                """
+                UPDATE warehouse_entry
+                SET warehouse_date = :warehouse_date,
+                    warehouse_date_text = :warehouse_date,
+                    voucher_no = :voucher_no,
+                    warehouse_amount = :warehouse_amount,
+                    warehouse_amount_no_tax = :warehouse_amount_no_tax
+                WHERE id = :entry_id
+                """
+            ),
+            {"entry_id": entry_id, **_payload_dict(payload)},
+        )
+        write_operation_log(conn, user, "采购管理", "update_warehouse_entry", f"修改入库记录 {entry_id}", before=before, after=_record_snapshot(conn, "warehouse_entry", entry_id))
+    return get_purchase_detail(order_line_id, user)
+
+
+@router.delete("/warehouse-entries/{entry_id}")
+def delete_warehouse_entry(entry_id: int, user: CurrentUser = Depends(require_permission("purchase_delete"))) -> dict:
+    order_line_id = _ensure_detail_record("warehouse_entry", entry_id, user, require_entry=True)
+    _soft_delete_detail("warehouse_entry", entry_id, user, "delete_warehouse_entry", "入库记录")
+    return get_purchase_detail(order_line_id, user)
+
+
+@router.post("/{order_line_id}/finance-invoice-checks")
+def add_finance_invoice_check(
+    order_line_id: int,
+    payload: FinanceInvoiceCheckCreate,
+    user: CurrentUser = Depends(require_permission("purchase_entry")),
+) -> dict:
+    _ensure_order_line(order_line_id, user, require_entry=True)
+    with db() as conn:
+        phase_no = _next_phase(conn, "finance_invoice_check", order_line_id)
+        result = conn.execute(
+            text(
+                """
+                INSERT INTO finance_invoice_check
+                  (order_line_id, phase_no, received_invoice_date, received_invoice_date_text,
+                   received_invoice_amount, voucher_code)
+                VALUES
+                  (:order_line_id, :phase_no, :received_invoice_date, :received_invoice_date,
+                   :received_invoice_amount, :voucher_code)
+                """
+            ),
+            {"order_line_id": order_line_id, "phase_no": phase_no, **_payload_dict(payload)},
+        )
+        record_id = int(result.lastrowid or 0)
+        write_operation_log(conn, user, "采购管理", "create_finance_invoice_check", f"新增发票校验 {record_id}", after=_record_snapshot(conn, "finance_invoice_check", record_id))
+    return get_purchase_detail(order_line_id, user)
+
+
+@router.put("/finance-invoice-checks/{check_id}")
+def update_finance_invoice_check(
+    check_id: int,
+    payload: FinanceInvoiceCheckCreate,
+    user: CurrentUser = Depends(require_permission("purchase_edit")),
+) -> dict:
+    order_line_id = _ensure_detail_record("finance_invoice_check", check_id, user, require_entry=True)
+    with db() as conn:
+        before = _record_snapshot(conn, "finance_invoice_check", check_id)
+        conn.execute(
+            text(
+                """
+                UPDATE finance_invoice_check
+                SET received_invoice_date = :received_invoice_date,
+                    received_invoice_date_text = :received_invoice_date,
+                    received_invoice_amount = :received_invoice_amount,
+                    voucher_code = :voucher_code
+                WHERE id = :check_id
+                """
+            ),
+            {"check_id": check_id, **_payload_dict(payload)},
+        )
+        write_operation_log(conn, user, "采购管理", "update_finance_invoice_check", f"修改发票校验 {check_id}", before=before, after=_record_snapshot(conn, "finance_invoice_check", check_id))
+    return get_purchase_detail(order_line_id, user)
+
+
+@router.delete("/finance-invoice-checks/{check_id}")
+def delete_finance_invoice_check(check_id: int, user: CurrentUser = Depends(require_permission("purchase_delete"))) -> dict:
+    order_line_id = _ensure_detail_record("finance_invoice_check", check_id, user, require_entry=True)
+    _soft_delete_detail("finance_invoice_check", check_id, user, "delete_finance_invoice_check", "发票校验")
+    return get_purchase_detail(order_line_id, user)
+
+
+@router.post("/{order_line_id}/finance-payments")
+def add_finance_payment(
+    order_line_id: int,
+    payload: FinancePaymentEntryCreate,
+    user: CurrentUser = Depends(require_permission("purchase_entry")),
+) -> dict:
+    _ensure_order_line(order_line_id, user, require_entry=True)
+    with db() as conn:
+        phase_no = _next_phase(conn, "finance_payment_entry", order_line_id)
+        result = conn.execute(
+            text(
+                """
+                INSERT INTO finance_payment_entry
+                  (order_line_id, phase_no, payment_date, payment_date_text, voucher_code, booked_amount)
+                VALUES
+                  (:order_line_id, :phase_no, :payment_date, :payment_date, :voucher_code, :booked_amount)
+                """
+            ),
+            {"order_line_id": order_line_id, "phase_no": phase_no, **_payload_dict(payload)},
+        )
+        record_id = int(result.lastrowid or 0)
+        write_operation_log(conn, user, "采购管理", "create_finance_payment", f"新增财务入账付款 {record_id}", after=_record_snapshot(conn, "finance_payment_entry", record_id))
+    return get_purchase_detail(order_line_id, user)
+
+
+@router.put("/finance-payments/{payment_id}")
+def update_finance_payment(
+    payment_id: int,
+    payload: FinancePaymentEntryCreate,
+    user: CurrentUser = Depends(require_permission("purchase_edit")),
+) -> dict:
+    order_line_id = _ensure_detail_record("finance_payment_entry", payment_id, user, require_entry=True)
+    with db() as conn:
+        before = _record_snapshot(conn, "finance_payment_entry", payment_id)
+        conn.execute(
+            text(
+                """
+                UPDATE finance_payment_entry
+                SET payment_date = :payment_date,
+                    payment_date_text = :payment_date,
+                    voucher_code = :voucher_code,
+                    booked_amount = :booked_amount
+                WHERE id = :payment_id
+                """
+            ),
+            {"payment_id": payment_id, **_payload_dict(payload)},
+        )
+        write_operation_log(conn, user, "采购管理", "update_finance_payment", f"修改财务入账付款 {payment_id}", before=before, after=_record_snapshot(conn, "finance_payment_entry", payment_id))
+    return get_purchase_detail(order_line_id, user)
+
+
+@router.delete("/finance-payments/{payment_id}")
+def delete_finance_payment(payment_id: int, user: CurrentUser = Depends(require_permission("purchase_delete"))) -> dict:
+    order_line_id = _ensure_detail_record("finance_payment_entry", payment_id, user, require_entry=True)
+    _soft_delete_detail("finance_payment_entry", payment_id, user, "delete_finance_payment", "财务入账付款")
     return get_purchase_detail(order_line_id, user)
 
 
@@ -460,7 +703,10 @@ def _next_phase(conn, table_name: str, order_line_id: int) -> int:
         ),
         {"order_line_id": order_line_id},
     ).scalar()
-    return int(phase or 1)
+    next_phase = int(phase or 1)
+    if next_phase > 20:
+        raise HTTPException(status_code=422, detail="最多允许录入20期数据，请检查后重新提交。")
+    return next_phase
 
 
 def _validate_payment_total(conn, order_line_id: int, payment_amount: Decimal, payment_id: int | None = None) -> None:
@@ -488,4 +734,4 @@ def _validate_payment_total(conn, order_line_id: int, payment_amount: Decimal, p
         params,
     ).scalar()
     if Decimal(paid or 0) + payment_amount > Decimal(purchase_amount or 0):
-        raise HTTPException(status_code=422, detail="累计付款金额不能超过采购金额，数据有错误，请检查后重新提交。")
+        raise HTTPException(status_code=422, detail="累计付款金额不能超过含税采购金额，数据有错误，请检查后重新提交。")

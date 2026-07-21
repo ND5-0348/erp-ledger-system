@@ -97,7 +97,14 @@ def list_sales(
                  FROM sales_receipt sr
                  WHERE sr.order_line_id = v.order_line_id
                    AND sr.deleted_at IS NULL
-               ) AS latest_receipt_date
+               ) AS latest_receipt_date,
+               (
+                 SELECT GROUP_CONCAT(DISTINCT si.invoice_date ORDER BY si.invoice_date SEPARATOR ',')
+                 FROM sales_invoice si
+                 WHERE si.order_line_id = v.order_line_id
+                   AND si.deleted_at IS NULL
+                   AND si.invoice_date IS NOT NULL
+               ) AS invoice_dates
         FROM v_order_line_finance v
     """
     with db() as conn:
@@ -107,7 +114,7 @@ def list_sales(
                 f"""
                 SELECT order_line_id, project_code, order_no, account_manager, department, supplier_name, sales_contract_no,
                        sales_contract_signed_date, sales_contract_value, sales_invoice_amount,
-                       total_received, accounts_receivable, latest_receipt_date
+                       total_received, accounts_receivable, latest_receipt_date, invoice_dates
                 FROM ({source_sql}) sales_detail
                 WHERE {where_sql}
                 ORDER BY order_date DESC, project_code
@@ -128,11 +135,16 @@ def get_sales_detail_by_order(project_id: str, order_id: str, user: CurrentUser 
                 SELECT order_line_id, project_code, order_no, department, branch_company,
                        account_manager, order_date, business_type, statistic_category,
                        customer_unit_name, project_name, close_status, goods_name,
-                       specification_model, unit_name, quantity, revenue_no_tax, order_value,
-                       supplier_name, purchase_amount, delivery_quantity, delivery_value,
+                       specification_model, unit_name, quantity, sales_tax_rate,
+                       sales_unit_price_no_tax, sales_unit_price, revenue_no_tax, order_value,
+                       sales_tax_amount, supplier_name, purchase_tax_rate,
+                       purchase_unit_price_no_tax, purchase_unit_price, cost_no_tax,
+                       purchase_amount, purchase_tax_amount, labor_cost, other_cost,
+                       delivery_quantity, delivery_value,
                        purchase_contract_no, purchase_contract_signed_amount,
                        sales_contract_no, sales_contract_signed_date, sales_contract_value,
-                       sales_invoice_amount, total_received, accounts_receivable, gross_profit
+                       sales_invoice_amount, total_received, accounts_receivable,
+                       gross_profit_no_tax, gross_profit_margin_no_tax, gross_profit
                 FROM v_order_line_finance
                 WHERE project_code = :project_id AND order_no = :order_id
                 ORDER BY order_line_id
@@ -562,7 +574,10 @@ def _next_phase(conn, table_name: str, order_line_id: int) -> int:
         ),
         {"order_line_id": order_line_id},
     ).scalar()
-    return int(phase or 1)
+    next_phase = int(phase or 1)
+    if next_phase > 20:
+        raise HTTPException(status_code=422, detail="最多允许录入20期数据，请检查后重新提交。")
+    return next_phase
 
 
 def _validate_receipt_total(conn, order_line_id: int, receipt_amount: Decimal, receipt_id: int | None = None) -> None:

@@ -1,15 +1,29 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from decimal import Decimal, ROUND_HALF_UP
+from pathlib import Path
+from zipfile import BadZipFile
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from openpyxl.utils.exceptions import InvalidFileException
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import text
 
 from ..audit import write_operation_log
 from ..auth import CurrentUser, apply_department_scope, can_access_department, get_current_user, require_permission
+from ..backup import create_backup
 from ..db import db
+from ..importer import import_excel
+from ..ledger_excel import (
+    EXPORT_FILE_NAME,
+    TEMPLATE_FILE_NAME,
+    content_disposition,
+    export_ledger_bytes,
+    template_bytes,
+)
 from ..serializers import clean_row, clean_rows
-from ..validation import BusinessDate, Money, PreciseNumber
+from ..validation import BusinessDate, Money, PreciseNumber, Ratio
 
 router = APIRouter(prefix="/api/orders", tags=["orders"])
 
@@ -33,15 +47,19 @@ class OrderUpdate(BaseModel):
     specification_model: str | None = None
     unit_name: str | None = None
     quantity: PreciseNumber | None = None
+    sales_tax_rate: Ratio | None = None
     net_unit_price: PreciseNumber | None = None
     unit_price: PreciseNumber | None = None
     net_revenue: Money | None = None
     order_value: Money | None = None
     supplier_name: str | None = None
+    purchase_tax_rate: Ratio | None = None
     purchase_unit_price_no_tax: PreciseNumber | None = None
     purchase_unit_price: PreciseNumber | None = None
     cost_no_tax: Money | None = None
     purchase_amount: Money | None = None
+    labor_cost: Money | None = None
+    other_cost: Money | None = None
     delivery_date: BusinessDate | None = None
     delivery_quantity: PreciseNumber | None = None
     delivery_revenue_no_tax: Money | None = None
@@ -55,6 +73,10 @@ class OrderUpdate(BaseModel):
 
 class OrderBatchCreate(BaseModel):
     items: list[OrderUpdate] = Field(min_length=1, max_length=500)
+
+
+EXCEL_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+MAX_IMPORT_BYTES = 20 * 1024 * 1024
 
 
 @router.get("")
@@ -120,15 +142,21 @@ def list_orders(
                        specification_model AS spec_model,
                        unit_name,
                        quantity,
+                       sales_tax_rate,
                        sales_unit_price_no_tax AS net_unit_price,
                        sales_unit_price AS unit_price,
                        revenue_no_tax AS net_revenue,
                        order_value,
+                       sales_tax_amount,
                        supplier_name,
+                       purchase_tax_rate,
                        purchase_unit_price_no_tax,
                        purchase_unit_price,
                        cost_no_tax,
                        purchase_amount,
+                       purchase_tax_amount,
+                       labor_cost,
+                       other_cost,
                        delivery_date,
                        delivery_quantity,
                        delivery_revenue_no_tax,
@@ -159,15 +187,21 @@ def list_orders(
                            ol.specification_model,
                            ol.unit_name,
                            ol.quantity,
+                           ol.sales_tax_rate,
                            ol.sales_unit_price_no_tax,
                            ol.sales_unit_price,
                            ol.revenue_no_tax,
                            ol.order_value,
+                           COALESCE(ol.order_value, 0) - COALESCE(ol.revenue_no_tax, 0) AS sales_tax_amount,
                            pi.supplier_name,
+                           pi.purchase_tax_rate,
                            pi.purchase_unit_price_no_tax,
                            pi.purchase_unit_price,
                            pi.cost_no_tax,
                            pi.purchase_amount,
+                           COALESCE(pi.purchase_amount, 0) - COALESCE(pi.cost_no_tax, 0) AS purchase_tax_amount,
+                           pi.labor_cost,
+                           pi.other_cost,
                            dr.delivery_date,
                            dr.delivery_quantity,
                            dr.delivery_revenue_no_tax,
@@ -241,6 +275,77 @@ def create_order_lines_batch(
     return {"created": len(created_ids), "order_line_ids": created_ids}
 
 
+@router.get("/template")
+def download_order_template(_: CurrentUser = Depends(get_current_user)) -> Response:
+    try:
+        content = template_bytes()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=500, detail="服务器中的业务台账模板缺失") from exc
+    return Response(
+        content=content,
+        media_type=EXCEL_MEDIA_TYPE,
+        headers={"Content-Disposition": content_disposition(TEMPLATE_FILE_NAME)},
+    )
+
+
+@router.get("/export")
+def export_orders(user: CurrentUser = Depends(get_current_user)) -> Response:
+    with db() as conn:
+        content = export_ledger_bytes(conn, user)
+    return Response(
+        content=content,
+        media_type=EXCEL_MEDIA_TYPE,
+        headers={"Content-Disposition": content_disposition(EXPORT_FILE_NAME)},
+    )
+
+
+@router.post("/import-excel")
+async def import_orders_excel(
+    request: Request,
+    filename: str = Query("市场部业务台账.xlsx", max_length=255),
+    user: CurrentUser = Depends(require_permission("order_entry")),
+) -> dict:
+    if Path(filename).suffix.lower() != ".xlsx":
+        raise HTTPException(status_code=400, detail="仅支持 .xlsx 格式的业务台账文件")
+    content = await request.body()
+    if not content:
+        raise HTTPException(status_code=400, detail="上传文件为空")
+    if len(content) > MAX_IMPORT_BYTES:
+        raise HTTPException(status_code=413, detail="上传文件不能超过 20 MB")
+
+    try:
+        with db() as conn:
+            create_backup(conn, user, "pre_import")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="导入前自动备份失败，已取消导入") from exc
+
+    try:
+        with db() as conn:
+            result = import_excel(
+                conn,
+                reset=False,
+                workbook_bytes=content,
+                source_file_name=Path(filename).name,
+                user=user,
+                strict_template=True,
+            )
+            if result["failed_rows"]:
+                message = "；".join(result.get("errors") or [])
+                detail = f"导入存在 {result['failed_rows']} 条错误数据，已整批回滚"
+                if message:
+                    detail = f"{detail}：{message}"
+                raise HTTPException(status_code=422, detail=detail)
+            return result
+    except HTTPException:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except (ValueError, BadZipFile, InvalidFileException, KeyError) as exc:
+        raise HTTPException(status_code=422, detail=f"Excel 导入失败：{exc}") from exc
+    except IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="导入数据与现有项目、订单或业务明细重复") from exc
+
+
 @router.put("/{order_line_id}")
 def update_order_line(
     order_line_id: int,
@@ -249,7 +354,7 @@ def update_order_line(
 ) -> dict:
     _validate_create_payload(payload, user)
     ids = _ensure_order_line(order_line_id, user, require_entry=True)
-    data = _payload_dict(payload)
+    data = _calculated_payload_data(payload)
     project_data = {
         "project_code": data["project_code"],
         "project_name": data["project_name"],
@@ -273,6 +378,7 @@ def update_order_line(
         "specification_model": data["specification_model"],
         "unit_name": data["unit_name"],
         "quantity": data["quantity"],
+        "sales_tax_rate": data["sales_tax_rate"],
         "sales_unit_price_no_tax": data["net_unit_price"],
         "sales_unit_price": data["unit_price"],
         "revenue_no_tax": data["net_revenue"],
@@ -280,10 +386,13 @@ def update_order_line(
     }
     purchase_data = {
         "supplier_name": data["supplier_name"],
+        "purchase_tax_rate": data["purchase_tax_rate"],
         "purchase_unit_price_no_tax": data["purchase_unit_price_no_tax"],
         "purchase_unit_price": data["purchase_unit_price"],
         "cost_no_tax": data["cost_no_tax"],
         "purchase_amount": data["purchase_amount"],
+        "labor_cost": data["labor_cost"],
+        "other_cost": data["other_cost"],
     }
     delivery_data = {
         "delivery_date": data["delivery_date"],
@@ -341,6 +450,7 @@ def update_order_line(
                     specification_model = :specification_model,
                     unit_name = :unit_name,
                     quantity = :quantity,
+                    sales_tax_rate = :sales_tax_rate,
                     sales_unit_price_no_tax = :sales_unit_price_no_tax,
                     sales_unit_price = :sales_unit_price,
                     revenue_no_tax = :revenue_no_tax,
@@ -444,14 +554,15 @@ def _payload_dict(payload: BaseModel) -> dict:
 
 
 def _validate_create_payload(payload: OrderUpdate, user: CurrentUser) -> None:
+    data = _calculated_payload_data(payload)
     required = {
-        "project_code": payload.project_code,
-        "order_no": payload.order_no,
-        "goods_name": payload.goods_name,
-        "customer_unit_name": payload.customer_unit_name,
+        "project_code": data["project_code"],
+        "order_no": data["order_no"],
+        "goods_name": data["goods_name"],
+        "customer_unit_name": data["customer_unit_name"],
     }
     missing = [name for name, value in required.items() if not str(value or "").strip()]
-    if payload.order_value is None:
+    if data["order_value"] is None:
         missing.append("order_value")
     if missing:
         raise HTTPException(status_code=422, detail=f"缺少必填字段: {', '.join(missing)}")
@@ -460,7 +571,7 @@ def _validate_create_payload(payload: OrderUpdate, user: CurrentUser) -> None:
 
 
 def _create_order_line(conn, payload: OrderUpdate) -> int:
-    data = _payload_dict(payload)
+    data = _calculated_payload_data(payload)
     project = conn.execute(
         text("SELECT id FROM project WHERE project_code = :project_code LIMIT 1"),
         {"project_code": data["project_code"]},
@@ -563,10 +674,10 @@ def _create_order_line(conn, payload: OrderUpdate) -> int:
             """
             INSERT INTO order_line
               (sales_order_id, goods_name, specification_model, unit_name, quantity,
-               sales_unit_price_no_tax, sales_unit_price, revenue_no_tax, order_value)
+               sales_tax_rate, sales_unit_price_no_tax, sales_unit_price, revenue_no_tax, order_value)
             VALUES
               (:sales_order_id, :goods_name, :specification_model, :unit_name, :quantity,
-               :net_unit_price, :unit_price, :net_revenue, :order_value)
+               :sales_tax_rate, :net_unit_price, :unit_price, :net_revenue, :order_value)
             """
         ),
         {"sales_order_id": sales_order_id, **data},
@@ -578,10 +689,13 @@ def _create_order_line(conn, payload: OrderUpdate) -> int:
         order_line_id,
         {
             "supplier_name": data["supplier_name"],
+            "purchase_tax_rate": data["purchase_tax_rate"],
             "purchase_unit_price_no_tax": data["purchase_unit_price_no_tax"],
             "purchase_unit_price": data["purchase_unit_price"],
             "cost_no_tax": data["cost_no_tax"],
             "purchase_amount": data["purchase_amount"],
+            "labor_cost": data["labor_cost"],
+            "other_cost": data["other_cost"],
         },
     )
     _upsert_line_record(
@@ -601,6 +715,66 @@ def _create_order_line(conn, payload: OrderUpdate) -> int:
         },
     )
     return order_line_id
+
+
+def _calculated_payload_data(payload: OrderUpdate) -> dict[str, object]:
+    data = _payload_dict(payload)
+    quantity = _as_decimal(data["quantity"])
+
+    sales_rate = _as_decimal(data["sales_tax_rate"])
+    sales_unit_price_no_tax = _as_decimal(data["net_unit_price"])
+    sales_unit_price = _as_decimal(data["unit_price"])
+    if sales_rate is not None:
+        if sales_unit_price_no_tax is not None:
+            sales_unit_price = _price(sales_unit_price_no_tax * (Decimal("1") + sales_rate / Decimal("100")))
+            data["unit_price"] = sales_unit_price
+        if quantity is not None and sales_unit_price_no_tax is not None:
+            data["net_revenue"] = _money(quantity * sales_unit_price_no_tax)
+        if quantity is not None and sales_unit_price is not None:
+            data["order_value"] = _money(quantity * sales_unit_price)
+
+    purchase_rate = _as_decimal(data["purchase_tax_rate"])
+    purchase_unit_price_no_tax = _as_decimal(data["purchase_unit_price_no_tax"])
+    purchase_unit_price = _as_decimal(data["purchase_unit_price"])
+    if purchase_rate is not None:
+        if purchase_unit_price_no_tax is not None:
+            purchase_unit_price = _price(purchase_unit_price_no_tax * (Decimal("1") + purchase_rate / Decimal("100")))
+            data["purchase_unit_price"] = purchase_unit_price
+        if quantity is not None and purchase_unit_price_no_tax is not None:
+            data["cost_no_tax"] = _money(quantity * purchase_unit_price_no_tax)
+        if quantity is not None and purchase_unit_price is not None:
+            data["purchase_amount"] = _money(quantity * purchase_unit_price)
+
+    delivery_quantity = _as_decimal(data["delivery_quantity"])
+    if quantity is not None and delivery_quantity is not None:
+        if delivery_quantity > quantity:
+            raise HTTPException(status_code=422, detail="交付数量不能超过订单数量，数据有错误，请检查后重新提交。")
+        data["pending_delivery_quantity"] = quantity - delivery_quantity
+        if sales_rate is not None and sales_unit_price_no_tax is not None:
+            data["delivery_revenue_no_tax"] = _money(delivery_quantity * sales_unit_price_no_tax)
+            data["pending_delivery_amount_no_tax"] = _money((quantity - delivery_quantity) * sales_unit_price_no_tax)
+        if sales_rate is not None and sales_unit_price is not None:
+            data["delivery_value"] = _money(delivery_quantity * sales_unit_price)
+            data["pending_delivery_amount"] = _money((quantity - delivery_quantity) * sales_unit_price)
+        if purchase_rate is not None and purchase_unit_price_no_tax is not None:
+            data["delivery_cost_no_tax"] = _money(delivery_quantity * purchase_unit_price_no_tax)
+        if purchase_rate is not None and purchase_unit_price is not None:
+            data["delivery_cost"] = _money(delivery_quantity * purchase_unit_price)
+    return data
+
+
+def _as_decimal(value: object) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    return value if isinstance(value, Decimal) else Decimal(str(value))
+
+
+def _price(value: Decimal) -> Decimal:
+    return value.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+
+
+def _money(value: Decimal) -> Decimal:
+    return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 def _upsert_line_record(conn, table_name: str, order_line_id: int, data: dict[str, object]) -> None:

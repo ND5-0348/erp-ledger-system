@@ -8,10 +8,14 @@ import {
 
 assert.deepEqual(ORDER_PURCHASE_DETAIL_COLUMNS.map((column) => column.label), [
   '采购厂商',
+  '采购税率',
   '不含税采购单价',
   '采购单价',
-  '不含税成本',
-  '采购金额',
+  '不含税采购金额',
+  '含税采购金额',
+  '采购税金',
+  '人工成本',
+  '其他成本',
   '操作',
 ]);
 
