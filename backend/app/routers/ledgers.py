@@ -53,13 +53,38 @@ def list_ledgers(
     apply_department_scope(conditions, params, user)
 
     where_sql = " AND ".join(conditions)
+    source_sql = """
+        SELECT summary.*,
+               COALESCE(operating.delivery_value, 0) AS delivery_value,
+               COALESCE(operating.delivery_cost, 0) AS delivery_cost,
+               COALESCE(operating.total_paid, 0) AS total_paid,
+               COALESCE(operating.sales_invoice_amount, 0) AS sales_invoice_amount,
+               COALESCE(operating.received_invoice_amount, 0) AS received_invoice_amount
+        FROM v_project_ledger_summary summary
+        LEFT JOIN (
+          SELECT finance.project_code,
+                 SUM(COALESCE(finance.delivery_value, 0)) AS delivery_value,
+                 SUM(COALESCE(finance.delivery_cost, 0)) AS delivery_cost,
+                 SUM(COALESCE(finance.total_paid, 0)) AS total_paid,
+                 SUM(COALESCE(finance.sales_invoice_amount, 0)) AS sales_invoice_amount,
+                 SUM(COALESCE(received_invoice.invoice_amount, 0)) AS received_invoice_amount
+          FROM v_order_line_finance finance
+          LEFT JOIN (
+            SELECT order_line_id, SUM(COALESCE(invoice_amount, 0)) AS invoice_amount
+            FROM purchase_invoice
+            WHERE deleted_at IS NULL
+            GROUP BY order_line_id
+          ) received_invoice ON received_invoice.order_line_id = finance.order_line_id
+          GROUP BY finance.project_code
+        ) operating ON operating.project_code = summary.project_code
+    """
     with db() as conn:
-        total = conn.execute(text(f"SELECT COUNT(*) FROM v_project_ledger_summary WHERE {where_sql}"), params).scalar()
+        total = conn.execute(text(f"SELECT COUNT(*) FROM ({source_sql}) ledger_summary WHERE {where_sql}"), params).scalar()
         rows = conn.execute(
             text(
                 f"""
                 SELECT *
-                FROM v_project_ledger_summary
+                FROM ({source_sql}) ledger_summary
                 WHERE {where_sql}
                 ORDER BY last_order_date DESC, project_code
                 LIMIT :limit OFFSET :offset

@@ -14,11 +14,11 @@ import {
 } from 'lucide-react';
 import { OrderRecord, ProjectLedger, PurchaseRecord, SalesRecord } from '../types';
 import {
-  buildLedgerContractRows,
-  buildLedgerPaymentRows,
   getLedgerFinanceSummary,
   normalizeLedgerStatusLabel,
 } from '../lib/salesDetailModel';
+import { buildProjectOrderSummaries } from '../lib/projectOrderSummary';
+import OrderOperatingSummarySection from './OrderOperatingSummarySection';
 import {
   applyLedgerFilters,
   emptyLedgerFilters,
@@ -68,6 +68,7 @@ export default function LedgerScreen({ ledgers, orders, purchases, sales, onAddL
   const [invoiceEndDate, setInvoiceEndDate] = useState('');
   const [submittedFilters, setSubmittedFilters] = useState(emptyLedgerFilters);
   const [selectedLedger, setSelectedLedger] = useState<ProjectLedger | null>(null);
+  const [expandedOrderRows, setExpandedOrderRows] = useState<Set<string>>(() => new Set());
 
   // Pagination States
   const [currentPage, setCurrentPage] = useState(1);
@@ -184,14 +185,19 @@ export default function LedgerScreen({ ledgers, orders, purchases, sales, onAddL
     () => (selectedLedger ? getLedgerFinanceSummary(selectedLedger, selectedPurchases, selectedSales) : null),
     [selectedLedger, selectedPurchases, selectedSales],
   );
-  const selectedContractRows = useMemo(
-    () => buildLedgerContractRows(selectedOrders, selectedPurchases, selectedSales),
+  const selectedOrderSummaries = useMemo(
+    () => buildProjectOrderSummaries(selectedOrders, selectedPurchases, selectedSales),
     [selectedOrders, selectedPurchases, selectedSales],
   );
-  const selectedPaymentRows = useMemo(
-    () => buildLedgerPaymentRows(selectedOrders, selectedPurchases, selectedSales),
-    [selectedOrders, selectedPurchases, selectedSales],
-  );
+  const toggleOrderRow = (sectionId: string, orderId: string) => {
+    const key = `${sectionId}:${orderId}`;
+    setExpandedOrderRows((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
 
   // Totals & KPI Metrics based on FILTERED or ALL ledgers? Let's use ALL ledgers for global stats, but dynamically updated!
   const stats = useMemo(() => {
@@ -449,47 +455,51 @@ export default function LedgerScreen({ ledgers, orders, purchases, sales, onAddL
       {/* Main Data Table */}
       <section className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
         <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse table-fixed min-w-[1320px]">
+          <table className="w-full text-left border-collapse table-fixed min-w-[2260px]">
             <thead>
               <tr className="bg-slate-50/75 border-b border-slate-200">
                 <th className="px-6 py-3 font-semibold text-xs text-slate-500 w-[140px]">项目编号</th>
                 <th className="px-6 py-3 font-semibold text-xs text-slate-500 w-[200px]">客户单位名称</th>
                 <th className="px-6 py-3 font-semibold text-xs text-slate-500 w-[240px]">项目名称</th>
-                <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[140px]">销售订单金额</th>
-                <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[140px]">含税采购金额</th>
-                <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[140px]">回款合计</th>
-                <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[140px]">应收款</th>
-                <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[140px]">毛利润</th>
+                <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[180px]">A销售订单金额</th>
+                <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[180px]">A含税采购金额</th>
+                <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[160px]">B交付价值</th>
+                <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[160px]">B交付成本</th>
+                <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[160px]">D回款金额</th>
+                <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[160px]">D付款金额</th>
+                <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[160px]">E发票金额</th>
+                <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[160px]">E收票金额</th>
                 <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-center w-[120px]">查看</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {paginatedLedgers.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="px-6 py-10 text-center text-slate-400 text-sm">
+                  <td colSpan={12} className="px-6 py-10 text-center text-slate-400 text-sm">
                     没有符合条件的台账记录
                   </td>
                 </tr>
               ) : (
-                paginatedLedgers.map((item) => {
-                  const receivable = item.orderAmount - item.totalReceived;
-                  const profit = item.orderAmount - item.purchaseAmount;
-                  return (
+                paginatedLedgers.map((item) => (
                     <tr key={item.id} className="hover:bg-slate-50 transition-colors group">
                       <td className="px-6 py-4 text-xs font-mono font-medium text-blue-600">{item.id}</td>
                       <td className="px-6 py-4 text-xs text-slate-600 truncate" title={item.clientUnit}>{item.clientUnit}</td>
                       <td className="px-6 py-4 text-xs font-medium text-slate-900 truncate" title={item.projectName}>{item.projectName}</td>
                       <td className="px-6 py-4 text-xs text-right font-mono text-slate-950 font-medium">¥{formatMoney(item.orderAmount)}</td>
                       <td className="px-6 py-4 text-xs text-right font-mono text-slate-600">¥{formatMoney(item.purchaseAmount)}</td>
+                      <td className="px-6 py-4 text-xs text-right font-mono text-slate-600">¥{formatMoney(item.deliveryValue || 0)}</td>
+                      <td className="px-6 py-4 text-xs text-right font-mono text-slate-600">¥{formatMoney(item.deliveryCost || 0)}</td>
                       <td className="px-6 py-4 text-xs text-right font-mono text-slate-600">¥{formatMoney(item.totalReceived)}</td>
-                      <td className={`px-6 py-4 text-xs text-right font-mono font-semibold ${receivable > 0 ? 'text-rose-600' : 'text-slate-500'}`}>
-                        ¥{formatMoney(receivable)}
-                      </td>
-                      <td className="px-6 py-4 text-xs text-right font-mono font-semibold text-blue-600">¥{formatMoney(profit)}</td>
+                      <td className="px-6 py-4 text-xs text-right font-mono text-slate-600">¥{formatMoney(item.totalPaid || 0)}</td>
+                      <td className="px-6 py-4 text-xs text-right font-mono text-slate-600">¥{formatMoney(item.salesInvoiceAmount || 0)}</td>
+                      <td className="px-6 py-4 text-xs text-right font-mono text-slate-600">¥{formatMoney(item.receivedInvoiceAmount || 0)}</td>
                       <td className="px-6 py-4 text-center">
                         <button
                           type="button"
-                          onClick={() => setSelectedLedger(item)}
+                          onClick={() => {
+                            setExpandedOrderRows(new Set());
+                            setSelectedLedger(item);
+                          }}
                           className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-blue-100 bg-blue-50 text-blue-600 hover:bg-blue-100 hover:border-blue-200 transition-colors"
                           title="查看项目全部信息"
                           aria-label={`查看项目 ${item.id} 的全部信息`}
@@ -498,8 +508,7 @@ export default function LedgerScreen({ ledgers, orders, purchases, sales, onAddL
                         </button>
                       </td>
                     </tr>
-                  );
-                })
+                ))
               )}
             </tbody>
           </table>
@@ -625,7 +634,10 @@ export default function LedgerScreen({ ledgers, orders, purchases, sales, onAddL
               </div>
               <button
                 type="button"
-                onClick={() => setSelectedLedger(null)}
+                onClick={() => {
+                  setSelectedLedger(null);
+                  setExpandedOrderRows(new Set());
+                }}
                 className="inline-flex items-center justify-center w-8 h-8 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
                 aria-label="关闭项目详情"
               >
@@ -674,127 +686,30 @@ export default function LedgerScreen({ ledgers, orders, purchases, sales, onAddL
                 )}
               </section>
 
-              <section>
-                <h3 className="text-sm font-bold text-slate-900 mb-3">订单信息</h3>
-                <div className="overflow-x-auto rounded-lg border border-slate-200">
-                  <table className="w-full min-w-[760px] text-left">
-                    <thead className="bg-slate-50 text-xs text-slate-500">
-                      <tr>
-                        <th className="px-4 py-2 font-semibold">销售订单号</th>
-                        <th className="px-4 py-2 font-semibold">订单日期</th>
-                        <th className="px-4 py-2 font-semibold">物资/服务名称</th>
-                        <th className="px-4 py-2 font-semibold">数量</th>
-                        <th className="px-4 py-2 font-semibold text-right">销售订单金额</th>
-                        <th className="px-4 py-2 font-semibold text-right">交付数量</th>
-                        <th className="px-4 py-2 font-semibold">业务类型</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {selectedOrders.length === 0 ? (
-                        <tr>
-                          <td colSpan={7} className="px-4 py-6 text-center text-xs text-slate-400">暂无订单记录</td>
-                        </tr>
-                      ) : (
-                        selectedOrders.map((item) => (
-                          <tr key={`${item.projectId}-${item.orderId}`} className="text-xs text-slate-700">
-                            <td className="px-4 py-2 font-mono text-blue-600">{item.orderId}</td>
-                            <td className="px-4 py-2">{item.orderDate || '-'}</td>
-                            <td className="px-4 py-2 max-w-[220px] truncate" title={item.goodsName}>{item.goodsName}</td>
-                            <td className="px-4 py-2">{item.quantity}</td>
-                            <td className="px-4 py-2 text-right font-mono">¥{formatMoney(item.orderValue)}</td>
-                            <td className="px-4 py-2 text-right font-mono">{item.deliveredQty}</td>
-                            <td className="px-4 py-2">{item.businessType}</td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </section>
-
-              <section>
-                <h3 className="text-sm font-bold text-slate-900 mb-3">采购销售信息</h3>
-                <div className="overflow-x-auto rounded-lg border border-slate-200">
-                  <table className="w-full min-w-[1120px] text-left">
-                    <thead className="bg-slate-50 text-xs text-slate-500">
-                      <tr>
-                        <th className="px-4 py-2 font-semibold">销售订单号</th>
-                        <th className="px-4 py-2 font-semibold">物资/服务名称</th>
-                        <th className="px-4 py-2 font-semibold">采购合同号</th>
-                        <th className="px-4 py-2 font-semibold">采购厂商</th>
-                        <th className="px-4 py-2 font-semibold text-right">合同金额</th>
-                        <th className="px-4 py-2 font-semibold">销售合同号</th>
-                        <th className="px-4 py-2 font-semibold">签订日期</th>
-                        <th className="px-4 py-2 font-semibold text-right">合同金额</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {selectedContractRows.length === 0 ? (
-                        <tr>
-                          <td colSpan={8} className="px-4 py-6 text-center text-xs text-slate-400">暂无采购销售记录</td>
-                        </tr>
-                      ) : (
-                        selectedContractRows.map((item) => (
-                          <tr key={`${item.orderId}-${item.purchaseContractNo}-${item.salesContractNo}`} className="text-xs text-slate-700">
-                            <td className="px-4 py-2 font-mono text-blue-600">{item.orderId}</td>
-                            <td className="px-4 py-2 max-w-[240px] truncate" title={item.goodsName}>{item.goodsName}</td>
-                            <td className="px-4 py-2 font-mono text-blue-600">{item.purchaseContractNo}</td>
-                            <td className="px-4 py-2 max-w-[180px] truncate" title={item.supplier}>{item.supplier}</td>
-                            <td className="px-4 py-2 text-right font-mono">¥{formatMoney(item.purchaseContractAmount)}</td>
-                            <td className="px-4 py-2 font-mono text-blue-600">{item.salesContractNo}</td>
-                            <td className="px-4 py-2">{item.salesContractDate}</td>
-                            <td className="px-4 py-2 text-right font-mono">¥{formatMoney(item.salesContractValue)}</td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </section>
-
-              <section>
-                <h3 className="text-sm font-bold text-slate-900 mb-3">收款付款信息</h3>
-                <div className="overflow-x-auto rounded-lg border border-slate-200">
-                  <table className="w-full min-w-[1280px] text-left">
-                    <thead className="bg-slate-50 text-xs text-slate-500">
-                      <tr>
-                        <th className="px-4 py-2 font-semibold">销售订单号</th>
-                        <th className="px-4 py-2 font-semibold">物资/服务名称</th>
-                        <th className="px-4 py-2 font-semibold text-right">采购付款金额</th>
-                        <th className="px-4 py-2 font-semibold text-right">应付账款</th>
-                        <th className="px-4 py-2 font-semibold">销售回款日</th>
-                        <th className="px-4 py-2 font-semibold text-right">回款金额</th>
-                        <th className="px-4 py-2 font-semibold text-right">回款占比</th>
-                        <th className="px-4 py-2 font-semibold text-right">应收账款</th>
-                        <th className="px-4 py-2 font-semibold text-right">毛利润</th>
-                        <th className="px-4 py-2 font-semibold text-right">毛利率</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {selectedPaymentRows.length === 0 ? (
-                        <tr>
-                          <td colSpan={10} className="px-4 py-6 text-center text-xs text-slate-400">暂无收款付款记录</td>
-                        </tr>
-                      ) : (
-                        selectedPaymentRows.map((item) => (
-                          <tr key={`${item.orderId}-${item.goodsName}`} className="text-xs text-slate-700">
-                            <td className="px-4 py-2 font-mono text-blue-600">{item.orderId}</td>
-                            <td className="px-4 py-2 max-w-[240px] truncate" title={item.goodsName}>{item.goodsName}</td>
-                            <td className="px-4 py-2 text-right font-mono">¥{formatMoney(item.purchasePaymentAmount)}</td>
-                            <td className="px-4 py-2 text-right font-mono">¥{formatMoney(item.accountsPayable)}</td>
-                            <td className="px-4 py-2">{item.salesReceiptDate}</td>
-                            <td className="px-4 py-2 text-right font-mono">¥{formatMoney(item.receiptAmount)}</td>
-                            <td className="px-4 py-2 text-right font-mono">{formatMoney(item.receiptRatio)}%</td>
-                            <td className="px-4 py-2 text-right font-mono">¥{formatMoney(item.accountsReceivable)}</td>
-                            <td className="px-4 py-2 text-right font-mono">¥{formatMoney(item.grossProfit)}</td>
-                            <td className="px-4 py-2 text-right font-mono">{formatMoney(item.grossProfitRate)}%</td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </section>
+              <OrderOperatingSummarySection
+                title="销售信息"
+                sectionId="sales"
+                variant="sales"
+                rows={selectedOrderSummaries}
+                expandedRows={expandedOrderRows}
+                onToggle={toggleOrderRow}
+              />
+              <OrderOperatingSummarySection
+                title="采购信息"
+                sectionId="purchase"
+                variant="purchase"
+                rows={selectedOrderSummaries}
+                expandedRows={expandedOrderRows}
+                onToggle={toggleOrderRow}
+              />
+              <OrderOperatingSummarySection
+                title="收款付款信息"
+                sectionId="payments"
+                variant="all"
+                rows={selectedOrderSummaries}
+                expandedRows={expandedOrderRows}
+                onToggle={toggleOrderRow}
+              />
             </div>
           </div>
         </div>

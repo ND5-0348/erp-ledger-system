@@ -14,11 +14,12 @@ import {
   X,
 } from 'lucide-react';
 import { api, BackendPurchaseDetail } from '../api';
-import { PurchaseRecord } from '../types';
+import { OrderRecord, PurchaseRecord } from '../types';
 import { applyPurchaseFilters, emptyPurchaseFilters, getDepartmentOptions, submitQueryFilters } from '../lib/queryFilterModel';
 
 interface PurchasesScreenProps {
   purchases: PurchaseRecord[];
+  orders: OrderRecord[];
   canEnterPurchases: boolean;
   canEditPurchases: boolean;
   canDeletePurchases: boolean;
@@ -48,7 +49,7 @@ function parseAmount(value: string) {
   return value === '' ? null : Number(value);
 }
 
-export default function PurchasesScreen({ purchases, canEnterPurchases, canEditPurchases, canDeletePurchases }: PurchasesScreenProps) {
+export default function PurchasesScreen({ purchases, orders, canEnterPurchases, canEditPurchases, canDeletePurchases }: PurchasesScreenProps) {
   const [projectId, setProjectId] = useState('');
   const [orderId, setOrderId] = useState('');
   const [manager, setManager] = useState('');
@@ -116,6 +117,22 @@ export default function PurchasesScreen({ purchases, canEnterPurchases, canEditP
   const paginationItems = getPaginationItems(totalPages);
   const nextPaymentPhase = (detail?.payments.length || 0) + 1;
   const departmentOptions = useMemo(() => getDepartmentOptions(purchases), [purchases]);
+  const orderIndex = useMemo(() => {
+    const byLineId = new Map<number, OrderRecord>();
+    const byOrderKey = new Map<string, OrderRecord>();
+
+    orders.forEach((order) => {
+      if (order.orderLineId !== undefined) byLineId.set(order.orderLineId, order);
+      byOrderKey.set(`${order.projectId}\u0000${order.orderId}`, order);
+    });
+
+    return { byLineId, byOrderKey };
+  }, [orders]);
+
+  const findOrder = (item: PurchaseRecord) => (
+    (item.orderLineId !== undefined ? orderIndex.byLineId.get(item.orderLineId) : undefined)
+    ?? orderIndex.byOrderKey.get(`${item.projectId}\u0000${item.orderId}`)
+  );
 
   const handleReset = () => {
     setProjectId('');
@@ -414,11 +431,13 @@ export default function PurchasesScreen({ purchases, canEnterPurchases, canEditP
 
       <section className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
         <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse table-fixed min-w-[1100px]">
+          <table className="w-full text-left border-collapse table-fixed min-w-[1640px]">
             <thead>
               <tr className="bg-slate-50/75 border-b border-slate-200">
                 <TableHeader className="w-[140px]">项目编号</TableHeader>
                 <TableHeader className="w-[140px]">销售订单号</TableHeader>
+                <TableHeader className="w-[300px]">项目名称</TableHeader>
+                <TableHeader className="w-[260px]">采购厂商</TableHeader>
                 <TableHeader className="w-[120px]">客户经理</TableHeader>
                 <TableHeader className="w-[160px]">公司合同号</TableHeader>
                 <TableHeader className="text-right w-[140px]">合同金额</TableHeader>
@@ -430,31 +449,36 @@ export default function PurchasesScreen({ purchases, canEnterPurchases, canEditP
             <tbody className="divide-y divide-slate-100">
               {paginatedPurchases.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="px-6 py-10 text-center text-slate-400 text-sm">暂无符合条件的采购记录</td>
+                  <td colSpan={10} className="px-6 py-10 text-center text-slate-400 text-sm">暂无符合条件的采购记录</td>
                 </tr>
               ) : (
-                paginatedPurchases.map((item, index) => (
-                  <tr key={`${item.orderLineId || item.contractNo}-${index}`} className="hover:bg-slate-50/80 transition-colors">
-                    <td className="px-6 py-4 text-xs font-mono text-slate-500">{item.projectId}</td>
-                    <td className="px-6 py-4 text-xs font-mono text-slate-500">{item.orderId}</td>
-                    <td className="px-6 py-4 text-xs text-slate-700 font-medium">{item.manager}</td>
-                    <td className="px-6 py-4 text-xs font-mono text-slate-800">{item.contractNo}</td>
-                    <td className="px-6 py-4 text-xs text-right font-mono font-medium text-slate-900">{formatMoney(item.contractAmount)}</td>
-                    <td className="px-6 py-4 text-xs text-right font-mono text-slate-600">{formatMoney(item.invoiceAmount)}</td>
-                    <td className="px-6 py-4 text-xs text-right font-mono font-semibold text-slate-800">{formatMoney(item.paymentAmount)}</td>
-                    <td className="px-6 py-4 text-center">
-                      <button
-                        type="button"
-                        onClick={() => loadDetail(item)}
-                        title="查看采购信息"
-                        aria-label={`查看采购 ${item.orderId} 的详情`}
-                        className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-blue-100 bg-blue-50 text-blue-600 hover:bg-blue-100 hover:border-blue-200 transition-colors"
-                      >
-                        <Eye className="w-4 h-4" />
-                      </button>
-                    </td>
-                  </tr>
-                ))
+                paginatedPurchases.map((item, index) => {
+                  const order = findOrder(item);
+                  return (
+                    <tr key={`${item.orderLineId || item.contractNo}-${index}`} className="hover:bg-slate-50/80 transition-colors">
+                      <td className="px-6 py-4 text-xs font-mono text-slate-500">{item.projectId}</td>
+                      <td className="px-6 py-4 text-xs font-mono text-slate-500">{item.orderId}</td>
+                      <td className="px-6 py-4 align-top text-xs leading-5 text-slate-700 whitespace-normal break-words">{order?.projectName || '-'}</td>
+                      <td className="px-6 py-4 align-top text-xs leading-5 text-slate-700 whitespace-normal break-words">{item.supplier || '-'}</td>
+                      <td className="px-6 py-4 text-xs text-slate-700 font-medium">{item.manager}</td>
+                      <td className="px-6 py-4 text-xs font-mono text-slate-800">{item.contractNo}</td>
+                      <td className="px-6 py-4 text-xs text-right font-mono font-medium text-slate-900">{formatMoney(item.contractAmount)}</td>
+                      <td className="px-6 py-4 text-xs text-right font-mono text-slate-600">{formatMoney(item.invoiceAmount)}</td>
+                      <td className="px-6 py-4 text-xs text-right font-mono font-semibold text-slate-800">{formatMoney(item.paymentAmount)}</td>
+                      <td className="px-6 py-4 text-center">
+                        <button
+                          type="button"
+                          onClick={() => loadDetail(item)}
+                          title="查看采购信息"
+                          aria-label={`查看采购 ${item.orderId} 的详情`}
+                          className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-blue-100 bg-blue-50 text-blue-600 hover:bg-blue-100 hover:border-blue-200 transition-colors"
+                        >
+                          <Eye className="w-4 h-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>

@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import quote
 
 from openpyxl import load_workbook
+from openpyxl.styles import Font, PatternFill
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
@@ -31,6 +32,23 @@ TEMPLATE_HEADERS = [
     "已交付未开票", "回款日期", "缴款单号", "回款金额", "回款占比", "回款日期", "缴款单号",
     "回款金额", "回款占比", "回款合计", "应收款", "是否关闭",
 ]
+SAMPLE_PROJECT_CODE = "示例项目编号-请替换"
+SAMPLE_ORDER_NO = "示例销售订单号-请替换"
+SAMPLE_TEMPLATE_ROW = [
+    "全额", SAMPLE_PROJECT_CODE, "科贸部", "安徽分公司", "示例客户经理", date(2026, 7, 22), "商品销售", "常规业务",
+    "示例三级团队", "示例客户单位", "示例最终用户", "示例区域平台", SAMPLE_ORDER_NO, "示例项目名称",
+    "示例设备", "EXAMPLE-001", "台", 10, 100, 113, 1000, 1130, "示例采购厂商", 70, 79.1, 700, 791,
+    date(2026, 7, 23), 10, 1000, 1130, 700, 791, 0, 0, 0, "CGHT-EXAMPLE-001", "验收后30日内付款",
+    "合同签订后30日内", 791, 0, date(2026, 7, 24), "CGFP-EXAMPLE-001", 791, date(2026, 7, 25),
+    "RK-EXAMPLE-001", 791, date(2026, 7, 26), "RZ-EXAMPLE-001", 791, 0, date(2026, 8, 25),
+    date(2026, 7, 27), "FK-EXAMPLE-001", 791, None, None, None, 791, 0, 300, 39, 0, 339, 0.3,
+    date(2026, 7, 22), "XSHT-EXAMPLE-001", 1130, "合同签订后30日内", 0, "KP-EXAMPLE-001",
+    date(2026, 7, 28), "FP-EXAMPLE-001", 1130, 0, 0, date(2026, 7, 29), "JK-EXAMPLE-001", 1130, 1,
+    None, None, None, None, 1130, 0, "进行中",
+]
+
+if len(SAMPLE_TEMPLATE_ROW) != len(TEMPLATE_HEADERS):
+    raise RuntimeError("业务台账示例行字段数量与模板表头不一致")
 
 
 def content_disposition(file_name: str) -> str:
@@ -40,7 +58,34 @@ def content_disposition(file_name: str) -> str:
 def template_bytes() -> bytes:
     if not TEMPLATE_PATH.is_file():
         raise FileNotFoundError(f"导入模板不存在：{TEMPLATE_PATH}")
-    return TEMPLATE_PATH.read_bytes()
+    workbook = load_workbook(TEMPLATE_PATH)
+    worksheet = workbook["Sheet1"]
+    if worksheet.max_row > 1:
+        worksheet.delete_rows(2, worksheet.max_row - 1)
+    example_fill = PatternFill(fill_type="solid", fgColor="FFF7D6")
+    example_font = Font(color="7C5C00")
+    for column_no, value in enumerate(SAMPLE_TEMPLATE_ROW, start=1):
+        cell = worksheet.cell(2, column_no, value)
+        _copy_header_alignment(worksheet.cell(1, column_no), cell)
+        cell.fill = example_fill
+        cell.font = example_font
+        if column_no in DATE_COLUMNS and isinstance(value, (date, datetime)):
+            cell.number_format = "yyyy-mm-dd"
+        elif column_no in {65, 80, 84} and value is not None:
+            cell.number_format = "0.00%"
+        elif column_no in NUMBER_COLUMNS and value is not None:
+            cell.number_format = "#,##0.00"
+    worksheet.row_dimensions[2].height = 24
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    return output.getvalue()
+
+
+def is_template_sample_row(row: tuple[Any, ...]) -> bool:
+    if len(row) < 13:
+        return False
+    return str(row[1] or "").strip() == SAMPLE_PROJECT_CODE and str(row[12] or "").strip() == SAMPLE_ORDER_NO
 
 
 def export_ledger_bytes(conn: Connection, user: CurrentUser) -> bytes:

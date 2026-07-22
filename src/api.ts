@@ -34,6 +34,11 @@ export interface BackendDashboardSummary {
 }
 
 export interface BackendProjectLedger {
+  delivery_value?: number;
+  delivery_cost?: number;
+  total_paid?: number;
+  sales_invoice_amount?: number;
+  received_invoice_amount?: number;
   project_code: string;
   project_name: string | null;
   department: string | null;
@@ -108,6 +113,7 @@ export interface BackendPurchaseRecord {
   purchase_contract_no: string | null;
   purchase_contract_signed_amount: number | null;
   purchase_amount: number | null;
+  received_invoice_amount: number | null;
   total_paid: number | null;
   accounts_payable: number | null;
   latest_payment_date?: string | null;

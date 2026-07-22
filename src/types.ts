@@ -3,6 +3,11 @@
  */
 
 export interface ProjectLedger {
+  deliveryValue?: number; // B交付价值
+  deliveryCost?: number; // B交付成本
+  totalPaid?: number; // D付款金额（多期合计）
+  salesInvoiceAmount?: number; // E发票金额（多期合计）
+  receivedInvoiceAmount?: number; // E收票金额（多期合计）
   id: string; // 项目编号 (e.g. PJ-2023-001)
   clientUnit: string; // 客户单位名称
   projectName: string; // 项目名称
@@ -70,7 +75,7 @@ export interface PurchaseRecord {
   department: string; // 部门
   contractNo: string; // 公司合同号
   contractAmount: number; // 合同金额
-  invoiceAmount: number; // 收票金额
+  invoiceAmount: number; // 收票金额（多期合计）
   paymentAmount: number; // 付款金额
   supplier: string; // 采购厂商
   paymentDate?: string; // 付款/回款时间

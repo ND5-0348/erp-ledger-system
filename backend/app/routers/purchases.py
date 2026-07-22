@@ -96,6 +96,12 @@ def list_purchases(
     source_sql = """
         SELECT v.*,
                (
+                 SELECT COALESCE(SUM(pi.invoice_amount), 0)
+                 FROM purchase_invoice pi
+                 WHERE pi.order_line_id = v.order_line_id
+                   AND pi.deleted_at IS NULL
+               ) AS received_invoice_amount,
+               (
                  SELECT MAX(pp.payment_date)
                  FROM purchase_payment pp
                  WHERE pp.order_line_id = v.order_line_id
@@ -110,7 +116,7 @@ def list_purchases(
                 f"""
                 SELECT order_line_id, project_code, order_no, account_manager, department, supplier_name,
                        purchase_contract_no, purchase_contract_signed_amount,
-                       purchase_amount, total_paid, accounts_payable, latest_payment_date
+                       purchase_amount, received_invoice_amount, total_paid, accounts_payable, latest_payment_date
                 FROM ({source_sql}) purchase_detail
                 WHERE {where_sql}
                 ORDER BY order_date DESC, project_code

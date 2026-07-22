@@ -15,7 +15,7 @@ from sqlalchemy.engine import Connection
 from .audit import write_operation_log
 from .auth import CurrentUser, can_access_department
 from .config import DOCS_DIR
-from .ledger_excel import TEMPLATE_HEADERS
+from .ledger_excel import SAMPLE_ORDER_NO, SAMPLE_PROJECT_CODE, TEMPLATE_HEADERS, is_template_sample_row
 from .validation import validate_business_date
 
 
@@ -204,10 +204,14 @@ def import_excel(
         worksheet.iter_rows(min_row=data_start_row, values_only=True),
         start=data_start_row,
     ):
+        if strict_template and is_template_sample_row(row):
+            continue
         project_code = _as_text(_row_value(row, position(2, 2)))
         order_no = _as_text(_row_value(row, position(13, 13)))
         if not any(value not in (None, "") for value in row):
             continue
+        if strict_template and (project_code == SAMPLE_PROJECT_CODE or order_no == SAMPLE_ORDER_NO):
+            raise ValueError(f"第 {excel_row_no} 行仍包含示例占位内容，请完整替换项目编号和销售订单号")
         if not project_code or not order_no:
             message = f"第 {excel_row_no} 行缺少项目编号或订单号"
             if strict_template:
