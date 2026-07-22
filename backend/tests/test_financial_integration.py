@@ -15,7 +15,7 @@ from app.auth import ALL_PERMISSIONS, CurrentUser, ensure_default_admin
 from app.config import ROOT_DIR, settings
 from app.db import _split_sql, db, engine, server_engine
 from app.main import app
-from app.ledger_excel import TEMPLATE_HEADERS
+from app.ledger_excel import SAMPLE_ORDER_NO, SAMPLE_PROJECT_CODE, TEMPLATE_HEADERS
 from app.routers import purchases
 
 TEST_DATABASE_PREFIX = "erp_ledger_test_"
@@ -218,7 +218,33 @@ def test_excel_template_import_export_round_trip(client: TestClient, headers: di
     assert template_response.status_code == 200, template_response.text
     template = load_workbook(BytesIO(template_response.content), read_only=True, data_only=True)
     assert [template["Sheet1"].cell(1, column).value for column in range(1, 88)] == TEMPLATE_HEADERS
+    assert template["Sheet1"].cell(2, 2).value == SAMPLE_PROJECT_CODE
+    assert template["Sheet1"].cell(2, 13).value == SAMPLE_ORDER_NO
+    assert template["Sheet1"].cell(2, 23).value == "示例采购厂商"
     template.close()
+
+    untouched_template = client.post(
+        "/api/orders/import-excel?filename=市场部业务台账模板.xlsx",
+        content=template_response.content,
+        headers={**headers, "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+    )
+    assert untouched_template.status_code == 422, untouched_template.text
+    assert "没有可导入的业务数据" in untouched_template.json()["detail"]
+    assert _count("order_line") == 0
+
+    partial_workbook = load_workbook(BytesIO(template_response.content))
+    partial_workbook["Sheet1"].cell(2, 2, "XL-PARTIAL-EXAMPLE")
+    partial_output = BytesIO()
+    partial_workbook.save(partial_output)
+    partial_workbook.close()
+    partial_template = client.post(
+        "/api/orders/import-excel?filename=市场部业务台账模板.xlsx",
+        content=partial_output.getvalue(),
+        headers={**headers, "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+    )
+    assert partial_template.status_code == 422, partial_template.text
+    assert "仍包含示例占位内容" in partial_template.json()["detail"]
+    assert _count("order_line") == 0
 
     content = _excel_import_file()
     import_response = client.post(

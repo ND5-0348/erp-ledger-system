@@ -54,6 +54,11 @@ function optionalNumber(value: number | null | undefined) {
 
 function mapLedger(item: BackendProjectLedger): ProjectLedger {
   return {
+    deliveryValue: Number(item.delivery_value || 0),
+    deliveryCost: Number(item.delivery_cost || 0),
+    totalPaid: Number(item.total_paid || 0),
+    salesInvoiceAmount: Number(item.sales_invoice_amount || 0),
+    receivedInvoiceAmount: Number(item.received_invoice_amount || 0),
     id: item.project_code,
     clientUnit: item.customer_unit_name || fallbackText,
     projectName: item.project_name || fallbackText,
@@ -125,7 +130,7 @@ function mapPurchase(item: BackendPurchaseRecord): PurchaseRecord {
     department: item.department || fallbackText,
     contractNo: item.purchase_contract_no || fallbackText,
     contractAmount: Number(item.purchase_contract_signed_amount || 0),
-    invoiceAmount: Number(item.purchase_amount || 0),
+    invoiceAmount: Number(item.received_invoice_amount || 0),
     paymentAmount: Number(item.total_paid || 0),
     supplier: item.supplier_name || fallbackText,
     paymentDate: dateOnly(item.latest_payment_date),
@@ -578,8 +583,8 @@ export default function App() {
               canDeleteOrders={canDeleteOrders}
             />
           )}
-          {currentScreen === 'purchases' && <PurchasesScreen purchases={purchases} canEnterPurchases={canEnterPurchases} canEditPurchases={canEditPurchases} canDeletePurchases={canDeletePurchases} />}
-          {currentScreen === 'sales' && <SalesScreen sales={sales} canEnterSales={canEnterSales} canEditSales={canEditSales} canDeleteSales={canDeleteSales} />}
+          {currentScreen === 'purchases' && <PurchasesScreen purchases={purchases} orders={orders} canEnterPurchases={canEnterPurchases} canEditPurchases={canEditPurchases} canDeletePurchases={canDeletePurchases} />}
+          {currentScreen === 'sales' && <SalesScreen sales={sales} orders={orders} canEnterSales={canEnterSales} canEditSales={canEditSales} canDeleteSales={canDeleteSales} />}
           {currentScreen === 'system' && (
             <SystemScreen
               logs={logs}

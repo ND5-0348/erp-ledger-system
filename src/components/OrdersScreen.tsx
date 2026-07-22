@@ -919,23 +919,27 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onDown
       {/* Table Section */}
       <section className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col min-w-0">
         <div className="overflow-x-auto max-w-full">
-          <table className="w-full text-left border-collapse table-fixed min-w-[1100px]">
+          <table className="w-full text-left border-collapse table-fixed min-w-[1900px]">
             <thead>
               <tr className="bg-slate-50/75 border-b border-slate-200">
                 <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 w-[140px]">项目编号</th>
                 <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 w-[160px]">销售订单号</th>
+                <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 w-[120px]">客户经理</th>
+                <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 w-[140px]">用户</th>
+                <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 w-[220px]">项目名称</th>
                 <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 w-[120px]">订单日期</th>
                 <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 w-[240px]">物资/服务名称</th>
                 <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 text-center w-[90px]">数量</th>
                 <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 text-right w-[140px]">销售订单金额</th>
                 <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 text-center w-[90px]">交付数量</th>
+                <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 text-right w-[140px]">交付金额</th>
                 <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 text-center w-[132px]">操作</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {paginatedOrders.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="px-6 py-10 text-center text-slate-400 text-sm">
+                  <td colSpan={12} className="px-6 py-10 text-center text-slate-400 text-sm">
                     暂无符合条件的订单记录
                   </td>
                 </tr>
@@ -944,6 +948,9 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onDown
                   <tr key={`${item.orderId}-${index}`} className="hover:bg-slate-50/80 transition-colors group">
                     <td className="px-6 py-4 text-xs font-mono text-slate-500">{item.projectId}</td>
                     <td className="px-6 py-4 text-xs font-mono font-semibold text-blue-600">{item.orderId}</td>
+                    <td className="px-6 py-4 text-xs text-slate-700 truncate" title={item.manager || '-'}>{item.manager || '-'}</td>
+                    <td className="px-6 py-4 text-xs text-slate-700 truncate" title={item.userName || '-'}>{item.userName || '-'}</td>
+                    <td className="px-6 py-4 text-xs font-medium text-slate-900 truncate" title={item.projectName || '-'}>{item.projectName || '-'}</td>
                     <td className="px-6 py-4 text-xs text-slate-600 font-mono">{item.orderDate}</td>
                     <td className="px-6 py-4 text-xs font-medium text-slate-900 truncate" title={item.goodsName}>{item.goodsName}</td>
                     <td className="px-6 py-4 text-xs text-center text-slate-700 font-sans">{item.quantity}</td>
@@ -951,6 +958,7 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onDown
                       ¥{new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2 }).format(item.orderValue)}
                     </td>
                     <td className="px-6 py-4 text-xs text-center font-mono font-semibold text-slate-800">{item.deliveredQty}</td>
+                    <td className="px-6 py-4 text-xs text-right font-mono font-medium text-slate-900">¥{formatMoney(item.deliveryValue || 0)}</td>
                     <td className="px-6 py-4 text-center">
                       <div className="inline-flex items-center justify-center gap-1">
                       <button

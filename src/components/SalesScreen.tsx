@@ -14,12 +14,13 @@ import {
   X,
 } from 'lucide-react';
 import { api, BackendSalesDetail } from '../api';
-import { SalesRecord } from '../types';
+import { OrderRecord, SalesRecord } from '../types';
 import { buildSalesInvoiceDraft, getNextReceiptPhase } from '../lib/salesDetailModel';
 import { applySalesFilters, emptySalesFilters, getDepartmentOptions, submitQueryFilters } from '../lib/queryFilterModel';
 
 interface SalesScreenProps {
   sales: SalesRecord[];
+  orders: OrderRecord[];
   canEnterSales: boolean;
   canEditSales: boolean;
   canDeleteSales: boolean;
@@ -56,7 +57,7 @@ function formatRatio(value?: number | null) {
   return `${moneyFormatter.format(percent)}%`;
 }
 
-export default function SalesScreen({ sales, canEnterSales, canEditSales, canDeleteSales }: SalesScreenProps) {
+export default function SalesScreen({ sales, orders, canEnterSales, canEditSales, canDeleteSales }: SalesScreenProps) {
   const [projectId, setProjectId] = useState('');
   const [orderId, setOrderId] = useState('');
   const [manager, setManager] = useState('');
@@ -113,6 +114,22 @@ export default function SalesScreen({ sales, canEnterSales, canEditSales, canDel
   const summary = detail?.summary;
   const activeOrderLineId = selectedSale?.orderLineId || Number(summary?.primary_order_line_id || 0);
   const departmentOptions = useMemo(() => getDepartmentOptions(sales), [sales]);
+  const orderIndex = useMemo(() => {
+    const byLineId = new Map<number, OrderRecord>();
+    const byOrderKey = new Map<string, OrderRecord>();
+
+    orders.forEach((order) => {
+      if (order.orderLineId !== undefined) byLineId.set(order.orderLineId, order);
+      byOrderKey.set(`${order.projectId}\u0000${order.orderId}`, order);
+    });
+
+    return { byLineId, byOrderKey };
+  }, [orders]);
+
+  const findOrder = (item: SalesRecord) => (
+    (item.orderLineId !== undefined ? orderIndex.byLineId.get(item.orderLineId) : undefined)
+    ?? orderIndex.byOrderKey.get(`${item.projectId}\u0000${item.orderId}`)
+  );
 
   const handleReset = () => {
     setProjectId('');
@@ -367,41 +384,50 @@ export default function SalesScreen({ sales, canEnterSales, canEditSales, canDel
         </div>
 
         <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse table-fixed min-w-[1100px]">
+          <table className="w-full text-left border-collapse table-fixed min-w-[1740px]">
             <thead>
               <tr className="bg-slate-50/75 border-b border-slate-200">
                 <TableHeader className="w-[140px]">项目编号</TableHeader>
                 <TableHeader className="w-[160px]">销售订单号</TableHeader>
                 <TableHeader className="w-[120px]">客户经理</TableHeader>
-                <TableHeader className="w-[140px]">公司合同号</TableHeader>
-                <TableHeader className="w-[120px]">合同签订日期</TableHeader>
+                <TableHeader className="w-[160px]">用户</TableHeader>
+                <TableHeader className="w-[220px]">项目名称</TableHeader>
+                <TableHeader className="w-[120px]">订单日期</TableHeader>
                 <TableHeader className="text-right w-[140px]">合同金额</TableHeader>
+                <TableHeader className="text-right w-[140px]">交付金额</TableHeader>
                 <TableHeader className="text-right w-[140px]">开票金额</TableHeader>
+                <TableHeader className="text-right w-[140px]">回款金额</TableHeader>
                 <TableHeader className="text-center w-[80px]">操作</TableHeader>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {paginatedSales.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="px-6 py-10 text-center text-slate-400 text-sm">暂无符合条件的销售记录</td>
+                  <td colSpan={11} className="px-6 py-10 text-center text-slate-400 text-sm">暂无符合条件的销售记录</td>
                 </tr>
               ) : (
-                paginatedSales.map((item, index) => (
-                  <tr key={`${item.orderLineId || item.contractNo}-${index}`} className="hover:bg-slate-50/80 transition-colors">
-                    <td className="px-6 py-4 text-xs font-mono text-slate-500">{item.projectId}</td>
-                    <td className="px-6 py-4 text-xs font-mono text-slate-500 truncate" title={item.orderId}>{item.orderId}</td>
-                    <td className="px-6 py-4 text-xs text-slate-700 font-medium">{item.manager}</td>
-                    <td className="px-6 py-4 text-xs font-mono text-slate-800">{item.contractNo}</td>
-                    <td className="px-6 py-4 text-xs text-slate-600 font-mono">{item.contractDate || '-'}</td>
-                    <td className="px-6 py-4 text-xs text-right font-mono font-medium text-slate-900">{formatMoney(item.contractValue)}</td>
-                    <td className="px-6 py-4 text-xs text-right font-mono text-emerald-600 font-medium">{formatMoney(item.invoiceAmount)}</td>
-                    <td className="px-6 py-4 text-center">
-                      <button type="button" onClick={() => loadDetail(item)} title="查看销售信息" aria-label={`查看销售 ${item.orderId} 的信息`} className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-blue-100 bg-blue-50 text-blue-600 hover:bg-blue-100 hover:border-blue-200 transition-colors">
-                        <Eye className="w-4 h-4" />
-                      </button>
-                    </td>
-                  </tr>
-                ))
+                paginatedSales.map((item, index) => {
+                  const order = findOrder(item);
+                  return (
+                    <tr key={`${item.orderLineId || item.contractNo}-${index}`} className="hover:bg-slate-50/80 transition-colors">
+                      <td className="px-6 py-4 text-xs font-mono text-slate-500">{item.projectId}</td>
+                      <td className="px-6 py-4 text-xs font-mono text-slate-500 truncate" title={item.orderId}>{item.orderId}</td>
+                      <td className="px-6 py-4 text-xs text-slate-700 font-medium">{item.manager}</td>
+                      <td className="px-6 py-4 text-xs text-slate-700 truncate" title={order?.userName || ''}>{order?.userName || '-'}</td>
+                      <td className="px-6 py-4 text-xs text-slate-700 truncate" title={order?.projectName || ''}>{order?.projectName || '-'}</td>
+                      <td className="px-6 py-4 text-xs text-slate-600 font-mono">{order?.orderDate || '-'}</td>
+                      <td className="px-6 py-4 text-xs text-right font-mono font-medium text-slate-900">{formatMoney(item.contractValue)}</td>
+                      <td className="px-6 py-4 text-xs text-right font-mono text-slate-700">{formatMoney(order?.deliveryValue)}</td>
+                      <td className="px-6 py-4 text-xs text-right font-mono text-emerald-600 font-medium">{formatMoney(item.invoiceAmount)}</td>
+                      <td className="px-6 py-4 text-xs text-right font-mono text-blue-600 font-medium">{formatMoney(item.totalReceived)}</td>
+                      <td className="px-6 py-4 text-center">
+                        <button type="button" onClick={() => loadDetail(item)} title="查看销售信息" aria-label={`查看销售 ${item.orderId} 的信息`} className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-blue-100 bg-blue-50 text-blue-600 hover:bg-blue-100 hover:border-blue-200 transition-colors">
+                          <Eye className="w-4 h-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>
