@@ -586,12 +586,13 @@ export default function SystemScreen({
         </div>
 
         <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse table-fixed min-w-[900px]">
+          <table className="w-full text-left border-collapse table-fixed min-w-[1100px]">
             <thead>
               <tr className="bg-slate-50/75 border-b border-slate-200">
                 <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 w-[180px]">用户</th>
                 <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 w-[140px]">操作模块</th>
-                <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 w-[420px]">详情</th>
+                <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 w-[500px]">详情</th>
+                <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 text-center w-[90px]">操作结果</th>
                 <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 text-center w-[160px]">操作时间</th>
               </tr>
             </thead>
@@ -609,7 +610,18 @@ export default function SystemScreen({
                       {log.module}
                     </span>
                   </td>
-                  <td className="px-6 py-3.5 text-xs text-slate-600 truncate" title={log.details}>{log.details}</td>
+                  <td className="px-6 py-3.5 text-xs text-slate-600 whitespace-normal break-words leading-5" title={log.details}>{log.details}</td>
+                  <td className="px-6 py-3.5 text-xs text-center">
+                    <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                      log.status === '成功'
+                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-100'
+                        : log.status === '失败'
+                          ? 'bg-red-50 text-red-700 border border-red-100'
+                          : 'bg-amber-50 text-amber-700 border border-amber-100'
+                    }`}>
+                      {log.status}
+                    </span>
+                  </td>
                   <td className="px-6 py-3.5 text-xs text-center text-slate-400 font-mono">{log.time}</td>
                 </tr>
               ))}

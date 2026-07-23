@@ -131,6 +131,7 @@ assert.deepEqual(
   },
 );
 assert.equal(summaries[0].lines[0].supplier, '厂商一');
+assert.equal(summaries[0].lines[0].orderLineId, 11, '汇总展开行应保留原订单明细ID，供安全修改或删除');
 assert.equal(summaries[1].lines.length, 1);
 
 console.log('project order summary tests passed');

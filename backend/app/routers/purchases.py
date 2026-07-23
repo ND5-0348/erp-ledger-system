@@ -10,7 +10,7 @@ from ..audit import write_operation_log
 from ..auth import CurrentUser, apply_department_scope, can_access_department, get_current_user, require_permission
 from ..db import db
 from ..serializers import clean_row, clean_rows
-from ..validation import BusinessDate, Money
+from ..validation import BusinessDate, Money, PreciseNumber, Ratio
 
 router = APIRouter(prefix="/api/purchases", tags=["purchases"])
 
@@ -53,6 +53,17 @@ class PurchasePaymentCreate(BaseModel):
     payment_date: BusinessDate | None = None
     payment_voucher_no: str | None = None
     payment_amount: Money
+
+
+class PurchaseSummaryUpdate(BaseModel):
+    supplier_name: str | None = None
+    purchase_tax_rate: Ratio | None = None
+    purchase_unit_price_no_tax: PreciseNumber | None = None
+    purchase_unit_price: PreciseNumber | None = None
+    cost_no_tax: Money | None = None
+    purchase_amount: Money | None = None
+    labor_cost: Money | None = None
+    other_cost: Money | None = None
 
 
 @router.get("")
@@ -240,6 +251,85 @@ def get_purchase_detail(order_line_id: int, user: CurrentUser = Depends(get_curr
         "finance_payments": clean_rows(finance_payments),
         "payments": clean_rows(payments),
     }
+
+
+@router.put("/{order_line_id}/summary")
+def update_purchase_summary(
+    order_line_id: int,
+    payload: PurchaseSummaryUpdate,
+    user: CurrentUser = Depends(require_permission("purchase_edit")),
+) -> dict:
+    _ensure_order_line(order_line_id, user, require_entry=True)
+    data = _payload_dict(payload)
+    with db() as conn:
+        before = _purchase_summary_snapshot(conn, order_line_id)
+        paid_total = conn.execute(
+            text(
+                """
+                SELECT COALESCE(SUM(payment_amount), 0)
+                FROM purchase_payment
+                WHERE order_line_id = :order_line_id AND deleted_at IS NULL
+                """
+            ),
+            {"order_line_id": order_line_id},
+        ).scalar()
+        if data["purchase_amount"] is not None and Decimal(paid_total or 0) > data["purchase_amount"]:
+            raise HTTPException(status_code=422, detail="含税采购金额不能小于已付款合计，数据有错误，请检查后重新提交。")
+
+        exists = conn.execute(
+            text(
+                """
+                SELECT id
+                FROM purchase_info
+                WHERE order_line_id = :order_line_id AND deleted_at IS NULL
+                LIMIT 1
+                """
+            ),
+            {"order_line_id": order_line_id},
+        ).scalar()
+        if exists:
+            conn.execute(
+                text(
+                    """
+                    UPDATE purchase_info
+                    SET supplier_name = :supplier_name,
+                        purchase_tax_rate = :purchase_tax_rate,
+                        purchase_unit_price_no_tax = :purchase_unit_price_no_tax,
+                        purchase_unit_price = :purchase_unit_price,
+                        cost_no_tax = :cost_no_tax,
+                        purchase_amount = :purchase_amount,
+                        labor_cost = :labor_cost,
+                        other_cost = :other_cost
+                    WHERE id = :purchase_info_id
+                    """
+                ),
+                {"purchase_info_id": int(exists), **data},
+            )
+        else:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO purchase_info
+                      (order_line_id, supplier_name, purchase_tax_rate, purchase_unit_price_no_tax,
+                       purchase_unit_price, cost_no_tax, purchase_amount, labor_cost, other_cost)
+                    VALUES
+                      (:order_line_id, :supplier_name, :purchase_tax_rate, :purchase_unit_price_no_tax,
+                       :purchase_unit_price, :cost_no_tax, :purchase_amount, :labor_cost, :other_cost)
+                    """
+                ),
+                {"order_line_id": order_line_id, **data},
+            )
+        after = _purchase_summary_snapshot(conn, order_line_id)
+        write_operation_log(
+            conn,
+            user,
+            "采购管理",
+            "update_purchase_summary",
+            f"修改订单明细 {order_line_id} 的采购基础信息",
+            before=before,
+            after=after,
+        )
+    return get_purchase_detail(order_line_id, user)
 
 
 @router.post("/{order_line_id}/contracts")
@@ -691,6 +781,27 @@ def _record_snapshot(conn, table_name: str, record_id: int):
     return conn.execute(
         text(f"SELECT * FROM {table_name} WHERE id = :record_id"),
         {"record_id": record_id},
+    ).mappings().first()
+
+
+def _purchase_summary_snapshot(conn, order_line_id: int):
+    return conn.execute(
+        text(
+            """
+            SELECT pi.id, pi.order_line_id, p.project_code, so.order_no,
+                   ol.goods_name, ol.specification_model,
+                   pi.supplier_name, pi.purchase_tax_rate,
+                   pi.purchase_unit_price_no_tax, pi.purchase_unit_price,
+                   pi.cost_no_tax, pi.purchase_amount, pi.labor_cost, pi.other_cost
+            FROM order_line ol
+            JOIN sales_order so ON so.id = ol.sales_order_id
+            JOIN project p ON p.id = so.project_id
+            LEFT JOIN purchase_info pi
+              ON pi.order_line_id = ol.id AND pi.deleted_at IS NULL
+            WHERE ol.id = :order_line_id AND ol.deleted_at IS NULL
+            """
+        ),
+        {"order_line_id": order_line_id},
     ).mappings().first()
 
 

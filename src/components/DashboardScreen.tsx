@@ -127,7 +127,7 @@ export default function DashboardScreen({ logs, ledgers, orders, onNavigate }: D
   const maxRankingAmount = Math.max(...salesRanking.map((item) => item.amount), 1);
 
   const metrics = [
-    { label: '订单总金额', value: compactMoney(dashboardMetrics.totalOrderAmount), icon: Wallet, trend: '实时', trendType: 'up' },
+    { label: '销售订单总金额', value: compactMoney(dashboardMetrics.totalOrderAmount), icon: Wallet, trend: '实时', trendType: 'up' },
     { label: '毛利润', value: compactMoney(dashboardMetrics.grossProfit), icon: TrendingUp, trend: '实时', trendType: 'up' },
     { label: '订单总数', value: dashboardMetrics.orderCount.toLocaleString('zh-CN'), icon: ShoppingCart, trend: '实时', trendType: 'up' },
     { label: '应收账款', value: compactMoney(dashboardMetrics.accountsReceivable), icon: ArrowDownLeft, trend: '实时', trendType: 'down' },

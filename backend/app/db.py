@@ -51,8 +51,10 @@ def apply_runtime_migrations() -> None:
         "sales_receipt",
     ]
     with engine.begin() as conn:
+        project_name_column_added = False
         additional_columns = {
             "order_line": {
+                "project_name": "VARCHAR(255) NULL",
                 "sales_tax_rate": "DECIMAL(10,6) NULL",
             },
             "purchase_info": {
@@ -80,6 +82,22 @@ def apply_runtime_migrations() -> None:
                 ).scalar()
                 if not column_exists:
                     conn.execute(text(f"ALTER TABLE `{table_name}` ADD COLUMN `{column_name}` {definition}"))
+                    if table_name == "order_line" and column_name == "project_name":
+                        project_name_column_added = True
+
+        if project_name_column_added:
+            conn.execute(
+                text(
+                    """
+                    UPDATE order_line ol
+                    JOIN sales_order so ON so.id = ol.sales_order_id
+                    JOIN project p ON p.id = so.project_id
+                    SET ol.project_name = p.project_name
+                    WHERE ol.project_name IS NULL
+                      AND p.project_name IS NOT NULL
+                    """
+                )
+            )
 
         precise_columns = {
             "order_line": ["quantity"],

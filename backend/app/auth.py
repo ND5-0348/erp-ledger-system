@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import text
 
@@ -217,10 +217,8 @@ def ensure_default_admin() -> None:
         )
 
 
-def get_current_user(credentials: HTTPAuthorizationCredentials | None = Depends(security)) -> CurrentUser:
-    if credentials is None:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    payload = decode_access_token(credentials.credentials)
+def current_user_from_token(token: str) -> CurrentUser:
+    payload = decode_access_token(token)
     username = payload.get("sub")
     if not username:
         raise HTTPException(status_code=401, detail="Invalid token")
@@ -250,6 +248,17 @@ def get_current_user(credentials: HTTPAuthorizationCredentials | None = Depends(
         department_can_view=bool(row["department_can_view"]),
         department_can_entry=bool(row["department_can_entry"]),
     )
+
+
+def get_current_user(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+) -> CurrentUser:
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    user = current_user_from_token(credentials.credentials)
+    request.state.current_user = user
+    return user
 
 
 def require_permission(permission: Permission) -> Callable[[CurrentUser], CurrentUser]:

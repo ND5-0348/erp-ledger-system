@@ -28,6 +28,7 @@ interface SalesScreenProps {
 
 type EntryMode = 'contract' | 'invoice' | 'receipt';
 type EditingRecord = { mode: EntryMode; id: number } | null;
+type DetailIntent = 'view' | 'edit' | 'delete';
 
 const moneyFormatter = new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2 });
 
@@ -69,6 +70,7 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
   const [submittedFilters, setSubmittedFilters] = useState(emptySalesFilters);
   const [currentPage, setCurrentPage] = useState(1);
   const [selectedSale, setSelectedSale] = useState<SalesRecord | null>(null);
+  const [detailIntent, setDetailIntent] = useState<DetailIntent>('view');
   const [detail, setDetail] = useState<BackendSalesDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState('');
@@ -160,8 +162,9 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
     setCurrentPage(1);
   };
 
-  const loadDetail = async (item: SalesRecord) => {
+  const loadDetail = async (item: SalesRecord, intent: DetailIntent = 'view') => {
     setSelectedSale(item);
+    setDetailIntent(intent);
     setDetail(null);
     setEntryMode(null);
     setEditingRecord(null);
@@ -181,6 +184,7 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
 
   const closeDetail = () => {
     setSelectedSale(null);
+    setDetailIntent('view');
     setDetail(null);
     setEntryMode(null);
     setEditingRecord(null);
@@ -384,7 +388,7 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
         </div>
 
         <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse table-fixed min-w-[1740px]">
+          <table className="w-full text-left border-collapse table-fixed min-w-[1792px]">
             <thead>
               <tr className="bg-slate-50/75 border-b border-slate-200">
                 <TableHeader className="w-[140px]">项目编号</TableHeader>
@@ -397,7 +401,7 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
                 <TableHeader className="text-right w-[140px]">交付金额</TableHeader>
                 <TableHeader className="text-right w-[140px]">开票金额</TableHeader>
                 <TableHeader className="text-right w-[140px]">回款金额</TableHeader>
-                <TableHeader className="text-center w-[80px]">操作</TableHeader>
+                <TableHeader className="text-center w-[132px]">操作</TableHeader>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -421,9 +425,21 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
                       <td className="px-6 py-4 text-xs text-right font-mono text-emerald-600 font-medium">{formatMoney(item.invoiceAmount)}</td>
                       <td className="px-6 py-4 text-xs text-right font-mono text-blue-600 font-medium">{formatMoney(item.totalReceived)}</td>
                       <td className="px-6 py-4 text-center">
-                        <button type="button" onClick={() => loadDetail(item)} title="查看销售信息" aria-label={`查看销售 ${item.orderId} 的信息`} className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-blue-100 bg-blue-50 text-blue-600 hover:bg-blue-100 hover:border-blue-200 transition-colors">
-                          <Eye className="w-4 h-4" />
-                        </button>
+                        <div className="inline-flex items-center justify-center gap-1">
+                          <button type="button" onClick={() => loadDetail(item, 'view')} title="查看销售信息" aria-label={`查看销售 ${item.orderId} 的信息`} className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-blue-100 bg-blue-50 text-blue-600 hover:bg-blue-100 hover:border-blue-200 transition-colors">
+                            <Eye className="w-4 h-4" />
+                          </button>
+                          {canEditSales && (
+                            <button type="button" onClick={() => loadDetail(item, 'edit')} title="进入详情修改具体销售记录" aria-label={`修改销售 ${item.orderId} 的具体记录`} className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-blue-100 bg-blue-50 text-blue-600 hover:bg-blue-100 hover:border-blue-200 transition-colors">
+                              <Pencil className="w-4 h-4" />
+                            </button>
+                          )}
+                          {canDeleteSales && (
+                            <button type="button" onClick={() => loadDetail(item, 'delete')} title="进入详情删除具体销售记录" aria-label={`删除销售 ${item.orderId} 的具体记录`} className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-rose-100 bg-rose-50 text-rose-600 hover:bg-rose-100 hover:border-rose-200 transition-colors">
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -480,6 +496,17 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
 
             <div className="p-6 overflow-y-auto space-y-5">
               {detailError && <div className="px-4 py-3 rounded-lg bg-red-50 border border-red-100 text-xs text-red-600">{detailError}</div>}
+              {detailIntent !== 'view' && (
+                <div className={`px-4 py-3 rounded-lg border text-xs ${
+                  detailIntent === 'delete'
+                    ? 'bg-rose-50 border-rose-200 text-rose-700'
+                    : 'bg-blue-50 border-blue-200 text-blue-700'
+                }`}>
+                  {detailIntent === 'edit'
+                    ? '请选择下方具体的销售合同、开票或回款记录进行修改。'
+                    : '请选择下方具体的销售合同、开票或回款记录进行删除；不会删除基础订单。'}
+                </div>
+              )}
               {detailLoading ? (
                 <div className="py-16 text-center text-sm text-slate-400">正在加载销售信息...</div>
               ) : (

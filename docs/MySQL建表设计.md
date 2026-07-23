@@ -17,9 +17,9 @@
 | `erp_user` | 系统用户 | 登录、角色、部门范围和状态 |
 | `operation_log` | 操作日志 | 保存增删改、导入、备份等审计记录 |
 | `backup_record` | 备份记录 | 保存备份文件、时间、类型和结果 |
-| `project` | 项目 | 项目编号、项目名称、部门、客户和负责人 |
+| `project` | 项目 | 项目编号、部门、客户和负责人；项目名称仅作旧数据兼容 |
 | `sales_order` | 销售订单 | 销售订单号、日期、业务类型、统计类别和关闭状态 |
-| `order_line` | 订单明细 | 物资/服务、数量、销售税率、销售单价和销售金额 |
+| `order_line` | 订单明细 | 明细级项目名称、物资/服务、数量、销售税率、销售单价和销售金额 |
 | `purchase_info` | 采购信息 | 采购厂商、采购税率、采购单价、采购金额及预留成本 |
 | `delivery_record` | 交付记录 | 交付数量、交付金额和待交付金额 |
 | `purchase_contract` | 采购合同 | 合同号、付款期限、履行期限及签订金额 |
@@ -40,6 +40,8 @@
 4. `order_line.id` 是采购、交付、合同、发票、入库、付款和回款表的统一业务外键。
 5. `purchase_info.order_line_id` 有唯一约束，按一条明细一份采购主信息使用。
 6. 多期表使用 `phase_no`；`active_phase_no` 是由 `deleted_at` 生成的列，并与 `order_line_id` 组成唯一键。
+
+项目名称的业务粒度是订单明细：同一项目编号、同一销售订单号下允许存在多个项目名称。查询、编辑和导出优先使用 `order_line.project_name`；`project.project_name` 仅用于旧数据兼容回退。
 
 多期表包括：
 
@@ -146,12 +148,12 @@
 后端启动时按以下顺序执行：
 
 1. 执行 `CREATE TABLE IF NOT EXISTS`，创建新增表 `finance_payment_entry`。
-2. 为旧库补充 `order_line.sales_tax_rate`。
+2. 为旧库补充 `order_line.project_name`、`order_line.sales_tax_rate`，并将旧项目名称回填到尚为空的明细。
 3. 为旧库补充 `purchase_info.purchase_tax_rate`、`labor_cost`、`other_cost`。
 4. 为旧库补充 `warehouse_entry.warehouse_amount_no_tax`。
 5. 校正数量列为 `DECIMAL(20,6)`。
 6. 为多期表补充生成列和有效期次唯一索引。
-7. 在字段迁移完成后重建三个财务视图。
+7. 在字段迁移完成后重建三个财务视图；订单、项目汇总视图对多个明细级项目名称去重拼接，仍保持每个订单一行。
 
 运行时迁移只增加字段、表、索引和重建视图，不清空或重导现有订单数据。
 

@@ -2,6 +2,7 @@ import { OrderRecord, PurchaseRecord, SalesRecord } from '../types';
 
 export interface ProjectOrderLineSummary {
   id: string;
+  orderLineId?: number;
   goodsName: string;
   specModel: string;
   quantity: string;
@@ -58,6 +59,7 @@ export function buildProjectOrderSummaries(
     const relatedSales = order.orderLineId === undefined ? [] : salesByLineId.get(order.orderLineId) || [];
     const line: ProjectOrderLineSummary = {
       id: String(order.orderLineId ?? `${order.projectId}:${order.orderId}:${index}`),
+      orderLineId: order.orderLineId,
       goodsName: order.goodsName || '-',
       specModel: order.specModel || '-',
       quantity: order.quantity || '-',

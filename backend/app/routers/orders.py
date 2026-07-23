@@ -182,7 +182,7 @@ def list_orders(
                            so.business_type,
                            so.statistic_category,
                            p.customer_unit_name,
-                           p.project_name,
+                           COALESCE(ol.project_name, p.project_name) AS project_name,
                            ol.goods_name,
                            ol.specification_model,
                            ol.unit_name,
@@ -276,11 +276,13 @@ def create_order_lines_batch(
 
 
 @router.get("/template")
-def download_order_template(_: CurrentUser = Depends(get_current_user)) -> Response:
+def download_order_template(user: CurrentUser = Depends(get_current_user)) -> Response:
     try:
         content = template_bytes()
     except FileNotFoundError as exc:
         raise HTTPException(status_code=500, detail="服务器中的业务台账模板缺失") from exc
+    with db() as conn:
+        write_operation_log(conn, user, "订单管理", "download_order_template", "下载业务台账模板")
     return Response(
         content=content,
         media_type=EXCEL_MEDIA_TYPE,
@@ -292,6 +294,7 @@ def download_order_template(_: CurrentUser = Depends(get_current_user)) -> Respo
 def export_orders(user: CurrentUser = Depends(get_current_user)) -> Response:
     with db() as conn:
         content = export_ledger_bytes(conn, user)
+        write_operation_log(conn, user, "订单管理", "export_orders", "导出当前账号权限范围内的业务台账")
     return Response(
         content=content,
         media_type=EXCEL_MEDIA_TYPE,
@@ -357,7 +360,6 @@ def update_order_line(
     data = _calculated_payload_data(payload)
     project_data = {
         "project_code": data["project_code"],
-        "project_name": data["project_name"],
         "department": data["department"],
         "branch_company": data["branch_company"],
         "account_manager": data["account_manager"],
@@ -374,6 +376,7 @@ def update_order_line(
         "statistic_category": data["statistical_category"],
     }
     line_data = {
+        "project_name": data["project_name"],
         "goods_name": data["goods_name"],
         "specification_model": data["specification_model"],
         "unit_name": data["unit_name"],
@@ -415,7 +418,6 @@ def update_order_line(
                 """
                 UPDATE project
                 SET project_code = :project_code,
-                    project_name = :project_name,
                     department = :department,
                     branch_company = :branch_company,
                     account_manager = :account_manager,
@@ -446,7 +448,8 @@ def update_order_line(
             text(
                 """
                 UPDATE order_line
-                SET goods_name = :goods_name,
+                SET project_name = :project_name,
+                    goods_name = :goods_name,
                     specification_model = :specification_model,
                     unit_name = :unit_name,
                     quantity = :quantity,
@@ -578,7 +581,6 @@ def _create_order_line(conn, payload: OrderUpdate) -> int:
     ).mappings().first()
     project_values = {
         "project_code": data["project_code"],
-        "project_name": data["project_name"],
         "department": data["department"],
         "branch_company": data["branch_company"],
         "account_manager": data["account_manager"],
@@ -595,6 +597,7 @@ def _create_order_line(conn, payload: OrderUpdate) -> int:
             {"project_id": project_id, **project_values},
         )
     else:
+        project_values["project_name"] = data["project_name"]
         result = conn.execute(
             text(
                 """
@@ -673,10 +676,10 @@ def _create_order_line(conn, payload: OrderUpdate) -> int:
         text(
             """
             INSERT INTO order_line
-              (sales_order_id, goods_name, specification_model, unit_name, quantity,
+              (sales_order_id, project_name, goods_name, specification_model, unit_name, quantity,
                sales_tax_rate, sales_unit_price_no_tax, sales_unit_price, revenue_no_tax, order_value)
             VALUES
-              (:sales_order_id, :goods_name, :specification_model, :unit_name, :quantity,
+              (:sales_order_id, :project_name, :goods_name, :specification_model, :unit_name, :quantity,
                :sales_tax_rate, :net_unit_price, :unit_price, :net_revenue, :order_value)
             """
         ),

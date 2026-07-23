@@ -430,6 +430,8 @@ export const api = {
   purchases: (params: Record<string, string | number | undefined> = {}) =>
     request<PageResult<BackendPurchaseRecord>>(`/purchases${query(params)}`),
   purchaseDetail: (orderLineId: number) => request<BackendPurchaseDetail>(`/purchases/${orderLineId}`),
+  updatePurchaseSummary: (orderLineId: number, data: Record<string, string | number | null>) =>
+    request<BackendPurchaseDetail>(`/purchases/${orderLineId}/summary`, { method: 'PUT', body: JSON.stringify(data) }),
   addPurchaseContract: (orderLineId: number, data: Record<string, string | number | null>) =>
     request<BackendPurchaseDetail>(`/purchases/${orderLineId}/contracts`, { method: 'POST', body: JSON.stringify(data) }),
   updatePurchaseContract: (contractId: number, data: Record<string, string | number | null>) =>

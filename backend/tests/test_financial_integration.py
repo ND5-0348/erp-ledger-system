@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from decimal import Decimal
@@ -182,6 +183,117 @@ def _receipt(amount: str, ratio: str = "0.000000") -> dict[str, str]:
     }
 
 
+def test_project_name_and_supplier_remain_bound_to_each_order_line(
+    client: TestClient,
+    headers: dict[str, str],
+) -> None:
+    suffix = "PROJECT-NAME-GRAIN"
+    first_id, _ = _create_order(
+        client,
+        headers,
+        suffix,
+        project_name="项目名称甲",
+        goods_name="设备甲",
+        specification_model="SPEC-A",
+        supplier_name="采购商甲",
+    )
+    second_payload = _payload(suffix)
+    second_payload.update(
+        {
+            "project_name": "项目名称乙",
+            "goods_name": "设备乙",
+            "specification_model": "SPEC-B",
+            "supplier_name": "采购商乙",
+        }
+    )
+    second_response = client.post("/api/orders", json=second_payload, headers=headers)
+    assert second_response.status_code == 200, second_response.text
+    second_id = int(second_response.json()["order_line_id"])
+
+    response = client.get(f"/api/orders?project_id=QA-{suffix}", headers=headers)
+    assert response.status_code == 200, response.text
+    rows = {int(row["order_line_id"]): row for row in response.json()["items"]}
+    assert rows[first_id]["project_name"] == "项目名称甲"
+    assert rows[first_id]["supplier_name"] == "采购商甲"
+    assert rows[second_id]["project_name"] == "项目名称乙"
+    assert rows[second_id]["supplier_name"] == "采购商乙"
+
+    updated = {**second_payload, "project_name": "项目名称乙-已修改"}
+    update_response = client.put(f"/api/orders/{second_id}", json=updated, headers=headers)
+    assert update_response.status_code == 200, update_response.text
+    assert _finance(first_id)["project_name"] == "项目名称甲"
+    assert _finance(second_id)["project_name"] == "项目名称乙-已修改"
+
+    with db() as conn:
+        order_summary = conn.execute(
+            text(
+                """
+                SELECT project_name, line_count
+                FROM v_order_ledger_summary
+                WHERE project_code = :project_code AND order_no = :order_no
+                """
+            ),
+            {"project_code": f"QA-{suffix}", "order_no": f"SO-{suffix}"},
+        ).mappings().one()
+    assert int(order_summary["line_count"]) == 2
+    assert set(str(order_summary["project_name"]).split("；")) == {"项目名称甲", "项目名称乙-已修改"}
+
+
+def test_purchase_summary_can_be_edited_from_purchase_detail(
+    client: TestClient,
+    headers: dict[str, str],
+) -> None:
+    order_line_id, payload = _create_order(client, headers, "PURCHASE-SUMMARY")
+    response = client.put(
+        f"/api/purchases/{order_line_id}/summary",
+        headers=headers,
+        json={
+            "supplier_name": "修改后的采购商",
+            "purchase_tax_rate": "13.000000",
+            "purchase_unit_price_no_tax": "72.000000",
+            "purchase_unit_price": "81.360000",
+            "cost_no_tax": "720.00",
+            "purchase_amount": "813.60",
+            "labor_cost": "12.34",
+            "other_cost": "5.67",
+        },
+    )
+    assert response.status_code == 200, response.text
+    summary = response.json()["summary"]
+    assert summary["supplier_name"] == "修改后的采购商"
+    assert _d(summary["purchase_tax_rate"]) == Decimal("13.000000")
+    assert _d(summary["purchase_unit_price_no_tax"]) == Decimal("72.000000")
+    assert _d(summary["purchase_amount"]) == Decimal("813.60")
+    assert _d(summary["labor_cost"]) == Decimal("12.34")
+    assert _d(summary["other_cost"]) == Decimal("5.67")
+    assert _d(summary["purchase_tax_amount"]) == Decimal("93.60")
+
+    invalid_tax_rate = client.put(
+        f"/api/purchases/{order_line_id}/summary",
+        headers=headers,
+        json={"purchase_tax_rate": "100.000001"},
+    )
+    assert invalid_tax_rate.status_code == 422, invalid_tax_rate.text
+
+    with db() as conn:
+        log = conn.execute(
+            text(
+                """
+                SELECT detail
+                FROM operation_log
+                WHERE action_name = 'update_purchase_summary'
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+        ).scalar_one()
+    detail = json.loads(str(log))
+    assert detail["after"]["project_code"] == payload["project_code"]
+    assert detail["after"]["order_no"] == payload["order_no"]
+    assert detail["after"]["goods_name"] == payload["goods_name"]
+    assert detail["after"]["supplier_name"] == "修改后的采购商"
+
+
 def _excel_import_file() -> bytes:
     template_path = ROOT_DIR / "backend" / "templates" / "市场部业务台账模板.xlsx"
     workbook = load_workbook(template_path)
@@ -189,8 +301,8 @@ def _excel_import_file() -> bytes:
     values = [
         "全额", "XL-IMPORT-001", "QA", "QA Branch", "QA Manager", date(2026, 7, 21), "商品销售", "常规",
         "QA Team", "QA Customer", "QA User", "QA Platform", "SO-XL-IMPORT-001", "Excel Import Project",
-        "Excel Equipment", "XL-SPEC", "台", 2, Decimal("100.00"), Decimal("113.00"), Decimal("200.00"),
-        Decimal("226.00"), "Excel Supplier", Decimal("70.00"), Decimal("79.10"), Decimal("140.00"),
+        "Excel Equipment", "XL-SPEC", "台", 2, Decimal("0.13"), Decimal("100.00"), Decimal("113.00"), Decimal("200.00"),
+        Decimal("226.00"), "Excel Supplier", Decimal("0.13"), Decimal("70.00"), Decimal("79.10"), Decimal("140.00"),
         Decimal("158.20"), date(2026, 7, 22), 1, Decimal("100.00"), Decimal("113.00"), Decimal("70.00"),
         Decimal("79.10"), 1, Decimal("100.00"), Decimal("113.00"), "PC-XL-001", "验收后付款", "30天",
         Decimal("158.20"), Decimal("0.00"), date(2026, 7, 23), "PINV-XL-001", Decimal("158.20"),
@@ -202,11 +314,11 @@ def _excel_import_file() -> bytes:
         "DOC-XL-001", date(2026, 7, 28), "SINV-XL-001", Decimal("226.00"), Decimal("0.00"),
         Decimal("0.00"), date(2026, 7, 29), "REC-XL-001", Decimal("100.00"), Decimal("44.2478"),
         date(2026, 7, 30), "REC-XL-002", Decimal("126.00"), Decimal("55.7522"), Decimal("226.00"),
-        Decimal("0.00"), "进行中",
+        Decimal("0.00"), "进行中", Decimal("12.34"), Decimal("5.67"),
     ]
-    assert len(values) == len(TEMPLATE_HEADERS) == 87
+    assert len(values) == len(TEMPLATE_HEADERS) == 91
     for column, value in enumerate(values, start=1):
-        worksheet.cell(2, column, value)
+        worksheet.cell(3, column, value)
     output = BytesIO()
     workbook.save(output)
     workbook.close()
@@ -216,11 +328,18 @@ def _excel_import_file() -> bytes:
 def test_excel_template_import_export_round_trip(client: TestClient, headers: dict[str, str]) -> None:
     template_response = client.get("/api/orders/template", headers=headers)
     assert template_response.status_code == 200, template_response.text
+    assert _action_count("download_order_template") == 1
     template = load_workbook(BytesIO(template_response.content), read_only=True, data_only=True)
-    assert [template["Sheet1"].cell(1, column).value for column in range(1, 88)] == TEMPLATE_HEADERS
-    assert template["Sheet1"].cell(2, 2).value == SAMPLE_PROJECT_CODE
-    assert template["Sheet1"].cell(2, 13).value == SAMPLE_ORDER_NO
-    assert template["Sheet1"].cell(2, 23).value == "示例采购厂商"
+    assert template["Sheet1"].cell(1, 1).value == "订单情况（王淼）"
+    assert template["Sheet1"].cell(1, 39).value == "采购合同（周航）"
+    assert [template["Sheet1"].cell(2, column).value for column in range(1, 92)] == TEMPLATE_HEADERS
+    assert template["Sheet1"].cell(3, 2).value == SAMPLE_PROJECT_CODE
+    assert template["Sheet1"].cell(3, 13).value == SAMPLE_ORDER_NO
+    assert Decimal(str(template["Sheet1"].cell(3, 19).value)) == Decimal("0.13")
+    assert template["Sheet1"].cell(3, 24).value == "示例采购厂商"
+    assert Decimal(str(template["Sheet1"].cell(3, 25).value)) == Decimal("0.13")
+    assert template["Sheet1"].cell(3, 90).value is None
+    assert template["Sheet1"].cell(3, 91).value is None
     template.close()
 
     untouched_template = client.post(
@@ -233,7 +352,7 @@ def test_excel_template_import_export_round_trip(client: TestClient, headers: di
     assert _count("order_line") == 0
 
     partial_workbook = load_workbook(BytesIO(template_response.content))
-    partial_workbook["Sheet1"].cell(2, 2, "XL-PARTIAL-EXAMPLE")
+    partial_workbook["Sheet1"].cell(3, 2, "XL-PARTIAL-EXAMPLE")
     partial_output = BytesIO()
     partial_workbook.save(partial_output)
     partial_workbook.close()
@@ -260,9 +379,13 @@ def test_excel_template_import_export_round_trip(client: TestClient, headers: di
     assert _count("sales_receipt") == 2
     with db() as conn:
         booked = conn.execute(text("SELECT booked_amount FROM finance_payment_entry")).scalar_one()
-        supplier = conn.execute(text("SELECT supplier_name FROM purchase_info")).scalar_one()
+        purchase_info = conn.execute(
+            text("SELECT supplier_name, labor_cost, other_cost FROM purchase_info")
+        ).mappings().one()
     assert _d(booked) == Decimal("158.20")
-    assert supplier == "Excel Supplier"
+    assert purchase_info["supplier_name"] == "Excel Supplier"
+    assert _d(purchase_info["labor_cost"]) == Decimal("12.34")
+    assert _d(purchase_info["other_cost"]) == Decimal("5.67")
 
     duplicate_response = client.post(
         "/api/orders/import-excel?filename=市场部业务台账模板.xlsx",
@@ -298,7 +421,7 @@ def test_excel_template_import_export_round_trip(client: TestClient, headers: di
     scoped_export_response = client.get("/api/orders/export", headers=scoped_headers)
     assert scoped_export_response.status_code == 200, scoped_export_response.text
     scoped_export = load_workbook(BytesIO(scoped_export_response.content), read_only=True, data_only=True)
-    assert scoped_export["Sheet1"].max_row == 1
+    assert scoped_export["Sheet1"].max_row == 2
     scoped_export.close()
 
     forbidden_import = client.post(
@@ -312,13 +435,18 @@ def test_excel_template_import_export_round_trip(client: TestClient, headers: di
 
     export_response = client.get("/api/orders/export", headers=headers)
     assert export_response.status_code == 200, export_response.text
+    assert _action_count("export_orders") == 2
     exported = load_workbook(BytesIO(export_response.content), read_only=True, data_only=True)
     worksheet = exported["Sheet1"]
-    assert [worksheet.cell(1, column).value for column in range(1, 88)] == TEMPLATE_HEADERS
-    assert worksheet.cell(2, 2).value == "XL-IMPORT-001"
-    assert worksheet.cell(2, 23).value == "Excel Supplier"
-    assert Decimal(str(worksheet.cell(2, 50).value)) == Decimal("158.2")
-    assert Decimal(str(worksheet.cell(2, 85).value)) == Decimal("226")
+    assert [worksheet.cell(2, column).value for column in range(1, 92)] == TEMPLATE_HEADERS
+    assert worksheet.cell(3, 2).value == "XL-IMPORT-001"
+    assert worksheet.cell(3, 24).value == "Excel Supplier"
+    assert Decimal(str(worksheet.cell(3, 19).value)) == Decimal("0.13")
+    assert Decimal(str(worksheet.cell(3, 25).value)) == Decimal("0.13")
+    assert Decimal(str(worksheet.cell(3, 52).value)) == Decimal("158.2")
+    assert Decimal(str(worksheet.cell(3, 87).value)) == Decimal("226")
+    assert worksheet.cell(3, 90).value is None
+    assert worksheet.cell(3, 91).value is None
     exported.close()
 
 
@@ -395,6 +523,66 @@ def test_tax_calculation_and_finance_entry_mapping(client: TestClient, headers: 
     assert _d(detail["summary"]["total_finance_checked"]) == Decimal("791.00")
     assert _d(detail["summary"]["total_finance_paid"]) == Decimal("300.00")
     assert _d(detail["summary"]["financial_accounts_payable"]) == Decimal("491.00")
+
+
+def test_order_user_change_audit_contains_chinese_context(client: TestClient, headers: dict[str, str]) -> None:
+    order_line_id, payload = _create_order(client, headers, "AUDIT-USER")
+    logs_before_query = _count("operation_log")
+    query = client.get("/api/orders", params={"project_id": payload["project_code"]}, headers=headers)
+    assert query.status_code == 200, query.text
+    detail_query = client.get(f"/api/purchases/{order_line_id}", headers=headers)
+    assert detail_query.status_code == 200, detail_query.text
+    assert _count("operation_log") == logs_before_query
+
+    updated = {**payload, "user_name": "修改后的用户"}
+    response = client.put(f"/api/orders/{order_line_id}", json=updated, headers=headers)
+    assert response.status_code == 200, response.text
+
+    with db() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT user_name, detail, status
+                FROM operation_log
+                WHERE action_name = 'update_order'
+                ORDER BY id DESC LIMIT 1
+                """
+            )
+        ).mappings().one()
+    detail = json.loads(str(row["detail"]))
+    assert row["user_name"] == "系统管理员（账号：admin）"
+    assert row["status"] == "success"
+    assert detail["before"]["end_user_name"] == "QA User"
+    assert detail["after"]["end_user_name"] == "修改后的用户"
+    assert detail["after"]["project_code"] == payload["project_code"]
+    assert detail["after"]["order_no"] == payload["order_no"]
+    assert detail["after"]["goods_name"] == payload["goods_name"]
+
+
+def test_failed_data_change_is_logged_but_login_is_not(client: TestClient, headers: dict[str, str]) -> None:
+    logs_before_login = _count("operation_log")
+    login = client.post("/api/auth/login", json={"username": "admin", "password": TEST_PASSWORD})
+    assert login.status_code == 200, login.text
+    assert _count("operation_log") == logs_before_login
+
+    invalid = client.post("/api/orders", json={"project_code": "缺少必填字段"}, headers=headers)
+    assert invalid.status_code == 422, invalid.text
+    with db() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT user_name, module_name, detail, status
+                FROM operation_log
+                WHERE action_name = 'create_failed'
+                ORDER BY id DESC LIMIT 1
+                """
+            )
+        ).mappings().one()
+    detail = json.loads(str(row["detail"]))
+    assert row["user_name"] == "系统管理员（账号：admin）"
+    assert row["module_name"] == "订单管理"
+    assert row["status"] == "failed"
+    assert detail["summary"] == "新增数据失败：字段校验未通过"
 
 
 @pytest.mark.parametrize("case", [f"N-{index:02d}" for index in range(1, 13)])

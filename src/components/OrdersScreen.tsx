@@ -7,8 +7,6 @@ import {
   ChevronRight, 
   ShoppingBag,
   FileUp,
-  FileOutput,
-  FileSpreadsheet,
   Eye,
   Pencil,
   Trash2,
@@ -51,13 +49,19 @@ interface OrdersScreenProps {
   orders: OrderRecord[];
   onAddOrder: (order: OrderRecord) => Promise<void>;
   onImportExcel: (file: File) => Promise<number>;
-  onDownloadTemplate: () => Promise<Blob>;
-  onExportExcel: () => Promise<Blob>;
   onUpdateOrder: (target: OrderRecord, order: OrderRecord) => Promise<void>;
   onDeleteOrder: (target: OrderRecord) => Promise<void>;
   canEnterOrders: boolean;
   canEditOrders: boolean;
   canDeleteOrders: boolean;
+  actionRequest?: OrderActionRequest | null;
+  onActionRequestHandled?: () => void;
+}
+
+export interface OrderActionRequest {
+  orderLineId: number;
+  intent: 'edit' | 'delete';
+  nonce: number;
 }
 
 function getPaginationItems(totalPages: number): Array<number | 'ellipsis'> {
@@ -73,7 +77,7 @@ function optionalFormNumber(value: string) {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onDownloadTemplate, onExportExcel, onUpdateOrder, onDeleteOrder, canEnterOrders, canEditOrders, canDeleteOrders }: OrdersScreenProps) {
+export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpdateOrder, onDeleteOrder, canEnterOrders, canEditOrders, canDeleteOrders, actionRequest, onActionRequestHandled }: OrdersScreenProps) {
   // Query Filters State
   const [projectId, setProjectId] = useState('');
   const [orderId, setOrderId] = useState('');
@@ -515,30 +519,20 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onDown
     }
   };
 
-  const downloadBlob = (blob: Blob, fileName: string) => {
-    const url = window.URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = fileName;
-    link.click();
-    window.URL.revokeObjectURL(url);
-  };
-
-  const handleDownloadTemplate = async () => {
-    try {
-      downloadBlob(await onDownloadTemplate(), '市场部业务台账模板.xlsx');
-    } catch (error) {
-      alert(error instanceof Error ? error.message : '模板下载失败');
+  React.useEffect(() => {
+    if (!actionRequest) return;
+    const target = orders.find((order) => order.orderLineId === actionRequest.orderLineId);
+    if (target) {
+      if (actionRequest.intent === 'edit') {
+        openEditOrder(target);
+      } else {
+        void handleDeleteOrder(target);
+      }
+    } else {
+      alert('未找到对应的订单明细，数据可能已经更新。');
     }
-  };
-
-  const handleExportExcel = async () => {
-    try {
-      downloadBlob(await onExportExcel(), '市场部业务台账.xlsx');
-    } catch (error) {
-      alert(error instanceof Error ? error.message : '台账导出失败');
-    }
-  };
+    onActionRequestHandled?.();
+  }, [actionRequest?.nonce]);
 
   const handleBatchImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -762,22 +756,6 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onDown
           <p className="text-sm text-slate-500 font-sans mt-1">查看和管理客户订单的基础业务信息</p>
         </div>
         <div className="flex items-center gap-2 self-start sm:self-center">
-          <button
-            type="button"
-            onClick={handleDownloadTemplate}
-            className="flex items-center gap-1.5 px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-lg shadow-sm transition-all text-xs font-semibold"
-          >
-            <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
-            <span>下载模板</span>
-          </button>
-          <button
-            type="button"
-            onClick={handleExportExcel}
-            className="flex items-center gap-1.5 px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-lg shadow-sm transition-all text-xs font-semibold"
-          >
-            <FileOutput className="w-4 h-4 text-blue-600" />
-            <span>导出台账</span>
-          </button>
           {canEnterOrders && (
             <>
               <label className="flex items-center gap-1.5 px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-lg shadow-sm transition-all text-xs font-semibold cursor-pointer">
