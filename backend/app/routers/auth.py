@@ -19,9 +19,51 @@ from ..auth import (
     verify_password,
 )
 from ..db import db
+from ..audit import write_operation_log
 from ..serializers import clean_rows
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+PERMISSION_LABELS_CN = {
+    "order_entry": "基本信息录入",
+    "order_edit": "基本信息修改",
+    "order_delete": "基本信息删除",
+    "purchase_entry": "采购信息录入",
+    "purchase_edit": "采购信息修改",
+    "purchase_delete": "采购信息删除",
+    "sales_entry": "销售信息录入",
+    "sales_edit": "销售信息修改",
+    "sales_delete": "销售信息删除",
+    "system_admin": "系统管理",
+}
+
+
+def _permission_labels(permissions: list[str]) -> list[str]:
+    return [PERMISSION_LABELS_CN.get(permission, permission) for permission in permissions]
+
+
+def _user_audit_snapshot(row, *, permissions: list[str] | None = None, department_scope: list[str] | None = None) -> dict:
+    role_code = str(row["role_code"])
+    normalized_permissions = permissions
+    if normalized_permissions is None:
+        normalized_permissions = normalize_permissions(
+            role_code,
+            parse_json_list(row["permissions_json"]) if row.get("permissions_json") else None,
+        )
+    scope = department_scope
+    if scope is None:
+        scope = parse_json_list(row["department_scope_json"]) if row.get("department_scope_json") else []
+    return {
+        "id": int(row["id"]) if row.get("id") is not None else None,
+        "username": str(row["username"]),
+        "display_name": str(row["display_name"]),
+        "role_name": ROLE_LABELS.get(role_code, role_code),
+        "permissions": _permission_labels(normalized_permissions),
+        "department_scope": scope or ["全部部门"],
+        "department_can_view": bool(row.get("department_can_view", False)),
+        "department_can_entry": bool(row.get("department_can_entry", False)),
+        "account_status": "启用" if bool(row.get("is_active", True)) else "停用",
+    }
 
 
 class LoginRequest(BaseModel):
@@ -155,18 +197,23 @@ def create_user(payload: UserCreate, admin: CurrentUser = Depends(require_permis
                 "department_can_entry": int(payload.department_can_entry),
             },
         )
-        conn.execute(
+        created = conn.execute(
             text(
                 """
-                INSERT INTO operation_log (user_id, user_name, module_name, action_name, detail, status)
-                VALUES (:user_id, :user_name, '账号管理', 'create_user', :detail, 'success')
+                SELECT id, username, display_name, role_code, permissions_json, department_scope_json,
+                       department_can_view, department_can_entry, is_active
+                FROM erp_user WHERE username = :username
                 """
             ),
-            {
-                "user_id": admin.id,
-                "user_name": admin.display_name,
-                "detail": f"创建账号 {payload.username}，权限 {','.join(permissions) or '无'}",
-            },
+            {"username": payload.username},
+        ).mappings().one()
+        write_operation_log(
+            conn,
+            admin,
+            "账号管理",
+            "create_user",
+            f"创建账号“{payload.username}”，角色为“{ROLE_LABELS.get(payload.role_code, payload.role_code)}”",
+            after=_user_audit_snapshot(created, permissions=permissions, department_scope=department_scope),
         )
     return list_users(admin)
 
@@ -187,7 +234,8 @@ def update_user_permissions(
         target = conn.execute(
             text(
                 """
-                SELECT id, username, display_name, role_code, permissions_json, is_active
+                SELECT id, username, display_name, role_code, permissions_json, department_scope_json,
+                       department_can_view, department_can_entry, is_active
                 FROM erp_user
                 WHERE id = :user_id
                 """
@@ -196,6 +244,7 @@ def update_user_permissions(
         ).mappings().first()
         if target is None or not target["is_active"]:
             raise HTTPException(status_code=404, detail="账号不存在")
+        before = _user_audit_snapshot(target)
         if "system_admin" not in permissions:
             admin_rows = conn.execute(
                 text(
@@ -240,18 +289,22 @@ def update_user_permissions(
                 "department_can_entry": int(payload.department_can_entry),
             },
         )
-        conn.execute(
-            text(
-                """
-                INSERT INTO operation_log (user_id, user_name, module_name, action_name, detail, status)
-                VALUES (:user_id, :user_name, '账号管理', 'update_user_permissions', :detail, 'success')
-                """
-            ),
-            {
-                "user_id": admin.id,
-                "user_name": admin.display_name,
-                "detail": f"修改账号 {target['username']} 权限为 {','.join(permissions) or '无'}",
-            },
+        after = {
+            **before,
+            "role_name": ROLE_LABELS.get(payload.role_code, payload.role_code),
+            "permissions": _permission_labels(permissions),
+            "department_scope": department_scope or ["全部部门"],
+            "department_can_view": payload.department_can_view,
+            "department_can_entry": payload.department_can_entry,
+        }
+        write_operation_log(
+            conn,
+            admin,
+            "账号管理",
+            "update_user_permissions",
+            f"修改账号“{target['username']}”的角色和权限",
+            before=before,
+            after=after,
         )
     return list_users(admin)
 
@@ -264,7 +317,8 @@ def delete_user(user_id: int, admin: CurrentUser = Depends(require_permission("s
         target = conn.execute(
             text(
                 """
-                SELECT id, username, display_name, role_code, permissions_json, is_active
+                SELECT id, username, display_name, role_code, permissions_json, department_scope_json,
+                       department_can_view, department_can_entry, is_active
                 FROM erp_user
                 WHERE id = :user_id
                 """
@@ -273,6 +327,7 @@ def delete_user(user_id: int, admin: CurrentUser = Depends(require_permission("s
         ).mappings().first()
         if target is None or not target["is_active"]:
             raise HTTPException(status_code=404, detail="账号不存在")
+        before = _user_audit_snapshot(target)
 
         target_permissions = normalize_permissions(
             str(target["role_code"]),
@@ -304,17 +359,13 @@ def delete_user(user_id: int, admin: CurrentUser = Depends(require_permission("s
             text("UPDATE erp_user SET is_active = 0, updated_at = NOW() WHERE id = :user_id"),
             {"user_id": user_id},
         )
-        conn.execute(
-            text(
-                """
-                INSERT INTO operation_log (user_id, user_name, module_name, action_name, detail, status)
-                VALUES (:user_id, :user_name, '账号管理', 'delete_user', :detail, 'success')
-                """
-            ),
-            {
-                "user_id": admin.id,
-                "user_name": admin.display_name,
-                "detail": f"删除账号 {target['username']}",
-            },
+        write_operation_log(
+            conn,
+            admin,
+            "账号管理",
+            "delete_user",
+            f"停用账号“{target['username']}”",
+            before=before,
+            after={**before, "account_status": "停用"},
         )
     return list_users(admin)

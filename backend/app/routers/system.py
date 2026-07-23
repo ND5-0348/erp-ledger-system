@@ -24,7 +24,7 @@ def run_import(user: CurrentUser = Depends(require_permission("system_admin"))) 
         raise HTTPException(status_code=500, detail="导入前自动备份失败，已取消导入") from exc
     with db() as conn:
         try:
-            result = import_excel(conn, reset=True)
+            result = import_excel(conn, reset=True, user=user)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if result["failed_rows"]:

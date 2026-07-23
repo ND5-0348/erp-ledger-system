@@ -49,6 +49,7 @@ class OrderLine(Base):
 
     id = Column(Integer, primary_key=True)
     sales_order_id = Column(Integer, ForeignKey("sales_order.id"), nullable=False)
+    project_name = Column(String(255))
     goods_name = Column(String(255))
     unit_name = Column(String(32))
     quantity = Column(Numeric(20, 6))

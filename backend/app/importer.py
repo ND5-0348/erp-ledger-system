@@ -23,6 +23,7 @@ BUSINESS_SHEET_INDEX = 2
 HEADER_ROW = 3
 DATA_START_ROW = 5
 LATEST_LAYOUT_HEADERS = frozenset({"销售税率", "采购税率", "物资/服务名称"})
+REQUIRED_BUSINESS_HEADERS = frozenset({"项目编号", "订单号", "项目名称"})
 
 
 def _json_default(value: Any) -> str | float | int | None:
@@ -101,6 +102,17 @@ def _is_latest_layout(headers: list[Any] | tuple[Any, ...]) -> bool:
     return bool(LATEST_LAYOUT_HEADERS & header_names)
 
 
+def _detect_business_header_row(worksheet, *, max_scan_rows: int = 10) -> int:
+    for row_no, row in enumerate(
+        worksheet.iter_rows(min_row=1, max_row=max_scan_rows, values_only=True),
+        start=1,
+    ):
+        names = {str(value or "").strip() for value in row}
+        if REQUIRED_BUSINESS_HEADERS.issubset(names):
+            return row_no
+    raise ValueError("Excel 前10行中未找到项目编号、订单号、项目名称等业务表头")
+
+
 def _column_position(latest_layout: bool, latest: int, legacy: int | None = None) -> int:
     return latest if latest_layout else int(legacy or 0)
 
@@ -161,8 +173,8 @@ def import_excel(
         workbook_source = BytesIO(workbook_bytes)
         source_file_name = source_file_name or "市场部业务台账.xlsx"
         sheet_index = 0
-        header_row = 1
-        data_start_row = 2
+        header_row = 2 if strict_template else 0
+        data_start_row = 3 if strict_template else 0
     if reset:
         _reset_business_data(conn)
 
@@ -170,10 +182,14 @@ def import_excel(
     if len(workbook.worksheets) <= sheet_index:
         raise ValueError("Excel 中缺少业务台账工作表")
     worksheet = workbook.worksheets[sheet_index]
+    if not strict_template and header_row == 0:
+        header_row = _detect_business_header_row(worksheet)
+        data_start_row = header_row + 1
     headers = list(next(worksheet.iter_rows(min_row=header_row, max_row=header_row, values_only=True)))
     normalized_headers = [str(header or "").strip() for header in headers]
     if strict_template and normalized_headers != TEMPLATE_HEADERS:
         raise ValueError("Excel 表头与“市场部业务台账模板”不一致，请重新下载模板后填写")
+    template_layout = strict_template and normalized_headers == TEMPLATE_HEADERS
     latest_layout = _is_latest_layout(headers)
 
     def position(latest: int, legacy: int | None = None) -> int:
@@ -268,7 +284,7 @@ def import_excel(
                    :team_level3_name, :customer_unit_name, :end_user_name, :regional_platform)
                 ON DUPLICATE KEY UPDATE
                   id = LAST_INSERT_ID(id),
-                  project_name = COALESCE(VALUES(project_name), project_name),
+                  project_name = COALESCE(project_name, VALUES(project_name)),
                   department = COALESCE(VALUES(department), department),
                   branch_company = COALESCE(VALUES(branch_company), branch_company),
                   account_manager = COALESCE(VALUES(account_manager), account_manager),
@@ -315,7 +331,7 @@ def import_excel(
                     "order_date": _as_date(_row_value(row, position(6, 6))),
                     "business_type": _as_text(_row_value(row, position(7, 7))),
                     "statistic_category": _as_text(_row_value(row, position(8, 8))),
-                    "close_status": _as_text(_row_value(row, position(96, 87))),
+                    "close_status": _as_text(_row_value(row, 89 if template_layout else position(96, 87))),
                 },
             )
 
@@ -333,11 +349,11 @@ def import_excel(
                 conn,
                 """
                 INSERT INTO order_line
-                  (sales_order_id, raw_row_id, source_excel_row_no, goods_name, specification_model,
+                  (sales_order_id, raw_row_id, source_excel_row_no, project_name, goods_name, specification_model,
                    unit_name, quantity, sales_tax_rate, sales_unit_price_no_tax, sales_unit_price,
                    revenue_no_tax, order_value)
                 VALUES
-                  (:sales_order_id, :raw_row_id, :excel_row_no, :goods_name, :specification_model,
+                  (:sales_order_id, :raw_row_id, :excel_row_no, :project_name, :goods_name, :specification_model,
                    :unit_name, :quantity, :sales_tax_rate, :sales_unit_price_no_tax, :sales_unit_price,
                    :revenue_no_tax, :order_value)
                 """,
@@ -345,6 +361,7 @@ def import_excel(
                     "sales_order_id": sales_order_id,
                     "raw_row_id": raw_row_id,
                     "excel_row_no": excel_row_no,
+                    "project_name": _as_text(_row_value(row, position(14, 14))),
                     "goods_name": _as_text(_row_value(row, position(15, 15))),
                     "specification_model": _as_text(_row_value(row, position(16, 16))),
                     "unit_name": _as_text(_row_value(row, position(17, 17))),
@@ -374,7 +391,7 @@ def import_excel(
                        purchase_unit_price, cost_no_tax, purchase_amount, labor_cost, other_cost)
                     VALUES
                       (:order_line_id, :supplier_name, :purchase_tax_rate, :purchase_unit_price_no_tax,
-                       :purchase_unit_price, :cost_no_tax, :purchase_amount, NULL, NULL)
+                       :purchase_unit_price, :cost_no_tax, :purchase_amount, :labor_cost, :other_cost)
                     """
                 ),
                 {
@@ -385,6 +402,8 @@ def import_excel(
                     "purchase_unit_price": purchase_unit_price,
                     "cost_no_tax": cost_no_tax,
                     "purchase_amount": purchase_amount,
+                    "labor_cost": _as_decimal(_row_value(row, 90)) if template_layout else None,
+                    "other_cost": _as_decimal(_row_value(row, 91)) if template_layout else None,
                 },
             )
 
@@ -435,16 +454,42 @@ def import_excel(
             )
 
             _insert_phase(conn, "purchase_invoice", order_line_id, 1, row, position(44, 42), position(45, 43), position(46, 44))
-            _insert_warehouse(conn, order_line_id, row, position(47, 45), position(48, 46), position(49, 47), position(50))
-            if latest_layout:
+            _insert_warehouse(
+                conn,
+                order_line_id,
+                row,
+                position(47, 45),
+                position(48, 46),
+                position(49, 47),
+                0 if template_layout else position(50),
+            )
+            if template_layout:
+                _insert_finance_payment(conn, order_line_id, 1, row, 50, 51, 52)
+            elif latest_layout:
                 _insert_finance_check(conn, order_line_id, 1, row, 51, 52, 53)
                 _insert_finance_check(conn, order_line_id, 2, row, 54, 55, 56)
                 _insert_finance_payment(conn, order_line_id, 1, row, 57, 58, 59)
                 _insert_finance_payment(conn, order_line_id, 2, row, 60, 61, 62)
             else:
                 _insert_finance_payment(conn, order_line_id, 1, row, 48, 49, 50)
-            _insert_payment(conn, order_line_id, 1, _as_date(_row_value(row, position(65, 52))), _as_date(_row_value(row, position(66, 53))), _as_text(_row_value(row, position(67, 54))), _as_decimal(_row_value(row, position(68, 55))))
-            _insert_payment(conn, order_line_id, 2, None, _as_date(_row_value(row, position(69, 56))), _as_text(_row_value(row, position(70, 57))), _as_decimal(_row_value(row, position(71, 58))))
+            _insert_payment(
+                conn,
+                order_line_id,
+                1,
+                _as_date(_row_value(row, 54 if template_layout else position(65, 52))),
+                _as_date(_row_value(row, 55 if template_layout else position(66, 53))),
+                _as_text(_row_value(row, 56 if template_layout else position(67, 54))),
+                _as_decimal(_row_value(row, 57 if template_layout else position(68, 55))),
+            )
+            _insert_payment(
+                conn,
+                order_line_id,
+                2,
+                None,
+                _as_date(_row_value(row, 58 if template_layout else position(69, 56))),
+                _as_text(_row_value(row, 59 if template_layout else position(70, 57))),
+                _as_decimal(_row_value(row, 60 if template_layout else position(71, 58))),
+            )
 
             conn.execute(
                 text(
@@ -459,11 +504,15 @@ def import_excel(
                 ),
                 {
                     "order_line_id": order_line_id,
-                    "contract_signed_date": _as_date(_row_value(row, position(76, 66))),
-                    "sales_contract_no": _as_text(_row_value(row, position(77, 67))),
-                    "contract_value": _as_decimal(_row_value(row, position(78, 68))),
-                    "performance_period": _as_text(_row_value(row, position(79, 69))),
-                    "unsigned_contract_amount": None if latest_layout else _as_decimal(_row_value(row, 70)),
+                    "contract_signed_date": _as_date(_row_value(row, 68 if template_layout else position(76, 66))),
+                    "sales_contract_no": _as_text(_row_value(row, 69 if template_layout else position(77, 67))),
+                    "contract_value": _as_decimal(_row_value(row, 70 if template_layout else position(78, 68))),
+                    "performance_period": _as_text(_row_value(row, 71 if template_layout else position(79, 69))),
+                    "unsigned_contract_amount": (
+                        _as_decimal(_row_value(row, 72))
+                        if template_layout
+                        else (None if latest_layout else _as_decimal(_row_value(row, 70)))
+                    ),
                 },
             )
 
@@ -480,18 +529,36 @@ def import_excel(
                 ),
                 {
                     "order_line_id": order_line_id,
-                    "invoice_doc_no": _as_text(_row_value(row, position(80, 71))),
-                    "invoice_date": _as_date(_row_value(row, position(81, 72))),
-                    "invoice_date_text": _as_text(_row_value(row, position(81, 72))),
-                    "invoice_no": _as_text(_row_value(row, position(82, 73))),
-                    "invoice_amount": _as_decimal(_row_value(row, position(83, 74))),
-                    "pending_invoice_amount": _as_decimal(_row_value(row, position(84, 75))),
-                    "delivered_not_invoiced_amount": _as_decimal(_row_value(row, position(85, 76))),
+                    "invoice_doc_no": _as_text(_row_value(row, 73 if template_layout else position(80, 71))),
+                    "invoice_date": _as_date(_row_value(row, 74 if template_layout else position(81, 72))),
+                    "invoice_date_text": _as_text(_row_value(row, 74 if template_layout else position(81, 72))),
+                    "invoice_no": _as_text(_row_value(row, 75 if template_layout else position(82, 73))),
+                    "invoice_amount": _as_decimal(_row_value(row, 76 if template_layout else position(83, 74))),
+                    "pending_invoice_amount": _as_decimal(_row_value(row, 77 if template_layout else position(84, 75))),
+                    "delivered_not_invoiced_amount": _as_decimal(_row_value(row, 78 if template_layout else position(85, 76))),
                 },
             )
 
-            _insert_receipt(conn, order_line_id, 1, row, position(86, 77), position(87, 78), position(88, 79), position(89, 80))
-            _insert_receipt(conn, order_line_id, 2, row, position(90, 81), position(91, 82), position(92, 83), position(93, 84))
+            _insert_receipt(
+                conn,
+                order_line_id,
+                1,
+                row,
+                79 if template_layout else position(86, 77),
+                80 if template_layout else position(87, 78),
+                81 if template_layout else position(88, 79),
+                82 if template_layout else position(89, 80),
+            )
+            _insert_receipt(
+                conn,
+                order_line_id,
+                2,
+                row,
+                83 if template_layout else position(90, 81),
+                84 if template_layout else position(91, 82),
+                85 if template_layout else position(92, 83),
+                86 if template_layout else position(93, 84),
+            )
 
             success_rows += 1
         except PermissionError:

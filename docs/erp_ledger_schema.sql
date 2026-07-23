@@ -154,6 +154,7 @@ CREATE TABLE IF NOT EXISTS order_line (
   sales_order_id BIGINT UNSIGNED NOT NULL,
   raw_row_id BIGINT UNSIGNED NULL,
   source_excel_row_no INT NULL,
+  project_name VARCHAR(255) NULL,
   goods_name VARCHAR(255) NULL,
   specification_model VARCHAR(255) NULL,
   unit_name VARCHAR(32) NULL,
@@ -404,14 +405,18 @@ CREATE VIEW v_order_line_finance AS
 SELECT
   p.project_code,
   so.order_no,
+  so.gross_net_type,
   p.department,
   p.branch_company,
   p.account_manager,
+  p.team_level3_name,
   so.order_date,
   so.business_type,
   so.statistic_category,
   p.customer_unit_name,
-  p.project_name,
+  p.end_user_name,
+  p.regional_platform,
+  COALESCE(ol.project_name, p.project_name) AS project_name,
   so.close_status,
   ol.id AS order_line_id,
   ol.goods_name,
@@ -521,7 +526,10 @@ DROP VIEW IF EXISTS v_project_ledger_summary;
 CREATE VIEW v_project_ledger_summary AS
 SELECT
   p.project_code,
-  p.project_name,
+  COALESCE(
+    GROUP_CONCAT(DISTINCT v.project_name ORDER BY v.project_name SEPARATOR '；'),
+    p.project_name
+  ) AS project_name,
   p.department,
   p.branch_company,
   p.account_manager,
@@ -551,7 +559,7 @@ CREATE VIEW v_order_ledger_summary AS
 SELECT
   v.project_code,
   v.order_no,
-  v.project_name,
+  GROUP_CONCAT(DISTINCT v.project_name ORDER BY v.project_name SEPARATOR '；') AS project_name,
   v.department,
   v.branch_company,
   v.account_manager,
@@ -573,5 +581,5 @@ SELECT
   SUM(COALESCE(v.gross_profit_no_tax, 0)) AS gross_profit_no_tax,
   SUM(COALESCE(v.gross_profit, 0)) AS gross_profit
 FROM v_order_line_finance v
-GROUP BY v.project_code, v.order_no, v.project_name, v.department, v.branch_company, v.account_manager,
+GROUP BY v.project_code, v.order_no, v.department, v.branch_company, v.account_manager,
   v.customer_unit_name, v.order_date, v.business_type, v.statistic_category, v.close_status;

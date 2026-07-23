@@ -6,6 +6,8 @@ import {
   ChevronLeft, 
   ChevronRight, 
   Eye,
+  Pencil,
+  Trash2,
   X,
   AlertTriangle,
   FileSpreadsheet,
@@ -31,6 +33,11 @@ interface LedgerScreenProps {
   purchases: PurchaseRecord[];
   sales: SalesRecord[];
   onAddLedger: (ledger: ProjectLedger) => void;
+  onManageOrder: (orderLineId: number, intent: 'edit' | 'delete') => void;
+  canEditOrders: boolean;
+  canDeleteOrders: boolean;
+  onDownloadTemplate: () => Promise<Blob>;
+  onExportExcel: () => Promise<Blob>;
 }
 
 const statusOptions = [
@@ -53,7 +60,18 @@ function getPaginationItems(totalPages: number): Array<number | 'ellipsis'> {
   return [1, 2, 'ellipsis', totalPages - 1, totalPages];
 }
 
-export default function LedgerScreen({ ledgers, orders, purchases, sales, onAddLedger }: LedgerScreenProps) {
+export default function LedgerScreen({
+  ledgers,
+  orders,
+  purchases,
+  sales,
+  onAddLedger,
+  onManageOrder,
+  canEditOrders,
+  canDeleteOrders,
+  onDownloadTemplate,
+  onExportExcel,
+}: LedgerScreenProps) {
   // Filter States
   const [projectId, setProjectId] = useState('');
   const [department, setDepartment] = useState('');
@@ -68,7 +86,14 @@ export default function LedgerScreen({ ledgers, orders, purchases, sales, onAddL
   const [invoiceEndDate, setInvoiceEndDate] = useState('');
   const [submittedFilters, setSubmittedFilters] = useState(emptyLedgerFilters);
   const [selectedLedger, setSelectedLedger] = useState<ProjectLedger | null>(null);
+  const [detailIntent, setDetailIntent] = useState<'view' | 'edit' | 'delete'>('view');
   const [expandedOrderRows, setExpandedOrderRows] = useState<Set<string>>(() => new Set());
+
+  const openLedgerDetail = (ledger: ProjectLedger, intent: 'view' | 'edit' | 'delete') => {
+    setExpandedOrderRows(new Set());
+    setDetailIntent(intent);
+    setSelectedLedger(ledger);
+  };
 
   // Pagination States
   const [currentPage, setCurrentPage] = useState(1);
@@ -153,21 +178,29 @@ export default function LedgerScreen({ ledgers, orders, purchases, sales, onAddL
 
   const totalPages = Math.max(1, Math.ceil(filteredLedgers.length / itemsPerPage));
   const paginationItems = getPaginationItems(totalPages);
-  const handleExport = () => {
-    const headers = ['项目编号', '客户单位名称', '项目名称', '销售订单金额', '含税采购金额', '回款合计', '部门', '客户经理', '状态', '订单日期'];
-    const escapeCsv = (value: string | number) => `"${String(value ?? '').replace(/"/g, '""')}"`;
-    const rows = filteredLedgers.map((item) => [
-      item.id, item.clientUnit, item.projectName, item.orderAmount, item.purchaseAmount,
-      item.totalReceived, item.department, item.manager, normalizeOrderStatus(item.orderStatus), item.orderDate,
-    ]);
-    const content = [headers, ...rows].map((row) => row.map(escapeCsv).join(',')).join('\r\n');
-    const blob = new Blob([`\uFEFF${content}`], { type: 'text/csv;charset=utf-8' });
+  const downloadBlob = (blob: Blob, fileName: string) => {
     const url = window.URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `项目台账_${new Date().toISOString().slice(0, 10)}.csv`;
+    link.download = fileName;
     link.click();
     window.URL.revokeObjectURL(url);
+  };
+
+  const handleDownloadTemplate = async () => {
+    try {
+      downloadBlob(await onDownloadTemplate(), '市场部业务台账模板.xlsx');
+    } catch (error) {
+      alert(error instanceof Error ? error.message : '模板下载失败');
+    }
+  };
+
+  const handleExportExcel = async () => {
+    try {
+      downloadBlob(await onExportExcel(), '市场部业务台账.xlsx');
+    } catch (error) {
+      alert(error instanceof Error ? error.message : '台账导出失败');
+    }
   };
   const selectedOrders = useMemo(
     () => (selectedLedger ? orders.filter((item) => item.projectId === selectedLedger.id) : []),
@@ -281,12 +314,20 @@ export default function LedgerScreen({ ledgers, orders, purchases, sales, onAddL
           <p className="text-sm text-slate-500 font-sans mt-1">查看项目销售订单、含税采购金额、回款与应收应付汇总。</p>
         </div>
         <div className="flex items-center gap-2 self-start sm:self-center">
+          <button
+            type="button"
+            onClick={handleDownloadTemplate}
+            className="flex items-center gap-1.5 px-3.5 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-lg shadow-sm transition-all text-xs font-semibold"
+          >
+            <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+            <span>下载模板</span>
+          </button>
           <button 
-            onClick={handleExport}
+            onClick={handleExportExcel}
             className="flex items-center gap-1.5 px-3.5 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-lg shadow-sm transition-all text-xs font-semibold"
           >
             <FileOutput className="w-4 h-4 text-blue-600" />
-            <span>导出报表</span>
+            <span>导出台账</span>
           </button>
         </div>
       </div>
@@ -469,7 +510,7 @@ export default function LedgerScreen({ ledgers, orders, purchases, sales, onAddL
                 <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[160px]">D付款金额</th>
                 <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[160px]">E发票金额</th>
                 <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[160px]">E收票金额</th>
-                <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-center w-[120px]">查看</th>
+                <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-center w-[132px]">操作</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -494,18 +535,39 @@ export default function LedgerScreen({ ledgers, orders, purchases, sales, onAddL
                       <td className="px-6 py-4 text-xs text-right font-mono text-slate-600">¥{formatMoney(item.salesInvoiceAmount || 0)}</td>
                       <td className="px-6 py-4 text-xs text-right font-mono text-slate-600">¥{formatMoney(item.receivedInvoiceAmount || 0)}</td>
                       <td className="px-6 py-4 text-center">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setExpandedOrderRows(new Set());
-                            setSelectedLedger(item);
-                          }}
-                          className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-blue-100 bg-blue-50 text-blue-600 hover:bg-blue-100 hover:border-blue-200 transition-colors"
-                          title="查看项目全部信息"
-                          aria-label={`查看项目 ${item.id} 的全部信息`}
-                        >
-                          <Eye className="w-4 h-4" />
-                        </button>
+                        <div className="inline-flex items-center justify-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => openLedgerDetail(item, 'view')}
+                            className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-blue-100 bg-blue-50 text-blue-600 hover:bg-blue-100 hover:border-blue-200 transition-colors"
+                            title="查看项目全部信息"
+                            aria-label={`查看项目 ${item.id} 的全部信息`}
+                          >
+                            <Eye className="w-4 h-4" />
+                          </button>
+                          {canEditOrders && (
+                            <button
+                              type="button"
+                              onClick={() => openLedgerDetail(item, 'edit')}
+                              className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-blue-100 bg-blue-50 text-blue-600 hover:bg-blue-100 hover:border-blue-200 transition-colors"
+                              title="进入项目订单明细进行修改"
+                              aria-label={`修改项目 ${item.id} 的具体订单明细`}
+                            >
+                              <Pencil className="w-4 h-4" />
+                            </button>
+                          )}
+                          {canDeleteOrders && (
+                            <button
+                              type="button"
+                              onClick={() => openLedgerDetail(item, 'delete')}
+                              className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-rose-100 bg-rose-50 text-rose-600 hover:bg-rose-100 hover:border-rose-200 transition-colors"
+                              title="进入项目订单明细进行删除"
+                              aria-label={`删除项目 ${item.id} 中的具体订单明细`}
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                 ))
@@ -636,6 +698,7 @@ export default function LedgerScreen({ ledgers, orders, purchases, sales, onAddL
                 type="button"
                 onClick={() => {
                   setSelectedLedger(null);
+                  setDetailIntent('view');
                   setExpandedOrderRows(new Set());
                 }}
                 className="inline-flex items-center justify-center w-8 h-8 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
@@ -646,6 +709,17 @@ export default function LedgerScreen({ ledgers, orders, purchases, sales, onAddL
             </div>
 
             <div className="p-6 space-y-5 overflow-y-auto max-h-[calc(88vh-73px)]">
+              {detailIntent !== 'view' && (
+                <div className={`rounded-lg border px-4 py-3 text-xs ${
+                  detailIntent === 'delete'
+                    ? 'border-rose-200 bg-rose-50 text-rose-700'
+                    : 'border-blue-200 bg-blue-50 text-blue-700'
+                }`}>
+                  {detailIntent === 'edit'
+                    ? '请在“销售信息”中展开订单号，再选择具体货物明细进行修改。'
+                    : '请在“销售信息”中展开订单号，再选择具体货物明细进行删除；不会直接删除整个项目。'}
+                </div>
+              )}
               <section>
                 <h3 className="text-sm font-bold text-slate-900 mb-3">项目信息</h3>
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
@@ -693,19 +767,14 @@ export default function LedgerScreen({ ledgers, orders, purchases, sales, onAddL
                 rows={selectedOrderSummaries}
                 expandedRows={expandedOrderRows}
                 onToggle={toggleOrderRow}
+                actionMode={detailIntent}
+                onEditLine={(orderLineId) => onManageOrder(orderLineId, 'edit')}
+                onDeleteLine={(orderLineId) => onManageOrder(orderLineId, 'delete')}
               />
               <OrderOperatingSummarySection
                 title="采购信息"
                 sectionId="purchase"
                 variant="purchase"
-                rows={selectedOrderSummaries}
-                expandedRows={expandedOrderRows}
-                onToggle={toggleOrderRow}
-              />
-              <OrderOperatingSummarySection
-                title="收款付款信息"
-                sectionId="payments"
-                variant="all"
                 rows={selectedOrderSummaries}
                 expandedRows={expandedOrderRows}
                 onToggle={toggleOrderRow}

@@ -1,19 +1,22 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import logging
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .config import settings, validate_security_settings
-from .auth import ensure_default_admin
-from .db import active_table_count, initialize_schema
+from .auth import current_user_from_token, ensure_default_admin
+from .db import active_table_count, db, initialize_schema
+from .audit import failed_mutation_metadata, failure_reason, write_operation_log
 from .routers import auth, dashboard, ledgers, orders, purchases, sales, system
 from .validation import validation_error_message
 
 startup_state = {"database": "not_checked", "imported_rows": 0, "error": None}
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -32,6 +35,47 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="ERP Ledger API", version="1.0.0", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def audit_failed_data_change(request: Request, call_next):
+    try:
+        response = await call_next(request)
+    except Exception:
+        _write_failed_data_change(request, 500)
+        raise
+    if response.status_code >= 400:
+        _write_failed_data_change(request, response.status_code)
+    return response
+
+
+def _write_failed_data_change(request: Request, status_code: int) -> None:
+    metadata = failed_mutation_metadata(request.method, request.url.path)
+    user = getattr(request.state, "current_user", None)
+    if user is None:
+        authorization = request.headers.get("Authorization", "")
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() == "bearer" and token:
+            try:
+                user = current_user_from_token(token)
+            except HTTPException:
+                user = None
+    if metadata is None or user is None:
+        return
+    module_name, action_name, action_label = metadata
+    try:
+        with db() as conn:
+            write_operation_log(
+                conn,
+                user,
+                module_name,
+                action_name,
+                f"{action_label}失败：{failure_reason(status_code)}",
+                status="failed",
+            )
+    except Exception:
+        # 审计库不可用时保留原业务错误，避免覆盖真实失败原因。
+        logger.exception("写入失败操作审计日志失败")
 
 
 @app.exception_handler(RequestValidationError)

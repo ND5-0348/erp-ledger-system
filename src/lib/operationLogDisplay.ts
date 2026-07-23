@@ -15,14 +15,19 @@ interface AuditDetail {
 const FIELD_LABELS: Record<string, string> = {
   project_code: '项目编号',
   order_no: '销售订单号',
+  gross_net_type: '全额/净额',
   department: '部门',
   branch_company: '分公司',
   team_name: '三级团队',
+  team_level3_name: '三级团队名称',
   account_manager: '客户经理',
   order_date: '销售订单日期',
   business_type: '业务类型',
   statistic_category: '统计类别',
   customer_unit_name: '客户单位名称',
+  user_name: '用户',
+  end_user_name: '用户',
+  regional_platform: '区域平台',
   project_name: '项目名称',
   close_status: '关闭状态',
   goods_name: '货物名称',
@@ -39,8 +44,8 @@ const FIELD_LABELS: Record<string, string> = {
   purchase_tax_rate: '采购税率',
   purchase_unit_price_no_tax: '采购不含税单价',
   purchase_unit_price: '采购含税单价',
-  cost_no_tax: '不含税采购成本',
-  purchase_amount: '采购金额',
+  cost_no_tax: '不含税采购金额',
+  purchase_amount: '含税采购金额',
   purchase_tax_amount: '采购税金',
   labor_cost: '人工成本',
   other_cost: '其他成本',
@@ -83,10 +88,20 @@ const FIELD_LABELS: Record<string, string> = {
   payment_notice_no: '收款通知单号',
   receipt_amount: '回款金额',
   receipt_ratio: '回款比例',
+  username: '账号',
+  display_name: '显示名称',
+  role_name: '角色',
+  permissions: '权限',
+  department_scope: '部门范围',
+  department_can_view: '部门查看权限',
+  department_can_entry: '部门录入权限',
+  is_active: '账号状态',
+  account_status: '账号状态',
 };
 
 const UPDATE_ENTITY_LABELS: Record<string, string> = {
   update_order: '订单',
+  update_purchase_summary: '采购基础信息',
   update_purchase_contract: '采购合同',
   update_purchase_invoice: '采购收票',
   update_warehouse_entry: '入库记录',
@@ -96,6 +111,7 @@ const UPDATE_ENTITY_LABELS: Record<string, string> = {
   update_sales_contract: '销售合同',
   update_sales_invoice: '销售开票',
   update_sales_receipt: '销售回款',
+  update_user_permissions: '账号',
 };
 
 const ACTION_LABELS: Record<string, string> = {
@@ -174,14 +190,31 @@ function changedFields(before: AuditSnapshot, after: AuditSnapshot) {
 }
 
 function snapshotIdentifier(actionName: string, before: AuditSnapshot, after: AuditSnapshot) {
+  const projectCode = after.project_code || before.project_code;
+  const orderNo = after.order_no || before.order_no;
+  const goodsName = after.goods_name || before.goods_name;
+  const specificationModel = after.specification_model || before.specification_model;
+  const context: string[] = [];
+  if (projectCode) context.push(`项目“${formatValue(projectCode)}”`);
+  if (orderNo) context.push(`订单“${formatValue(orderNo)}”`);
+  if (goodsName) {
+    const specification = specificationModel ? `（${formatValue(specificationModel)}）` : '';
+    context.push(`货物/服务“${formatValue(goodsName)}${specification}”`);
+  }
+
   if (actionName === 'update_order') {
-    const orderNo = after.order_no || before.order_no;
-    if (orderNo) return `订单“${formatValue(orderNo)}”`;
+    if (context.length) return context.join('、');
+  }
+
+  if (actionName === 'update_user_permissions') {
+    const username = after.username || before.username;
+    if (username) return `账号“${formatValue(username)}”`;
   }
 
   const label = UPDATE_ENTITY_LABELS[actionName] || '记录';
   const recordId = after.id || before.id || after.order_line_id || before.order_line_id;
-  return recordId ? `${label}“${formatValue(recordId)}”` : label;
+  const record = recordId ? `${label}“${formatValue(recordId)}”` : label;
+  return context.length ? `${context.join('、')}中的${record}` : record;
 }
 
 function formatSummary(userName: string, actionName: string, detail: string, audit: AuditDetail | null) {

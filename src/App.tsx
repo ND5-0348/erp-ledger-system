@@ -36,7 +36,7 @@ import { formatOperationLogDetails } from './lib/operationLogDisplay';
 
 import DashboardScreen from './components/DashboardScreen';
 import LedgerScreen from './components/LedgerScreen';
-import OrdersScreen from './components/OrdersScreen';
+import OrdersScreen, { OrderActionRequest } from './components/OrdersScreen';
 import PurchasesScreen from './components/PurchasesScreen';
 import SalesScreen from './components/SalesScreen';
 import SystemScreen, { CreateUserPayload } from './components/SystemScreen';
@@ -46,6 +46,10 @@ const ztfsIconLogo = new URL('./logo/中通服图标LOGO.png', import.meta.url).
 
 function dateOnly(value: string | null | undefined) {
   return value ? value.slice(0, 10) : '';
+}
+
+function dateTime(value: string | null | undefined) {
+  return value ? value.replace('T', ' ').slice(0, 19) : '';
 }
 
 function optionalNumber(value: number | null | undefined) {
@@ -163,7 +167,7 @@ function mapLog(item: BackendOperationLog): OperationLog {
     module: item.module_name,
     details: formatOperationLogDetails(item),
     status: item.status === 'success' ? '成功' : item.status === 'failed' ? '失败' : '进行中',
-    time: dateOnly(item.created_at),
+    time: dateTime(item.created_at),
   };
 }
 
@@ -182,6 +186,7 @@ function mapAuthUser(item: BackendAuthUser): AuthUser {
 
 export default function App() {
   const [currentScreen, setCurrentScreen] = useState<ScreenType>('dashboard');
+  const [orderActionRequest, setOrderActionRequest] = useState<OrderActionRequest | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.matchMedia('(max-width: 767px)').matches);
   const [ledgers, setLedgers] = useState<ProjectLedger[]>([]);
   const [orders, setOrders] = useState<OrderRecord[]>([]);
@@ -398,6 +403,11 @@ export default function App() {
     if (window.matchMedia('(max-width: 767px)').matches) setSidebarCollapsed(true);
   };
 
+  const handleManageOrderFromLedger = (orderLineId: number, intent: 'edit' | 'delete') => {
+    setOrderActionRequest({ orderLineId, intent, nonce: Date.now() });
+    setCurrentScreen('orders');
+  };
+
   const screenNameMap: Record<ScreenType, string> = {
     dashboard: '首页仪表盘',
     ledger: '台账管理',
@@ -567,6 +577,11 @@ export default function App() {
               purchases={purchases}
               sales={sales}
               onAddLedger={handleAddLedger}
+              onManageOrder={handleManageOrderFromLedger}
+              canEditOrders={canEditOrders}
+              canDeleteOrders={canDeleteOrders}
+              onDownloadTemplate={api.downloadOrderTemplate}
+              onExportExcel={api.exportOrdersExcel}
             />
           )}
           {currentScreen === 'orders' && (
@@ -574,16 +589,16 @@ export default function App() {
               orders={orders}
               onAddOrder={handleAddOrder}
               onImportExcel={handleImportExcel}
-              onDownloadTemplate={api.downloadOrderTemplate}
-              onExportExcel={api.exportOrdersExcel}
               onUpdateOrder={handleUpdateOrder}
               onDeleteOrder={handleDeleteOrder}
               canEnterOrders={canEnterOrders}
               canEditOrders={canEditOrders}
               canDeleteOrders={canDeleteOrders}
+              actionRequest={orderActionRequest}
+              onActionRequestHandled={() => setOrderActionRequest(null)}
             />
           )}
-          {currentScreen === 'purchases' && <PurchasesScreen purchases={purchases} orders={orders} canEnterPurchases={canEnterPurchases} canEditPurchases={canEditPurchases} canDeletePurchases={canDeletePurchases} />}
+          {currentScreen === 'purchases' && <PurchasesScreen purchases={purchases} orders={orders} canEnterPurchases={canEnterPurchases} canEditPurchases={canEditPurchases} canDeletePurchases={canDeletePurchases} onRefresh={loadBackendData} />}
           {currentScreen === 'sales' && <SalesScreen sales={sales} orders={orders} canEnterSales={canEnterSales} canEditSales={canEditSales} canDeleteSales={canDeleteSales} />}
           {currentScreen === 'system' && (
             <SystemScreen

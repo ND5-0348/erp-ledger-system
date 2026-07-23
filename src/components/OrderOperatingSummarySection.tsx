@@ -1,5 +1,5 @@
 import React from 'react';
-import { ChevronRight } from 'lucide-react';
+import { ChevronRight, Pencil, Trash2 } from 'lucide-react';
 import { ProjectOrderSummary } from '../lib/projectOrderSummary';
 
 interface OrderOperatingSummarySectionProps {
@@ -9,6 +9,9 @@ interface OrderOperatingSummarySectionProps {
   rows: ProjectOrderSummary[];
   expandedRows: Set<string>;
   onToggle: (sectionId: string, orderId: string) => void;
+  actionMode?: 'view' | 'edit' | 'delete';
+  onEditLine?: (orderLineId: number) => void;
+  onDeleteLine?: (orderLineId: number) => void;
 }
 
 const columnsByVariant = {
@@ -54,8 +57,12 @@ export default function OrderOperatingSummarySection({
   rows,
   expandedRows,
   onToggle,
+  actionMode = 'view',
+  onEditLine,
+  onDeleteLine,
 }: OrderOperatingSummarySectionProps) {
   const amountColumns = columnsByVariant[variant];
+  const showLineAction = actionMode !== 'view';
   return (
     <section>
       <h3 className="text-sm font-bold text-slate-900 mb-3">{title}</h3>
@@ -127,6 +134,9 @@ export default function OrderOperatingSummarySection({
                                       {column.label}
                                     </th>
                                   ))}
+                                  {showLineAction && (
+                                    <th className="px-3 py-2 font-semibold text-center w-[90px]">操作</th>
+                                  )}
                                 </tr>
                               </thead>
                               <tbody className="divide-y divide-slate-100">
@@ -141,6 +151,33 @@ export default function OrderOperatingSummarySection({
                                         ¥{formatMoney(line[column.key])}
                                       </td>
                                     ))}
+                                    {showLineAction && (
+                                      <td className="px-3 py-2 text-center">
+                                        {line.orderLineId === undefined ? (
+                                          <span className="text-slate-400">不可操作</span>
+                                        ) : actionMode === 'edit' ? (
+                                          <button
+                                            type="button"
+                                            onClick={() => onEditLine?.(line.orderLineId as number)}
+                                            title="修改这笔订单明细"
+                                            aria-label={`修改订单 ${item.orderId} 的货物 ${line.goodsName}`}
+                                            className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-blue-100 bg-blue-50 text-blue-600 hover:bg-blue-100 hover:border-blue-200"
+                                          >
+                                            <Pencil className="w-4 h-4" />
+                                          </button>
+                                        ) : (
+                                          <button
+                                            type="button"
+                                            onClick={() => onDeleteLine?.(line.orderLineId as number)}
+                                            title="删除这笔订单明细"
+                                            aria-label={`删除订单 ${item.orderId} 的货物 ${line.goodsName}`}
+                                            className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-rose-100 bg-rose-50 text-rose-600 hover:bg-rose-100 hover:border-rose-200"
+                                          >
+                                            <Trash2 className="w-4 h-4" />
+                                          </button>
+                                        )}
+                                      </td>
+                                    )}
                                   </tr>
                                 ))}
                               </tbody>

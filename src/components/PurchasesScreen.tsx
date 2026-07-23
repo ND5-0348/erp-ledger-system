@@ -23,10 +23,12 @@ interface PurchasesScreenProps {
   canEnterPurchases: boolean;
   canEditPurchases: boolean;
   canDeletePurchases: boolean;
+  onRefresh?: () => void | Promise<void>;
 }
 
 type EntryMode = 'contract' | 'invoice' | 'warehouse' | 'financeCheck' | 'financePayment' | 'payment';
 type EditingRecord = { mode: EntryMode; id: number } | null;
+type DetailIntent = 'view' | 'edit' | 'delete';
 
 const moneyFormatter = new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2 });
 
@@ -49,7 +51,7 @@ function parseAmount(value: string) {
   return value === '' ? null : Number(value);
 }
 
-export default function PurchasesScreen({ purchases, orders, canEnterPurchases, canEditPurchases, canDeletePurchases }: PurchasesScreenProps) {
+export default function PurchasesScreen({ purchases, orders, canEnterPurchases, canEditPurchases, canDeletePurchases, onRefresh }: PurchasesScreenProps) {
   const [projectId, setProjectId] = useState('');
   const [orderId, setOrderId] = useState('');
   const [manager, setManager] = useState('');
@@ -61,12 +63,24 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
   const [submittedFilters, setSubmittedFilters] = useState(emptyPurchaseFilters);
   const [currentPage, setCurrentPage] = useState(1);
   const [selectedPurchase, setSelectedPurchase] = useState<PurchaseRecord | null>(null);
+  const [detailIntent, setDetailIntent] = useState<DetailIntent>('view');
   const [detail, setDetail] = useState<BackendPurchaseDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState('');
   const [entryMode, setEntryMode] = useState<EntryMode | null>(null);
   const [editingRecord, setEditingRecord] = useState<EditingRecord>(null);
+  const [summaryEditOpen, setSummaryEditOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [summaryForm, setSummaryForm] = useState({
+    supplier_name: '',
+    purchase_tax_rate: '',
+    purchase_unit_price_no_tax: '',
+    purchase_unit_price: '',
+    cost_no_tax: '',
+    purchase_amount: '',
+    labor_cost: '',
+    other_cost: '',
+  });
   const [contractForm, setContractForm] = useState({
     purchase_contract_no: '',
     payment_terms: '',
@@ -163,16 +177,19 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
     setCurrentPage(1);
   };
 
-  const loadDetail = async (item: PurchaseRecord) => {
+  const loadDetail = async (item: PurchaseRecord, intent: DetailIntent = 'view') => {
     if (!item.orderLineId) {
       setDetailError('当前记录缺少订单明细ID，无法打开详情。');
       setSelectedPurchase(item);
+      setDetailIntent(intent);
       return;
     }
     setSelectedPurchase(item);
+    setDetailIntent(intent);
     setDetail(null);
     setEntryMode(null);
     setEditingRecord(null);
+    setSummaryEditOpen(false);
     setDetailError('');
     setDetailLoading(true);
     try {
@@ -187,10 +204,54 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
 
   const closeDetail = () => {
     setSelectedPurchase(null);
+    setDetailIntent('view');
     setDetail(null);
     setEntryMode(null);
     setEditingRecord(null);
+    setSummaryEditOpen(false);
     setDetailError('');
+  };
+
+  const openSummaryEdit = () => {
+    const current = detail?.summary;
+    setSummaryForm({
+      supplier_name: String(current?.supplier_name ?? selectedPurchase?.supplier ?? ''),
+      purchase_tax_rate: current?.purchase_tax_rate === null || current?.purchase_tax_rate === undefined ? '' : String(current.purchase_tax_rate),
+      purchase_unit_price_no_tax: current?.purchase_unit_price_no_tax === null || current?.purchase_unit_price_no_tax === undefined ? '' : String(current.purchase_unit_price_no_tax),
+      purchase_unit_price: current?.purchase_unit_price === null || current?.purchase_unit_price === undefined ? '' : String(current.purchase_unit_price),
+      cost_no_tax: current?.cost_no_tax === null || current?.cost_no_tax === undefined ? '' : String(current.cost_no_tax),
+      purchase_amount: current?.purchase_amount === null || current?.purchase_amount === undefined ? '' : String(current.purchase_amount),
+      labor_cost: current?.labor_cost === null || current?.labor_cost === undefined ? '' : String(current.labor_cost),
+      other_cost: current?.other_cost === null || current?.other_cost === undefined ? '' : String(current.other_cost),
+    });
+    setSummaryEditOpen(true);
+    setDetailError('');
+  };
+
+  const handleSummarySubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!selectedPurchase?.orderLineId) return;
+    setSaving(true);
+    setDetailError('');
+    try {
+      const updated = await api.updatePurchaseSummary(selectedPurchase.orderLineId, {
+        supplier_name: summaryForm.supplier_name.trim() || null,
+        purchase_tax_rate: parseAmount(summaryForm.purchase_tax_rate),
+        purchase_unit_price_no_tax: parseAmount(summaryForm.purchase_unit_price_no_tax),
+        purchase_unit_price: parseAmount(summaryForm.purchase_unit_price),
+        cost_no_tax: parseAmount(summaryForm.cost_no_tax),
+        purchase_amount: parseAmount(summaryForm.purchase_amount),
+        labor_cost: parseAmount(summaryForm.labor_cost),
+        other_cost: parseAmount(summaryForm.other_cost),
+      });
+      setDetail(updated);
+      setSummaryEditOpen(false);
+      await onRefresh?.();
+    } catch (error) {
+      setDetailError(error instanceof Error ? error.message : '采购基础信息保存失败');
+    } finally {
+      setSaving(false);
+    }
   };
 
   const resetEntryForms = () => {
@@ -431,7 +492,7 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
 
       <section className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
         <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse table-fixed min-w-[1640px]">
+          <table className="w-full text-left border-collapse table-fixed min-w-[1692px]">
             <thead>
               <tr className="bg-slate-50/75 border-b border-slate-200">
                 <TableHeader className="w-[140px]">项目编号</TableHeader>
@@ -443,7 +504,7 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
                 <TableHeader className="text-right w-[140px]">合同金额</TableHeader>
                 <TableHeader className="text-right w-[140px]">收票金额</TableHeader>
                 <TableHeader className="text-right w-[140px]">付款金额</TableHeader>
-                <TableHeader className="text-center w-[80px]">操作</TableHeader>
+                <TableHeader className="text-center w-[132px]">操作</TableHeader>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -466,15 +527,27 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
                       <td className="px-6 py-4 text-xs text-right font-mono text-slate-600">{formatMoney(item.invoiceAmount)}</td>
                       <td className="px-6 py-4 text-xs text-right font-mono font-semibold text-slate-800">{formatMoney(item.paymentAmount)}</td>
                       <td className="px-6 py-4 text-center">
-                        <button
-                          type="button"
-                          onClick={() => loadDetail(item)}
-                          title="查看采购信息"
-                          aria-label={`查看采购 ${item.orderId} 的详情`}
-                          className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-blue-100 bg-blue-50 text-blue-600 hover:bg-blue-100 hover:border-blue-200 transition-colors"
-                        >
-                          <Eye className="w-4 h-4" />
-                        </button>
+                        <div className="inline-flex items-center justify-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => loadDetail(item, 'view')}
+                            title="查看采购信息"
+                            aria-label={`查看采购 ${item.orderId} 的详情`}
+                            className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-blue-100 bg-blue-50 text-blue-600 hover:bg-blue-100 hover:border-blue-200 transition-colors"
+                          >
+                            <Eye className="w-4 h-4" />
+                          </button>
+                          {canEditPurchases && (
+                            <button type="button" onClick={() => loadDetail(item, 'edit')} title="进入详情修改具体采购记录" aria-label={`修改采购 ${item.orderId} 的具体记录`} className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-blue-100 bg-blue-50 text-blue-600 hover:bg-blue-100 hover:border-blue-200 transition-colors">
+                              <Pencil className="w-4 h-4" />
+                            </button>
+                          )}
+                          {canDeletePurchases && (
+                            <button type="button" onClick={() => loadDetail(item, 'delete')} title="进入详情删除具体采购记录" aria-label={`删除采购 ${item.orderId} 的具体记录`} className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-rose-100 bg-rose-50 text-rose-600 hover:bg-rose-100 hover:border-rose-200 transition-colors">
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -542,6 +615,17 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
 
             <div className="p-6 overflow-y-auto space-y-5">
               {detailError && <div className="px-4 py-3 rounded-lg bg-red-50 border border-red-100 text-xs text-red-600">{detailError}</div>}
+              {detailIntent !== 'view' && (
+                <div className={`px-4 py-3 rounded-lg border text-xs ${
+                  detailIntent === 'delete'
+                    ? 'bg-rose-50 border-rose-200 text-rose-700'
+                    : 'bg-blue-50 border-blue-200 text-blue-700'
+                }`}>
+                  {detailIntent === 'edit'
+                    ? '采购厂商、税率、采购单价和金额可在“采购信息”右上角修改；合同、收票、入库、财务或付款记录请修改对应记录。'
+                    : '请选择下方具体的采购合同、收票、入库、财务或付款记录进行删除；不会删除基础订单。'}
+                </div>
+              )}
               {detailLoading ? (
                 <div className="py-16 text-center text-sm text-slate-400">正在加载采购信息...</div>
               ) : (
@@ -559,9 +643,20 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
                     ['销售订单金额', formatMoney(Number(summary?.order_value || 0))],
                   ]} />
 
-                  <InfoSection title="采购信息" items={[
+                  <InfoSection title="采购信息" actions={canEditPurchases && (
+                    <button
+                      type="button"
+                      onClick={openSummaryEdit}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-blue-100 bg-blue-50 text-blue-600 hover:bg-blue-100 text-xs font-semibold"
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                      修改采购信息
+                    </button>
+                  )} items={[
                     ['采购厂商', summary?.supplier_name ?? selectedPurchase.supplier],
                     ['采购税率', `${Number(summary?.purchase_tax_rate || 0)}%`],
+                    ['不含税采购单价', formatMoney(Number(summary?.purchase_unit_price_no_tax || 0))],
+                    ['含税采购单价', formatMoney(Number(summary?.purchase_unit_price || 0))],
                     ['含税采购金额', formatMoney(Number(summary?.purchase_amount || selectedPurchase.invoiceAmount || 0))],
                     ['不含税采购金额', formatMoney(Number(summary?.cost_no_tax || 0))],
                     ['采购税金', formatMoney(Number(summary?.purchase_tax_amount || 0))],
@@ -742,6 +837,37 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
               </form>
             </div>
           )}
+
+          {summaryEditOpen && (
+            <div className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-900/50 p-4">
+              <form onSubmit={handleSummarySubmit} className="bg-white rounded-xl shadow-2xl border border-slate-200 w-full max-w-2xl overflow-hidden">
+                <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900">修改采购基础信息</h3>
+                    <p className="mt-1 text-[11px] text-slate-500">采购税金、应付账款和毛利润等字段将由系统自动重新计算。</p>
+                  </div>
+                  <button type="button" onClick={() => setSummaryEditOpen(false)} className="p-1 text-slate-400 hover:text-slate-700">
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+                <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <FormInput label="采购厂商" value={summaryForm.supplier_name} onChange={(value) => setSummaryForm({ ...summaryForm, supplier_name: value })} className="sm:col-span-2" />
+                  <FormInput label="采购税率（%）" type="number" value={summaryForm.purchase_tax_rate} onChange={(value) => setSummaryForm({ ...summaryForm, purchase_tax_rate: value })} />
+                  <div className="hidden sm:block" />
+                  <FormInput label="不含税采购单价" type="number" value={summaryForm.purchase_unit_price_no_tax} onChange={(value) => setSummaryForm({ ...summaryForm, purchase_unit_price_no_tax: value })} />
+                  <FormInput label="含税采购单价" type="number" value={summaryForm.purchase_unit_price} onChange={(value) => setSummaryForm({ ...summaryForm, purchase_unit_price: value })} />
+                  <FormInput label="不含税采购金额" type="number" value={summaryForm.cost_no_tax} onChange={(value) => setSummaryForm({ ...summaryForm, cost_no_tax: value })} />
+                  <FormInput label="含税采购金额" type="number" value={summaryForm.purchase_amount} onChange={(value) => setSummaryForm({ ...summaryForm, purchase_amount: value })} />
+                  <FormInput label="人工成本" type="number" value={summaryForm.labor_cost} onChange={(value) => setSummaryForm({ ...summaryForm, labor_cost: value })} />
+                  <FormInput label="其他成本" type="number" value={summaryForm.other_cost} onChange={(value) => setSummaryForm({ ...summaryForm, other_cost: value })} />
+                </div>
+                <div className="px-5 py-4 border-t border-slate-100 flex justify-end gap-2">
+                  <button type="button" onClick={() => setSummaryEditOpen(false)} className="px-4 py-2 border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-lg text-xs font-medium">取消</button>
+                  <button type="submit" disabled={saving} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold disabled:opacity-50">{saving ? '保存中...' : '保存修改'}</button>
+                </div>
+              </form>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -761,10 +887,13 @@ function TableHeader({ children, className = '' }: { children: React.ReactNode; 
   return <th className={`px-6 py-3.5 font-semibold text-xs text-slate-500 ${className}`}>{children}</th>;
 }
 
-function InfoSection({ title, items }: { title: string; items: Array<[string, unknown]> }) {
+function InfoSection({ title, items, actions }: { title: string; items: Array<[string, unknown]>; actions?: React.ReactNode }) {
   return (
     <section>
-      <h3 className="text-sm font-bold text-slate-900 mb-3">{title}</h3>
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <h3 className="text-sm font-bold text-slate-900">{title}</h3>
+        {actions}
+      </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
         {items.map(([label, value]) => (
           <div key={label} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
@@ -836,7 +965,7 @@ function FormInput({ label, value, onChange, type = 'text', className = '' }: { 
   return (
     <label className={`space-y-1 ${className}`}>
       <span className="block text-xs font-semibold text-slate-600">{label}</span>
-      <input type={type} lang={type === 'date' ? 'zh-CN' : undefined} value={value} onChange={(e) => onChange(e.target.value)} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" />
+      <input type={type} lang={type === 'date' ? 'zh-CN' : undefined} min={type === 'number' ? '0' : undefined} step={type === 'number' ? 'any' : undefined} value={value} onChange={(e) => onChange(e.target.value)} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" />
     </label>
   );
 }
