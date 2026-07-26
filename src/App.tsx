@@ -591,6 +591,7 @@ export default function App() {
               onImportExcel={handleImportExcel}
               onUpdateOrder={handleUpdateOrder}
               onDeleteOrder={handleDeleteOrder}
+              onBatchSaved={() => loadBackendData()}
               canEnterOrders={canEnterOrders}
               canEditOrders={canEditOrders}
               canDeleteOrders={canDeleteOrders}
@@ -599,7 +600,7 @@ export default function App() {
             />
           )}
           {currentScreen === 'purchases' && <PurchasesScreen purchases={purchases} orders={orders} canEnterPurchases={canEnterPurchases} canEditPurchases={canEditPurchases} canDeletePurchases={canDeletePurchases} onRefresh={loadBackendData} />}
-          {currentScreen === 'sales' && <SalesScreen sales={sales} orders={orders} canEnterSales={canEnterSales} canEditSales={canEditSales} canDeleteSales={canDeleteSales} />}
+          {currentScreen === 'sales' && <SalesScreen sales={sales} orders={orders} canEnterSales={canEnterSales} canEditSales={canEditSales} canDeleteSales={canDeleteSales} onRefresh={loadBackendData} />}
           {currentScreen === 'system' && (
             <SystemScreen
               logs={logs}
