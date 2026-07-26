@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Search,
   RotateCcw,
@@ -11,12 +11,14 @@ import {
   Banknote,
   Pencil,
   Trash2,
+  ListChecks,
   X,
 } from 'lucide-react';
 import { api, BackendSalesDetail } from '../api';
 import { OrderRecord, SalesRecord } from '../types';
 import { buildSalesInvoiceDraft, getNextReceiptPhase } from '../lib/salesDetailModel';
 import { applySalesFilters, emptySalesFilters, getDepartmentOptions, submitQueryFilters } from '../lib/queryFilterModel';
+import BatchSalesEditor from './BatchSalesEditor';
 
 interface SalesScreenProps {
   sales: SalesRecord[];
@@ -24,6 +26,7 @@ interface SalesScreenProps {
   canEnterSales: boolean;
   canEditSales: boolean;
   canDeleteSales: boolean;
+  onRefresh?: () => void | Promise<void>;
 }
 
 type EntryMode = 'contract' | 'invoice' | 'receipt';
@@ -58,7 +61,7 @@ function formatRatio(value?: number | null) {
   return `${moneyFormatter.format(percent)}%`;
 }
 
-export default function SalesScreen({ sales, orders, canEnterSales, canEditSales, canDeleteSales }: SalesScreenProps) {
+export default function SalesScreen({ sales, orders, canEnterSales, canEditSales, canDeleteSales, onRefresh }: SalesScreenProps) {
   const [projectId, setProjectId] = useState('');
   const [orderId, setOrderId] = useState('');
   const [manager, setManager] = useState('');
@@ -77,6 +80,8 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
   const [entryMode, setEntryMode] = useState<EntryMode | null>(null);
   const [editingRecord, setEditingRecord] = useState<EditingRecord>(null);
   const [saving, setSaving] = useState(false);
+  const [batchEditorOpen, setBatchEditorOpen] = useState(false);
+  const [selectedBatchOrderIds, setSelectedBatchOrderIds] = useState<Set<number>>(new Set());
   const [contractForm, setContractForm] = useState({
     contract_signed_date: '',
     sales_contract_no: '',
@@ -104,6 +109,12 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
   const filteredSales = useMemo(() => {
     return applySalesFilters(sales, submittedFilters);
   }, [sales, submittedFilters]);
+  const filteredSalesOrderLineIds = useMemo(
+    () => filteredSales
+      .map((sale) => sale.orderLineId)
+      .filter((orderLineId): orderLineId is number => typeof orderLineId === 'number'),
+    [filteredSales],
+  );
 
   const paginatedSales = useMemo(() => {
     const startIndex = (currentPage - 1) * itemsPerPage;
@@ -113,6 +124,8 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
   const totalPages = Math.max(1, Math.ceil(filteredSales.length / itemsPerPage));
   const paginationItems = getPaginationItems(totalPages);
   const nextReceiptPhase = getNextReceiptPhase(detail?.receipts || []);
+  const allFilteredSelected = filteredSalesOrderLineIds.length > 0
+    && filteredSalesOrderLineIds.every((orderLineId) => selectedBatchOrderIds.has(orderLineId));
   const summary = detail?.summary;
   const activeOrderLineId = selectedSale?.orderLineId || Number(summary?.primary_order_line_id || 0);
   const departmentOptions = useMemo(() => getDepartmentOptions(sales), [sales]);
@@ -160,6 +173,50 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
       }),
     );
     setCurrentPage(1);
+  };
+
+  useEffect(() => {
+    const available = new Set(filteredSalesOrderLineIds);
+    setSelectedBatchOrderIds((current) => {
+      const next = new Set([...current].filter((orderLineId) => available.has(orderLineId)));
+      const unchanged = next.size === current.size
+        && [...next].every((orderLineId) => current.has(orderLineId));
+      return unchanged ? current : next;
+    });
+  }, [filteredSalesOrderLineIds]);
+
+  const toggleSalesSelection = (orderLineId: number) => {
+    setSelectedBatchOrderIds((current) => {
+      const next = new Set(current);
+      if (next.has(orderLineId)) next.delete(orderLineId);
+      else next.add(orderLineId);
+      return next;
+    });
+  };
+
+  const toggleAllFilteredSales = () => {
+    setSelectedBatchOrderIds(
+      allFilteredSelected ? new Set() : new Set(filteredSalesOrderLineIds),
+    );
+  };
+
+  const openBatchEditor = () => {
+    if (selectedBatchOrderIds.size === 0) {
+      if (filteredSalesOrderLineIds.length === 0) {
+        alert('当前查询结果中没有可修改的销售订单明细。');
+        return;
+      }
+      setSelectedBatchOrderIds(new Set(filteredSalesOrderLineIds));
+    }
+    setBatchEditorOpen(true);
+  };
+
+  const handleBatchSaved = async (count: number) => {
+    await onRefresh?.();
+    setBatchEditorOpen(false);
+    setSelectedBatchOrderIds(new Set());
+    setCurrentPage(1);
+    alert(`批量修改完成：共保存 ${count} 条销售信息。`);
   };
 
   const loadDetail = async (item: SalesRecord, intent: DetailIntent = 'view') => {
@@ -325,6 +382,27 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
           <h1 className="text-2xl font-bold tracking-tight text-slate-900 font-sans">销售信息</h1>
           <p className="text-sm text-slate-500 font-sans mt-1">核算与监控销售收入、合同账期与开票情况</p>
         </div>
+        {canEditSales && (
+          <button
+            type="button"
+            disabled={filteredSalesOrderLineIds.length === 0}
+            onClick={openBatchEditor}
+            className="flex items-center gap-1.5 self-start rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 shadow-sm transition-all hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-45 sm:self-center"
+            title={selectedBatchOrderIds.size
+              ? `修改已选 ${selectedBatchOrderIds.size} 条销售订单明细`
+              : filteredSalesOrderLineIds.length
+                ? `未勾选时修改当前查询结果，共 ${filteredSalesOrderLineIds.length} 条销售订单明细`
+                : '当前查询结果中没有可修改的销售订单明细'}
+          >
+            <ListChecks className="h-4 w-4 text-blue-600" />
+            <span>
+              批量修改
+              {selectedBatchOrderIds.size
+                ? `（已选 ${selectedBatchOrderIds.size}）`
+                : `（查询 ${filteredSalesOrderLineIds.length}）`}
+            </span>
+          </button>
+        )}
       </div>
 
       <section className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm space-y-4">
@@ -388,9 +466,20 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
         </div>
 
         <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse table-fixed min-w-[1792px]">
+          <table className="w-full text-left border-collapse table-fixed min-w-[1848px]">
             <thead>
               <tr className="bg-slate-50/75 border-b border-slate-200">
+                <th className="w-[56px] px-4 py-3.5 text-center">
+                  <input
+                    type="checkbox"
+                    checked={allFilteredSelected}
+                    onChange={toggleAllFilteredSales}
+                    disabled={!canEditSales || filteredSalesOrderLineIds.length === 0}
+                    title="全选当前查询结果"
+                    aria-label="全选当前销售查询结果"
+                    className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 disabled:opacity-40"
+                  />
+                </th>
                 <TableHeader className="w-[140px]">项目编号</TableHeader>
                 <TableHeader className="w-[160px]">销售订单号</TableHeader>
                 <TableHeader className="w-[120px]">客户经理</TableHeader>
@@ -407,13 +496,23 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
             <tbody className="divide-y divide-slate-100">
               {paginatedSales.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="px-6 py-10 text-center text-slate-400 text-sm">暂无符合条件的销售记录</td>
+                  <td colSpan={12} className="px-6 py-10 text-center text-slate-400 text-sm">暂无符合条件的销售记录</td>
                 </tr>
               ) : (
                 paginatedSales.map((item, index) => {
                   const order = findOrder(item);
                   return (
                     <tr key={`${item.orderLineId || item.contractNo}-${index}`} className="hover:bg-slate-50/80 transition-colors">
+                      <td className="px-4 py-4 text-center">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(item.orderLineId && selectedBatchOrderIds.has(item.orderLineId))}
+                          onChange={() => item.orderLineId && toggleSalesSelection(item.orderLineId)}
+                          disabled={!canEditSales || !item.orderLineId}
+                          aria-label={`选择销售订单明细 ${item.orderId}`}
+                          className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 disabled:opacity-40"
+                        />
+                      </td>
                       <td className="px-6 py-4 text-xs font-mono text-slate-500">{item.projectId}</td>
                       <td className="px-6 py-4 text-xs font-mono text-slate-500 truncate" title={item.orderId}>{item.orderId}</td>
                       <td className="px-6 py-4 text-xs text-slate-700 font-medium">{item.manager}</td>
@@ -480,6 +579,14 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
           </div>
         </div>
       </section>
+
+      {batchEditorOpen && (
+        <BatchSalesEditor
+          selectedOrderLineIds={[...selectedBatchOrderIds]}
+          onClose={() => setBatchEditorOpen(false)}
+          onSaved={handleBatchSaved}
+        />
+      )}
 
       {selectedSale && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">

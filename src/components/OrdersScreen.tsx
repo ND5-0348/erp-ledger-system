@@ -7,12 +7,15 @@ import {
   ChevronRight, 
   ShoppingBag,
   FileUp,
+  FileSpreadsheet,
+  ListChecks,
   Eye,
   Pencil,
   Trash2,
   X
 } from 'lucide-react';
 import { OrderRecord } from '../types';
+import BatchOrderEditor from './BatchOrderEditor';
 import {
   ORDER_DETAIL_TABLE_WIDTHS,
 } from '../lib/orderDetailTables';
@@ -51,6 +54,7 @@ interface OrdersScreenProps {
   onImportExcel: (file: File) => Promise<number>;
   onUpdateOrder: (target: OrderRecord, order: OrderRecord) => Promise<void>;
   onDeleteOrder: (target: OrderRecord) => Promise<void>;
+  onBatchSaved: () => Promise<void>;
   canEnterOrders: boolean;
   canEditOrders: boolean;
   canDeleteOrders: boolean;
@@ -77,7 +81,7 @@ function optionalFormNumber(value: string) {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpdateOrder, onDeleteOrder, canEnterOrders, canEditOrders, canDeleteOrders, actionRequest, onActionRequestHandled }: OrdersScreenProps) {
+export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpdateOrder, onDeleteOrder, onBatchSaved, canEnterOrders, canEditOrders, canDeleteOrders, actionRequest, onActionRequestHandled }: OrdersScreenProps) {
   // Query Filters State
   const [projectId, setProjectId] = useState('');
   const [orderId, setOrderId] = useState('');
@@ -94,6 +98,8 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
   const [orderDeliveries, setOrderDeliveries] = useState<Record<string, OrderDeliveryEntry[]>>({});
   const [editingPurchaseId, setEditingPurchaseId] = useState<string | null>(null);
   const [editingDeliveryId, setEditingDeliveryId] = useState<string | null>(null);
+  const [batchEditorMode, setBatchEditorMode] = useState<'create' | 'update' | null>(null);
+  const [selectedBatchOrderIds, setSelectedBatchOrderIds] = useState<Set<number>>(new Set());
 
   // Pagination State
   const [currentPage, setCurrentPage] = useState(1);
@@ -187,6 +193,12 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
   const filteredOrders = useMemo(() => {
     return applyOrderFilters(orders, submittedFilters);
   }, [orders, submittedFilters]);
+  const filteredOrderLineIds = useMemo(
+    () => filteredOrders
+      .map((order) => order.orderLineId)
+      .filter((orderLineId): orderLineId is number => typeof orderLineId === 'number'),
+    [filteredOrders],
+  );
 
   // Paginated Orders
   const paginatedOrders = useMemo(() => {
@@ -253,6 +265,53 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
     value === undefined ? '' : `¥${formatMoney(value)}`;
   const blank = (value: string | number | undefined | null) => value === undefined || value === null ? '' : String(value);
   const canManageOrderRows = canEditOrders || canDeleteOrders;
+  const allFilteredSelected = filteredOrderLineIds.length > 0
+    && filteredOrderLineIds.every((orderLineId) => selectedBatchOrderIds.has(orderLineId));
+
+  React.useEffect(() => {
+    const available = new Set(filteredOrderLineIds);
+    setSelectedBatchOrderIds((current) => {
+      const next = new Set([...current].filter((orderLineId) => available.has(orderLineId)));
+      const unchanged = next.size === current.size && [...next].every((orderLineId) => current.has(orderLineId));
+      return unchanged ? current : next;
+    });
+  }, [filteredOrderLineIds]);
+
+  const toggleOrderSelection = (orderLineId: number) => {
+    setSelectedBatchOrderIds((current) => {
+      const next = new Set(current);
+      if (next.has(orderLineId)) next.delete(orderLineId);
+      else next.add(orderLineId);
+      return next;
+    });
+  };
+
+  const toggleAllFilteredOrders = () => {
+    setSelectedBatchOrderIds(allFilteredSelected ? new Set() : new Set(filteredOrderLineIds));
+  };
+
+  const openBatchUpdateEditor = () => {
+    if (selectedBatchOrderIds.size > 0) {
+      setBatchEditorMode('update');
+      return;
+    }
+
+    if (filteredOrderLineIds.length === 0) {
+      alert('当前查询结果中没有可修改的订单明细。');
+      return;
+    }
+
+    setSelectedBatchOrderIds(new Set(filteredOrderLineIds));
+    setBatchEditorMode('update');
+  };
+
+  const handleBatchSaved = async (count: number) => {
+    await onBatchSaved();
+    setBatchEditorMode(null);
+    setSelectedBatchOrderIds(new Set());
+    setCurrentPage(1);
+    alert(`${batchEditorMode === 'update' ? '批量修改' : '批量新增'}完成：共保存 ${count} 条基本信息明细。`);
+  };
 
   const resetNewPurchase = () => {
     setNewPurchase({
@@ -755,14 +814,22 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
           <h1 className="text-2xl font-bold tracking-tight text-slate-900 font-sans">基本信息列表</h1>
           <p className="text-sm text-slate-500 font-sans mt-1">查看和管理客户订单的基础业务信息</p>
         </div>
-        <div className="flex items-center gap-2 self-start sm:self-center">
+        <div className="flex flex-wrap items-center justify-end gap-2 self-start sm:self-center">
           {canEnterOrders && (
             <>
               <label className="flex items-center gap-1.5 px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-lg shadow-sm transition-all text-xs font-semibold cursor-pointer">
                 <FileUp className="w-4 h-4 text-blue-600" />
-                <span>批量导入</span>
+                <span>导入Excel</span>
                 <input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={handleBatchImport} className="hidden" />
               </label>
+              <button
+                type="button"
+                onClick={() => setBatchEditorMode('create')}
+                className="flex items-center gap-1.5 px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-lg shadow-sm transition-all text-xs font-semibold"
+              >
+                <FileSpreadsheet className="w-4 h-4 text-blue-600" />
+                <span>批量新增</span>
+              </button>
               <button 
                 onClick={() => {
                   setEditingOrder(null);
@@ -775,6 +842,27 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
                 <span>新增订单</span>
               </button>
             </>
+          )}
+          {canEditOrders && (
+            <button
+              type="button"
+              disabled={filteredOrderLineIds.length === 0}
+              onClick={openBatchUpdateEditor}
+              className="flex items-center gap-1.5 px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-lg shadow-sm transition-all text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-45"
+              title={selectedBatchOrderIds.size
+                ? `修改已选 ${selectedBatchOrderIds.size} 条订单明细`
+                : filteredOrderLineIds.length
+                  ? `未勾选时修改当前查询结果，共 ${filteredOrderLineIds.length} 条订单明细`
+                  : '当前查询结果中没有可修改的订单明细'}
+            >
+              <ListChecks className="w-4 h-4 text-blue-600" />
+              <span>
+                批量修改
+                {selectedBatchOrderIds.size
+                  ? `（已选 ${selectedBatchOrderIds.size}）`
+                  : `（查询 ${filteredOrderLineIds.length}）`}
+              </span>
+            </button>
           )}
         </div>
       </div>
@@ -897,9 +985,20 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
       {/* Table Section */}
       <section className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col min-w-0">
         <div className="overflow-x-auto max-w-full">
-          <table className="w-full text-left border-collapse table-fixed min-w-[1900px]">
+          <table className="w-full text-left border-collapse table-fixed min-w-[1960px]">
             <thead>
               <tr className="bg-slate-50/75 border-b border-slate-200">
+                <th className="px-4 py-3.5 text-center w-[56px]">
+                  <input
+                    type="checkbox"
+                    checked={allFilteredSelected}
+                    onChange={toggleAllFilteredOrders}
+                    disabled={!canEditOrders || filteredOrderLineIds.length === 0}
+                    title="全选当前查询结果"
+                    aria-label="全选当前查询结果"
+                    className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 disabled:opacity-40"
+                  />
+                </th>
                 <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 w-[140px]">项目编号</th>
                 <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 w-[160px]">销售订单号</th>
                 <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 w-[120px]">客户经理</th>
@@ -917,13 +1016,23 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
             <tbody className="divide-y divide-slate-100">
               {paginatedOrders.length === 0 ? (
                 <tr>
-                  <td colSpan={12} className="px-6 py-10 text-center text-slate-400 text-sm">
+                  <td colSpan={13} className="px-6 py-10 text-center text-slate-400 text-sm">
                     暂无符合条件的订单记录
                   </td>
                 </tr>
               ) : (
                 paginatedOrders.map((item, index) => (
-                  <tr key={`${item.orderId}-${index}`} className="hover:bg-slate-50/80 transition-colors group">
+                  <tr key={item.orderLineId || `${item.orderId}-${index}`} className="hover:bg-slate-50/80 transition-colors group">
+                    <td className="px-4 py-4 text-center">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(item.orderLineId && selectedBatchOrderIds.has(item.orderLineId))}
+                        onChange={() => item.orderLineId && toggleOrderSelection(item.orderLineId)}
+                        disabled={!canEditOrders || !item.orderLineId}
+                        aria-label={`选择订单明细 ${item.orderId} ${item.goodsName}`}
+                        className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 disabled:opacity-40"
+                      />
+                    </td>
                     <td className="px-6 py-4 text-xs font-mono text-slate-500">{item.projectId}</td>
                     <td className="px-6 py-4 text-xs font-mono font-semibold text-blue-600">{item.orderId}</td>
                     <td className="px-6 py-4 text-xs text-slate-700 truncate" title={item.manager || '-'}>{item.manager || '-'}</td>
@@ -1029,6 +1138,15 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
           </div>
         </div>
       </section>
+
+      {batchEditorMode && (
+        <BatchOrderEditor
+          mode={batchEditorMode}
+          selectedOrderLineIds={[...selectedBatchOrderIds]}
+          onClose={() => setBatchEditorMode(null)}
+          onSaved={handleBatchSaved}
+        />
+      )}
 
       {selectedOrder && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">

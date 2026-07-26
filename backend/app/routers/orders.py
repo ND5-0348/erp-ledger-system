@@ -6,7 +6,7 @@ from zipfile import BadZipFile
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from openpyxl.utils.exceptions import InvalidFileException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import text
 
@@ -16,9 +16,12 @@ from ..backup import create_backup
 from ..db import db
 from ..importer import import_excel
 from ..ledger_excel import (
+    EDITABLE_ORDER_KEYS,
     EXPORT_FILE_NAME,
     TEMPLATE_FILE_NAME,
     content_disposition,
+    editor_columns,
+    editor_rows_for_order_lines,
     export_ledger_bytes,
     template_bytes,
 )
@@ -73,6 +76,50 @@ class OrderUpdate(BaseModel):
 
 class OrderBatchCreate(BaseModel):
     items: list[OrderUpdate] = Field(min_length=1, max_length=500)
+
+
+class BasicOrderFields(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    amount_type: str | None = None
+    project_code: str | None = Field(default=None, max_length=64)
+    department: str | None = None
+    branch_company: str | None = None
+    account_manager: str | None = None
+    order_date: BusinessDate | None = None
+    business_type: str | None = None
+    statistical_category: str | None = None
+    team_name: str | None = None
+    customer_unit_name: str | None = None
+    user_name: str | None = None
+    regional_platform: str | None = None
+    order_no: str | None = Field(default=None, max_length=64)
+    project_name: str | None = None
+    goods_name: str | None = None
+    specification_model: str | None = None
+    unit_name: str | None = None
+    quantity: PreciseNumber | None = None
+    sales_tax_rate: Ratio | None = None
+    net_unit_price: PreciseNumber | None = None
+    unit_price: PreciseNumber | None = None
+    net_revenue: Money | None = None
+    order_value: Money | None = None
+
+
+class BasicOrderBatchCreate(BaseModel):
+    items: list[BasicOrderFields] = Field(min_length=1, max_length=500)
+
+
+class BasicOrderBatchUpdateItem(BasicOrderFields):
+    order_line_id: int = Field(gt=0)
+
+
+class BasicOrderBatchUpdate(BaseModel):
+    items: list[BasicOrderBatchUpdateItem] = Field(min_length=1, max_length=500)
+
+
+class OrderLineSelection(BaseModel):
+    order_line_ids: list[int] = Field(min_length=1, max_length=500)
 
 
 EXCEL_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -349,6 +396,94 @@ async def import_orders_excel(
         raise HTTPException(status_code=409, detail="导入数据与现有项目、订单或业务明细重复") from exc
 
 
+@router.get("/batch-editor/schema")
+def get_batch_editor_schema(
+    user: CurrentUser = Depends(get_current_user),
+) -> dict:
+    return {
+        "editable_through": "W",
+        "columns": editor_columns(),
+    }
+
+
+@router.post("/batch-editor/rows")
+def get_batch_editor_rows(
+    payload: OrderLineSelection,
+    user: CurrentUser = Depends(require_permission("order_edit")),
+) -> dict:
+    unique_ids = list(dict.fromkeys(payload.order_line_ids))
+    for order_line_id in unique_ids:
+        _ensure_order_line(order_line_id, user, require_entry=True)
+    with db() as conn:
+        rows = editor_rows_for_order_lines(conn, user, unique_ids)
+    if len(rows) != len(unique_ids):
+        raise HTTPException(status_code=404, detail="部分订单明细不存在或当前账号无权访问")
+    return {
+        "editable_through": "W",
+        "columns": editor_columns(),
+        "rows": rows,
+    }
+
+
+@router.post("/batch-basic")
+def create_basic_order_lines_batch(
+    payload: BasicOrderBatchCreate,
+    user: CurrentUser = Depends(require_permission("order_entry")),
+) -> dict:
+    order_payloads = [_basic_order_update(item) for item in payload.items]
+    for item in order_payloads:
+        _validate_create_payload(item, user)
+    _validate_batch_create_targets(order_payloads)
+    created_ids: list[int] = []
+    try:
+        with db() as conn:
+            for item in order_payloads:
+                created_ids.append(_create_order_line(conn, item))
+            write_operation_log(
+                conn,
+                user,
+                "订单管理",
+                "batch_create_basic_orders",
+                f"在线表格批量新增 {len(created_ids)} 条基本信息明细",
+                after={"order_line_ids": created_ids, "editable_columns": "A-W"},
+            )
+    except IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="批量新增包含重复的项目、订单或订单明细") from exc
+    return {"created": len(created_ids), "order_line_ids": created_ids}
+
+
+@router.put("/batch-basic")
+def update_basic_order_lines_batch(
+    payload: BasicOrderBatchUpdate,
+    user: CurrentUser = Depends(require_permission("order_edit")),
+) -> dict:
+    order_line_ids = [item.order_line_id for item in payload.items]
+    if len(set(order_line_ids)) != len(order_line_ids):
+        raise HTTPException(status_code=422, detail="批量修改中不能重复提交同一条订单明细")
+
+    prepared: list[tuple[dict, OrderUpdate, dict[str, object]]] = []
+    try:
+        with db() as conn:
+            for item in payload.items:
+                ids = _ensure_order_line_in_conn(conn, item.order_line_id, user, require_entry=True, lock=True)
+                order_payload = _basic_order_update(item)
+                _validate_create_payload(order_payload, user)
+                prepared.append((ids, order_payload, _calculated_payload_data(order_payload)))
+            _validate_batch_update_targets(conn, prepared)
+            for ids, order_payload, data in prepared:
+                _update_basic_order_line_in_conn(
+                    conn,
+                    int(ids["order_line_id"]),
+                    ids,
+                    order_payload,
+                    data,
+                    user,
+                )
+    except IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="批量修改后的项目编号或订单号与现有数据冲突") from exc
+    return {"updated": len(prepared), "order_line_ids": order_line_ids}
+
+
 @router.put("/{order_line_id}")
 def update_order_line(
     order_line_id: int,
@@ -531,18 +666,30 @@ def get_order_line(order_line_id: int, user: CurrentUser) -> dict:
 
 def _ensure_order_line(order_line_id: int, user: CurrentUser, require_entry: bool = False) -> dict:
     with db() as conn:
-        row = conn.execute(
-            text(
-                """
-                SELECT ol.id AS order_line_id, ol.sales_order_id, so.project_id, p.department
-                FROM order_line ol
-                JOIN sales_order so ON so.id = ol.sales_order_id AND so.deleted_at IS NULL
-                JOIN project p ON p.id = so.project_id AND p.deleted_at IS NULL
-                WHERE ol.id = :order_line_id AND ol.deleted_at IS NULL
-                """
-            ),
-            {"order_line_id": order_line_id},
-        ).mappings().first()
+        return _ensure_order_line_in_conn(conn, order_line_id, user, require_entry=require_entry)
+
+
+def _ensure_order_line_in_conn(
+    conn,
+    order_line_id: int,
+    user: CurrentUser,
+    *,
+    require_entry: bool = False,
+    lock: bool = False,
+) -> dict:
+    lock_clause = " FOR UPDATE" if lock else ""
+    row = conn.execute(
+        text(
+            """
+            SELECT ol.id AS order_line_id, ol.sales_order_id, so.project_id, p.department
+            FROM order_line ol
+            JOIN sales_order so ON so.id = ol.sales_order_id AND so.deleted_at IS NULL
+            JOIN project p ON p.id = so.project_id AND p.deleted_at IS NULL
+            WHERE ol.id = :order_line_id AND ol.deleted_at IS NULL
+            """ + lock_clause
+        ),
+        {"order_line_id": order_line_id},
+    ).mappings().first()
     if row is None:
         raise HTTPException(status_code=404, detail="Order line not found")
     if not can_access_department(user, str(row["department"]) if row["department"] is not None else None, require_entry):
@@ -554,6 +701,14 @@ def _payload_dict(payload: BaseModel) -> dict:
     if hasattr(payload, "model_dump"):
         return payload.model_dump()
     return payload.dict()
+
+
+def _basic_order_update(payload: BasicOrderFields) -> OrderUpdate:
+    data = _payload_dict(payload)
+    data.pop("order_line_id", None)
+    if set(data) != set(EDITABLE_ORDER_KEYS):
+        raise HTTPException(status_code=422, detail="基本信息在线表格字段与 A-W 列映射不一致")
+    return OrderUpdate(**data)
 
 
 def _validate_create_payload(payload: OrderUpdate, user: CurrentUser) -> None:
@@ -571,6 +726,213 @@ def _validate_create_payload(payload: OrderUpdate, user: CurrentUser) -> None:
         raise HTTPException(status_code=422, detail=f"缺少必填字段: {', '.join(missing)}")
     if not can_access_department(user, payload.department, require_entry=True):
         raise HTTPException(status_code=403, detail="Department permission denied")
+
+
+def _validate_batch_update_targets(
+    conn,
+    prepared: list[tuple[dict, OrderUpdate, dict[str, object]]],
+) -> None:
+    project_targets: dict[int, tuple[object, ...]] = {}
+    order_targets: dict[int, tuple[object, ...]] = {}
+    line_targets: dict[int, tuple[str, str]] = {}
+    order_ids: set[int] = set()
+
+    for ids, _, data in prepared:
+        project_id = int(ids["project_id"])
+        sales_order_id = int(ids["sales_order_id"])
+        order_line_id = int(ids["order_line_id"])
+        project_target = tuple(
+            data[key]
+            for key in (
+                "project_code", "department", "branch_company", "account_manager", "team_name",
+                "customer_unit_name", "user_name", "regional_platform",
+            )
+        )
+        order_target = tuple(
+            data[key]
+            for key in ("amount_type", "order_no", "order_date", "business_type", "statistical_category")
+        )
+        if project_id in project_targets and project_targets[project_id] != project_target:
+            raise HTTPException(status_code=422, detail="同一项目的项目级字段必须保持一致，请统一修改后再提交")
+        if sales_order_id in order_targets and order_targets[sales_order_id] != order_target:
+            raise HTTPException(status_code=422, detail="同一销售订单的订单级字段必须保持一致，请统一修改后再提交")
+        project_targets[project_id] = project_target
+        order_targets[sales_order_id] = order_target
+        line_targets[order_line_id] = (
+            str(data["goods_name"] or "").strip(),
+            str(data["specification_model"] or "").strip(),
+        )
+        order_ids.add(sales_order_id)
+
+    for sales_order_id in order_ids:
+        existing_lines = conn.execute(
+            text(
+                """
+                SELECT id, goods_name, specification_model
+                FROM order_line
+                WHERE sales_order_id = :sales_order_id AND deleted_at IS NULL
+                """
+            ),
+            {"sales_order_id": sales_order_id},
+        ).mappings().all()
+        seen: set[tuple[str, str]] = set()
+        for row in existing_lines:
+            identity = line_targets.get(
+                int(row["id"]),
+                (
+                    str(row["goods_name"] or "").strip(),
+                    str(row["specification_model"] or "").strip(),
+                ),
+            )
+            if identity in seen:
+                raise HTTPException(status_code=409, detail="同一销售订单下不能存在同名同规格的重复明细")
+            seen.add(identity)
+
+
+def _validate_batch_create_targets(order_payloads: list[OrderUpdate]) -> None:
+    project_targets: dict[str, tuple[object, ...]] = {}
+    order_targets: dict[tuple[str, str], tuple[object, ...]] = {}
+    line_targets: set[tuple[str, str, str, str]] = set()
+
+    for payload in order_payloads:
+        data = _calculated_payload_data(payload)
+        project_code = str(data["project_code"] or "").strip()
+        order_no = str(data["order_no"] or "").strip()
+        project_target = tuple(
+            data[key]
+            for key in (
+                "department", "branch_company", "account_manager", "team_name",
+                "customer_unit_name", "user_name", "regional_platform",
+            )
+        )
+        order_target = tuple(
+            data[key]
+            for key in ("amount_type", "order_date", "business_type", "statistical_category")
+        )
+        order_identity = (project_code, order_no)
+        line_identity = (
+            project_code,
+            order_no,
+            str(data["goods_name"] or "").strip(),
+            str(data["specification_model"] or "").strip(),
+        )
+
+        if project_code in project_targets and project_targets[project_code] != project_target:
+            raise HTTPException(status_code=422, detail="同一项目的项目级字段必须保持一致，请统一修改后再提交")
+        if order_identity in order_targets and order_targets[order_identity] != order_target:
+            raise HTTPException(status_code=422, detail="同一销售订单的订单级字段必须保持一致，请统一修改后再提交")
+        if line_identity in line_targets:
+            raise HTTPException(status_code=409, detail="同一销售订单下不能存在同名同规格的重复明细")
+
+        project_targets[project_code] = project_target
+        order_targets[order_identity] = order_target
+        line_targets.add(line_identity)
+
+
+def _update_basic_order_line_in_conn(
+    conn,
+    order_line_id: int,
+    ids: dict,
+    payload: OrderUpdate,
+    data: dict[str, object],
+    user: CurrentUser,
+) -> None:
+    before = conn.execute(
+        text("SELECT * FROM v_order_line_finance WHERE order_line_id = :order_line_id"),
+        {"order_line_id": order_line_id},
+    ).mappings().first()
+    conn.execute(
+        text(
+            """
+            UPDATE project
+            SET project_code = :project_code,
+                department = :department,
+                branch_company = :branch_company,
+                account_manager = :account_manager,
+                team_level3_name = :team_level3_name,
+                customer_unit_name = :customer_unit_name,
+                end_user_name = :end_user_name,
+                regional_platform = :regional_platform
+            WHERE id = :project_id
+            """
+        ),
+        {
+            "project_id": ids["project_id"],
+            "project_code": data["project_code"],
+            "department": data["department"],
+            "branch_company": data["branch_company"],
+            "account_manager": data["account_manager"],
+            "team_level3_name": data["team_name"],
+            "customer_unit_name": data["customer_unit_name"],
+            "end_user_name": data["user_name"],
+            "regional_platform": data["regional_platform"],
+        },
+    )
+    conn.execute(
+        text(
+            """
+            UPDATE sales_order
+            SET gross_net_type = :gross_net_type,
+                order_no = :order_no,
+                order_date = :order_date,
+                business_type = :business_type,
+                statistic_category = :statistic_category
+            WHERE id = :sales_order_id
+            """
+        ),
+        {
+            "sales_order_id": ids["sales_order_id"],
+            "gross_net_type": data["amount_type"],
+            "order_no": data["order_no"],
+            "order_date": data["order_date"],
+            "business_type": data["business_type"],
+            "statistic_category": data["statistical_category"],
+        },
+    )
+    conn.execute(
+        text(
+            """
+            UPDATE order_line
+            SET project_name = :project_name,
+                goods_name = :goods_name,
+                specification_model = :specification_model,
+                unit_name = :unit_name,
+                quantity = :quantity,
+                sales_tax_rate = :sales_tax_rate,
+                sales_unit_price_no_tax = :sales_unit_price_no_tax,
+                sales_unit_price = :sales_unit_price,
+                revenue_no_tax = :revenue_no_tax,
+                order_value = :order_value
+            WHERE id = :order_line_id
+            """
+        ),
+        {
+            "order_line_id": order_line_id,
+            "project_name": data["project_name"],
+            "goods_name": data["goods_name"],
+            "specification_model": data["specification_model"],
+            "unit_name": data["unit_name"],
+            "quantity": data["quantity"],
+            "sales_tax_rate": data["sales_tax_rate"],
+            "sales_unit_price_no_tax": data["net_unit_price"],
+            "sales_unit_price": data["unit_price"],
+            "revenue_no_tax": data["net_revenue"],
+            "order_value": data["order_value"],
+        },
+    )
+    after = conn.execute(
+        text("SELECT * FROM v_order_line_finance WHERE order_line_id = :order_line_id"),
+        {"order_line_id": order_line_id},
+    ).mappings().first()
+    write_operation_log(
+        conn,
+        user,
+        "订单管理",
+        "batch_update_basic_order",
+        f"在线表格批量修改订单明细 {order_line_id} 的 A-W 基本信息",
+        before=before,
+        after=after,
+    )
 
 
 def _create_order_line(conn, payload: OrderUpdate) -> int:

@@ -103,6 +103,30 @@ export interface BackendOrderRecord {
   pending_delivery_amount?: number | null;
 }
 
+export type BatchEditorValue = string | number | null;
+
+export interface BackendBatchEditorColumn {
+  excel_column: string;
+  label: string;
+  key: string | null;
+  value_type: 'text' | 'date' | 'number' | 'percentage';
+  editable: boolean;
+  required: boolean;
+}
+
+export interface BackendBatchEditorRow {
+  order_line_id: number;
+  values: BatchEditorValue[];
+}
+
+export interface BackendBatchEditorResponse {
+  editable_from?: string;
+  editable_through: string;
+  fixed_columns?: string[];
+  columns: BackendBatchEditorColumn[];
+  rows?: BackendBatchEditorRow[];
+}
+
 export interface BackendPurchaseRecord {
   order_line_id: number;
   project_code: string;
@@ -417,6 +441,22 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ items }),
     }),
+  batchOrderEditorSchema: () => request<BackendBatchEditorResponse>('/orders/batch-editor/schema'),
+  batchOrderEditorRows: (orderLineIds: number[]) =>
+    request<BackendBatchEditorResponse>('/orders/batch-editor/rows', {
+      method: 'POST',
+      body: JSON.stringify({ order_line_ids: orderLineIds }),
+    }),
+  createBasicOrdersBatch: (items: Array<Record<string, string | number | null>>) =>
+    request<{ created: number; order_line_ids: number[] }>('/orders/batch-basic', {
+      method: 'POST',
+      body: JSON.stringify({ items }),
+    }),
+  updateBasicOrdersBatch: (items: Array<Record<string, string | number | null>>) =>
+    request<{ updated: number; order_line_ids: number[] }>('/orders/batch-basic', {
+      method: 'PUT',
+      body: JSON.stringify({ items }),
+    }),
   downloadOrderTemplate: () => requestBlob('/orders/template'),
   exportOrdersExcel: () => requestBlob('/orders/export'),
   importOrdersExcel: (file: File) =>
@@ -429,6 +469,16 @@ export const api = {
   deleteOrder: (orderLineId: number) => request<{ deleted: boolean; order_line_id: number }>(`/orders/${orderLineId}`, { method: 'DELETE' }),
   purchases: (params: Record<string, string | number | undefined> = {}) =>
     request<PageResult<BackendPurchaseRecord>>(`/purchases${query(params)}`),
+  batchPurchaseEditorRows: (orderLineIds: number[]) =>
+    request<BackendBatchEditorResponse>('/purchases/batch-editor/rows', {
+      method: 'POST',
+      body: JSON.stringify({ order_line_ids: orderLineIds }),
+    }),
+  updatePurchasesBatch: (items: Array<Record<string, string | number | null>>) =>
+    request<{ updated: number; order_line_ids: number[] }>('/purchases/batch', {
+      method: 'PUT',
+      body: JSON.stringify({ items }),
+    }),
   purchaseDetail: (orderLineId: number) => request<BackendPurchaseDetail>(`/purchases/${orderLineId}`),
   updatePurchaseSummary: (orderLineId: number, data: Record<string, string | number | null>) =>
     request<BackendPurchaseDetail>(`/purchases/${orderLineId}/summary`, { method: 'PUT', body: JSON.stringify(data) }),
@@ -470,6 +520,16 @@ export const api = {
     request<BackendPurchaseDetail>(`/purchases/payments/${paymentId}`, { method: 'DELETE' }),
   sales: (params: Record<string, string | number | undefined> = {}) =>
     request<PageResult<BackendSalesRecord>>(`/sales${query(params)}`),
+  batchSalesEditorRows: (orderLineIds: number[]) =>
+    request<BackendBatchEditorResponse>('/sales/batch-editor/rows', {
+      method: 'POST',
+      body: JSON.stringify({ order_line_ids: orderLineIds }),
+    }),
+  updateSalesBatch: (items: Array<Record<string, string | number | null>>) =>
+    request<{ updated: number; order_line_ids: number[] }>('/sales/batch', {
+      method: 'PUT',
+      body: JSON.stringify({ items }),
+    }),
   salesDetail: (orderLineId: number) => request<BackendSalesDetail>(`/sales/${orderLineId}`),
   salesDetailByOrder: (projectId: string, orderId: string) =>
     request<BackendSalesDetail>(`/sales/by-order${query({ project_id: projectId, order_id: orderId })}`),

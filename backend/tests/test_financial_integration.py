@@ -16,7 +16,16 @@ from app.auth import ALL_PERMISSIONS, CurrentUser, ensure_default_admin
 from app.config import ROOT_DIR, settings
 from app.db import _split_sql, db, engine, server_engine
 from app.main import app
-from app.ledger_excel import SAMPLE_ORDER_NO, SAMPLE_PROJECT_CODE, TEMPLATE_HEADERS
+from app.ledger_excel import (
+    EDITABLE_ORDER_KEYS,
+    PURCHASE_EDITABLE_COLUMN_NUMBERS,
+    PURCHASE_EDITOR_KEYS_BY_COLUMN,
+    SALES_EDITABLE_COLUMN_NUMBERS,
+    SALES_EDITOR_KEYS_BY_COLUMN,
+    SAMPLE_ORDER_NO,
+    SAMPLE_PROJECT_CODE,
+    TEMPLATE_HEADERS,
+)
 from app.routers import purchases
 
 TEST_DATABASE_PREFIX = "erp_ledger_test_"
@@ -239,6 +248,448 @@ def test_project_name_and_supplier_remain_bound_to_each_order_line(
     assert set(str(order_summary["project_name"]).split("；")) == {"项目名称甲", "项目名称乙-已修改"}
 
 
+def _basic_payload(payload: dict[str, str]) -> dict[str, str]:
+    return {key: value for key, value in payload.items() if key in EDITABLE_ORDER_KEYS}
+
+
+def _purchase_editor_payload(editor_response: dict, row: dict) -> dict:
+    payload = {"order_line_id": row["order_line_id"]}
+    for index, column in enumerate(editor_response["columns"]):
+        if column["editable"] and column["key"]:
+            payload[column["key"]] = row["values"][index]
+    return payload
+
+
+def _sales_editor_payload(editor_response: dict, row: dict) -> dict:
+    payload = {"order_line_id": row["order_line_id"]}
+    for index, column in enumerate(editor_response["columns"]):
+        if column["editable"] and column["key"]:
+            payload[column["key"]] = row["values"][index]
+    return payload
+
+
+def test_batch_basic_editor_schema_create_update_and_readonly_boundary(
+    client: TestClient,
+    headers: dict[str, str],
+) -> None:
+    schema_response = client.get("/api/orders/batch-editor/schema", headers=headers)
+    assert schema_response.status_code == 200, schema_response.text
+    schema = schema_response.json()
+    assert schema["editable_through"] == "W"
+    assert len(schema["columns"]) == len(TEMPLATE_HEADERS) == 91
+    assert [column["key"] for column in schema["columns"][:23]] == EDITABLE_ORDER_KEYS
+    assert all(column["editable"] for column in schema["columns"][:23])
+    assert not any(column["editable"] for column in schema["columns"][23:])
+    assert {
+        column["excel_column"] for column in schema["columns"] if column["required"]
+    } == {"B", "J", "M", "O", "W"}
+
+    first = _payload("BATCH-BASIC")
+    second = {
+        **first,
+        "goods_name": "QA Equipment 2",
+        "specification_model": "QA-SPEC-2",
+        "order_value": "2260.00",
+    }
+    create_response = client.post(
+        "/api/orders/batch-basic",
+        json={"items": [_basic_payload(first), _basic_payload(second)]},
+        headers=headers,
+    )
+    assert create_response.status_code == 200, create_response.text
+    order_line_ids = create_response.json()["order_line_ids"]
+    assert len(order_line_ids) == 2
+    assert _action_count("batch_create_basic_orders") == 1
+
+    rows_response = client.post(
+        "/api/orders/batch-editor/rows",
+        json={"order_line_ids": order_line_ids},
+        headers=headers,
+    )
+    assert rows_response.status_code == 200, rows_response.text
+    editor_rows = rows_response.json()["rows"]
+    assert len(editor_rows) == 2
+    assert all(len(row["values"]) == 91 for row in editor_rows)
+    first_editor = next(row for row in editor_rows if row["order_line_id"] == order_line_ids[0])
+    assert first_editor["values"][1] == first["project_code"]
+    assert first_editor["values"][22] == first["order_value"]
+    assert first_editor["values"][23] is None
+
+    update_items = []
+    for order_line_id, source, manager in (
+        (order_line_ids[0], first, "批量客户经理"),
+        (order_line_ids[1], second, "批量客户经理"),
+    ):
+        item = _basic_payload(source)
+        item.update(
+            {
+                "order_line_id": order_line_id,
+                "account_manager": manager,
+                "customer_unit_name": "批量修改客户单位",
+            }
+        )
+        update_items.append(item)
+    update_response = client.put(
+        "/api/orders/batch-basic",
+        json={"items": update_items},
+        headers=headers,
+    )
+    assert update_response.status_code == 200, update_response.text
+    assert update_response.json()["updated"] == 2
+    assert _action_count("batch_update_basic_order") == 2
+    with db() as conn:
+        manager = conn.execute(
+            text("SELECT account_manager FROM project WHERE project_code = :code"),
+            {"code": first["project_code"]},
+        ).scalar_one()
+        goods = conn.execute(
+            text("SELECT goods_name FROM order_line WHERE id IN (:first, :second) ORDER BY id"),
+            {"first": order_line_ids[0], "second": order_line_ids[1]},
+        ).scalars().all()
+    assert manager == "批量客户经理"
+    assert goods == [first["goods_name"], second["goods_name"]]
+
+    forbidden_readonly = {
+        **update_items[0],
+        "supplier_name": "不允许通过基本信息批量修改",
+    }
+    forbidden_response = client.put(
+        "/api/orders/batch-basic",
+        json={"items": [forbidden_readonly]},
+        headers=headers,
+    )
+    assert forbidden_response.status_code == 422, forbidden_response.text
+
+
+def test_purchase_batch_editor_round_trip_and_readonly_boundary(
+    client: TestClient,
+    headers: dict[str, str],
+) -> None:
+    order_line_id, _ = _create_order(client, headers, "PURCHASE-BATCH")
+    rows_response = client.post(
+        "/api/purchases/batch-editor/rows",
+        json={"order_line_ids": [order_line_id]},
+        headers=headers,
+    )
+    assert rows_response.status_code == 200, rows_response.text
+    editor = rows_response.json()
+    assert editor["editable_from"] == "X"
+    assert editor["editable_through"] == "BO"
+    assert editor["fixed_columns"] == ["B", "C", "D", "E", "F", "G", "M", "N", "O"]
+    assert {
+        column["key"] for column in editor["columns"] if column["editable"]
+    } == {
+        PURCHASE_EDITOR_KEYS_BY_COLUMN[column_no]
+        for column_no in PURCHASE_EDITABLE_COLUMN_NUMBERS
+    }
+    assert not {
+        "pending_booked_amount",
+        "total_paid",
+        "accounts_payable",
+        "gross_profit_no_tax",
+        "tax_difference",
+        "gross_profit",
+        "gross_profit_margin_no_tax",
+    } & {
+        column["key"] for column in editor["columns"] if column["editable"]
+    }
+
+    item = _purchase_editor_payload(editor, editor["rows"][0])
+    item.update(
+        {
+            "supplier_name": "批量采购厂商",
+            "purchase_amount": "900.00",
+            "delivery_quantity": "6.000000",
+            "purchase_contract_no": "PC-BATCH-001",
+            "received_invoice_date": "2026-07-21",
+            "purchase_invoice_no": "PINV-BATCH-001",
+            "purchase_invoice_amount": "300.00",
+            "warehouse_date": "2026-07-22",
+            "warehouse_voucher_no": "WH-BATCH-001",
+            "warehouse_amount": "250.00",
+            "booked_date": "2026-07-23",
+            "booked_voucher_code": "BOOK-BATCH-001",
+            "booked_amount": "200.00",
+            "payment1_due_date": "2026-08-01",
+            "payment1_date": "2026-07-24",
+            "payment1_voucher_no": "PAY1-BATCH-001",
+            "payment1_amount": "100.00",
+            "payment2_date": "2026-07-25",
+            "payment2_voucher_no": "PAY2-BATCH-001",
+            "payment2_amount": "50.00",
+        }
+    )
+    update_response = client.put(
+        "/api/purchases/batch",
+        json={"items": [item]},
+        headers=headers,
+    )
+    assert update_response.status_code == 200, update_response.text
+    assert update_response.json()["updated"] == 1
+    assert _action_count("batch_update_purchases") == 1
+
+    refreshed_response = client.post(
+        "/api/purchases/batch-editor/rows",
+        json={"order_line_ids": [order_line_id]},
+        headers=headers,
+    )
+    assert refreshed_response.status_code == 200, refreshed_response.text
+    refreshed = refreshed_response.json()
+    values_by_key = {
+        column["key"]: refreshed["rows"][0]["values"][index]
+        for index, column in enumerate(refreshed["columns"])
+        if column["key"]
+    }
+    assert values_by_key["supplier_name"] == "批量采购厂商"
+    assert values_by_key["purchase_contract_no"] == "PC-BATCH-001"
+    assert values_by_key["purchase_invoice_no"] == "PINV-BATCH-001"
+    assert values_by_key["warehouse_voucher_no"] == "WH-BATCH-001"
+    assert values_by_key["booked_voucher_code"] == "BOOK-BATCH-001"
+    assert values_by_key["payment1_voucher_no"] == "PAY1-BATCH-001"
+    assert values_by_key["payment2_voucher_no"] == "PAY2-BATCH-001"
+    assert _d(values_by_key["total_paid"]) == Decimal("150.00")
+    assert _d(values_by_key["accounts_payable"]) == Decimal("750.00")
+
+    forbidden = {**item, "gross_profit": "1.00"}
+    forbidden_response = client.put(
+        "/api/purchases/batch",
+        json={"items": [forbidden]},
+        headers=headers,
+    )
+    assert forbidden_response.status_code == 422, forbidden_response.text
+
+
+def test_purchase_batch_update_is_atomic(
+    client: TestClient,
+    headers: dict[str, str],
+) -> None:
+    first_id, _ = _create_order(client, headers, "PURCHASE-BATCH-ATOMIC-1")
+    second_id, _ = _create_order(client, headers, "PURCHASE-BATCH-ATOMIC-2")
+    rows_response = client.post(
+        "/api/purchases/batch-editor/rows",
+        json={"order_line_ids": [first_id, second_id]},
+        headers=headers,
+    )
+    assert rows_response.status_code == 200, rows_response.text
+    editor = rows_response.json()
+    rows_by_id = {row["order_line_id"]: row for row in editor["rows"]}
+    first = _purchase_editor_payload(editor, rows_by_id[first_id])
+    second = _purchase_editor_payload(editor, rows_by_id[second_id])
+    first["supplier_name"] = "该修改必须回滚"
+    second["purchase_amount"] = "100.00"
+    second["payment1_amount"] = "101.00"
+
+    response = client.put(
+        "/api/purchases/batch",
+        json={"items": [first, second]},
+        headers=headers,
+    )
+    assert response.status_code == 422, response.text
+    assert _finance(first_id)["supplier_name"] == "QA Supplier"
+    assert _action_count("batch_update_purchases") == 0
+
+
+def test_sales_batch_editor_round_trip_and_readonly_boundary(
+    client: TestClient,
+    headers: dict[str, str],
+) -> None:
+    order_line_id, _ = _create_order(client, headers, "SALES-BATCH")
+    rows_response = client.post(
+        "/api/sales/batch-editor/rows",
+        json={"order_line_ids": [order_line_id]},
+        headers=headers,
+    )
+    assert rows_response.status_code == 200, rows_response.text
+    editor = rows_response.json()
+    assert editor["editable_from"] == "BP"
+    assert editor["editable_through"] == "CM"
+    assert editor["fixed_columns"] == ["B", "C", "D", "E", "F", "G", "M", "N", "O"]
+    assert {
+        column["key"] for column in editor["columns"] if column["editable"]
+    } == {
+        SALES_EDITOR_KEYS_BY_COLUMN[column_no]
+        for column_no in SALES_EDITABLE_COLUMN_NUMBERS
+    }
+    assert not {"total_received", "accounts_receivable"} & {
+        column["key"] for column in editor["columns"] if column["editable"]
+    }
+
+    item = _sales_editor_payload(editor, editor["rows"][0])
+    item.update(
+        {
+            "contract_signed_date": "2026-07-21",
+            "sales_contract_no": "SC-BATCH-001",
+            "sales_contract_value": "1130.00",
+            "sales_performance_period": "合同签订后30日内",
+            "sales_unsigned_contract_amount": "0.00",
+            "invoice_doc_no": "SID-BATCH-001",
+            "invoice_date": "2026-07-22",
+            "sales_invoice_no": "SINV-BATCH-001",
+            "sales_invoice_amount": "600.00",
+            "pending_invoice_amount": "530.00",
+            "delivered_not_invoiced_amount": "0.00",
+            "receipt1_date": "2026-07-23",
+            "receipt1_notice_no": "RCPT1-BATCH-001",
+            "receipt1_amount": "400.00",
+            "receipt1_ratio": "0.353982",
+            "receipt2_date": "2026-07-24",
+            "receipt2_notice_no": "RCPT2-BATCH-001",
+            "receipt2_amount": "300.00",
+            "receipt2_ratio": "0.265487",
+            "close_status": "进行中",
+            "labor_cost": "12.34",
+            "other_cost": "5.67",
+        }
+    )
+    update_response = client.put(
+        "/api/sales/batch",
+        json={"items": [item]},
+        headers=headers,
+    )
+    assert update_response.status_code == 200, update_response.text
+    assert update_response.json()["updated"] == 1
+    assert _action_count("batch_update_sales") == 1
+
+    refreshed_response = client.post(
+        "/api/sales/batch-editor/rows",
+        json={"order_line_ids": [order_line_id]},
+        headers=headers,
+    )
+    assert refreshed_response.status_code == 200, refreshed_response.text
+    refreshed = refreshed_response.json()
+    values_by_key = {
+        column["key"]: refreshed["rows"][0]["values"][index]
+        for index, column in enumerate(refreshed["columns"])
+        if column["key"]
+    }
+    assert values_by_key["sales_contract_no"] == "SC-BATCH-001"
+    assert values_by_key["sales_invoice_no"] == "SINV-BATCH-001"
+    assert values_by_key["receipt1_notice_no"] == "RCPT1-BATCH-001"
+    assert values_by_key["receipt2_notice_no"] == "RCPT2-BATCH-001"
+    assert _d(values_by_key["total_received"]) == Decimal("700.00")
+    assert _d(values_by_key["accounts_receivable"]) == Decimal("430.00")
+    assert values_by_key["close_status"] == "进行中"
+    assert _d(values_by_key["labor_cost"]) == Decimal("12.34")
+    assert _d(values_by_key["other_cost"]) == Decimal("5.67")
+
+    forbidden = {**item, "total_received": "1.00"}
+    forbidden_response = client.put(
+        "/api/sales/batch",
+        json={"items": [forbidden]},
+        headers=headers,
+    )
+    assert forbidden_response.status_code == 422, forbidden_response.text
+
+
+def test_sales_batch_rejects_conflicting_shared_close_status_atomically(
+    client: TestClient,
+    headers: dict[str, str],
+) -> None:
+    suffix = "SALES-BATCH-CLOSE-CONFLICT"
+    first_id, _ = _create_order(client, headers, suffix, goods_name="设备甲")
+    second_payload = _payload(suffix)
+    second_payload["goods_name"] = "设备乙"
+    second_response = client.post("/api/orders", json=second_payload, headers=headers)
+    assert second_response.status_code == 200, second_response.text
+    second_id = int(second_response.json()["order_line_id"])
+
+    rows_response = client.post(
+        "/api/sales/batch-editor/rows",
+        json={"order_line_ids": [first_id, second_id]},
+        headers=headers,
+    )
+    assert rows_response.status_code == 200, rows_response.text
+    editor = rows_response.json()
+    rows_by_id = {row["order_line_id"]: row for row in editor["rows"]}
+    first = _sales_editor_payload(editor, rows_by_id[first_id])
+    second = _sales_editor_payload(editor, rows_by_id[second_id])
+    first.update({"sales_contract_no": "必须回滚", "close_status": "进行中"})
+    second["close_status"] = "关闭"
+
+    response = client.put(
+        "/api/sales/batch",
+        json={"items": [first, second]},
+        headers=headers,
+    )
+    assert response.status_code == 422, response.text
+    assert _finance(first_id)["sales_contract_no"] is None
+    assert _finance(first_id)["close_status"] is None
+    assert _action_count("batch_update_sales") == 0
+
+
+def test_batch_basic_create_rejects_conflicting_shared_fields_atomically(
+    client: TestClient,
+    headers: dict[str, str],
+) -> None:
+    first = _payload("BATCH-CREATE-CONFLICT")
+    second = {
+        **first,
+        "account_manager": "另一个客户经理",
+        "goods_name": "QA Equipment 2",
+        "specification_model": "QA-SPEC-2",
+    }
+    conflict = client.post(
+        "/api/orders/batch-basic",
+        json={"items": [_basic_payload(first), _basic_payload(second)]},
+        headers=headers,
+    )
+    assert conflict.status_code == 422, conflict.text
+    with db() as conn:
+        stored_lines = conn.execute(
+            text(
+                """
+                SELECT COUNT(*)
+                FROM order_line ol
+                JOIN sales_order so ON so.id = ol.sales_order_id
+                JOIN project p ON p.id = so.project_id
+                WHERE p.project_code = :project_code
+                """
+            ),
+            {"project_code": first["project_code"]},
+        ).scalar_one()
+    assert stored_lines == 0
+    assert _action_count("batch_create_basic_orders") == 0
+
+
+def test_batch_basic_update_is_atomic_and_rejects_conflicting_shared_order_fields(
+    client: TestClient,
+    headers: dict[str, str],
+) -> None:
+    first_id, first = _create_order(client, headers, "BATCH-ATOMIC")
+    second = {
+        **first,
+        "goods_name": "QA Equipment 2",
+        "specification_model": "QA-SPEC-2",
+    }
+    second_response = client.post("/api/orders", json=second, headers=headers)
+    assert second_response.status_code == 200, second_response.text
+    second_id = int(second_response.json()["order_line_id"])
+
+    first_update = {
+        **_basic_payload(first),
+        "order_line_id": first_id,
+        "order_date": "2026-08-01",
+    }
+    second_update = {
+        **_basic_payload(second),
+        "order_line_id": second_id,
+        "order_date": "2026-08-02",
+    }
+    conflict = client.put(
+        "/api/orders/batch-basic",
+        json={"items": [first_update, second_update]},
+        headers=headers,
+    )
+    assert conflict.status_code == 422, conflict.text
+    with db() as conn:
+        stored_date = conn.execute(
+            text("SELECT order_date FROM sales_order WHERE order_no = :order_no"),
+            {"order_no": first["order_no"]},
+        ).scalar_one()
+    assert str(stored_date) == first["order_date"]
+    assert _action_count("batch_update_basic_order") == 0
+
+
 def test_purchase_summary_can_be_edited_from_purchase_detail(
     client: TestClient,
     headers: dict[str, str],
@@ -445,8 +896,8 @@ def test_excel_template_import_export_round_trip(client: TestClient, headers: di
     assert Decimal(str(worksheet.cell(3, 25).value)) == Decimal("0.13")
     assert Decimal(str(worksheet.cell(3, 52).value)) == Decimal("158.2")
     assert Decimal(str(worksheet.cell(3, 87).value)) == Decimal("226")
-    assert worksheet.cell(3, 90).value is None
-    assert worksheet.cell(3, 91).value is None
+    assert Decimal(str(worksheet.cell(3, 90).value)) == Decimal("12.34")
+    assert Decimal(str(worksheet.cell(3, 91).value)) == Decimal("5.67")
     exported.close()
 
 

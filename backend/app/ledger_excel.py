@@ -13,6 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from .auth import CurrentUser, apply_department_scope
+from .serializers import clean_value
 
 
 TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "templates" / "市场部业务台账模板.xlsx"
@@ -32,6 +33,90 @@ TEMPLATE_HEADERS = [
     "已交付未开票", "回款日期", "缴款单号", "回款金额", "回款占比", "回款日期", "缴款单号",
     "回款金额", "回款占比", "回款合计", "应收款", "是否关闭", "人工成本", "其他成本",
 ]
+EDITABLE_ORDER_KEYS = [
+    "amount_type", "project_code", "department", "branch_company", "account_manager", "order_date",
+    "business_type", "statistical_category", "team_name", "customer_unit_name", "user_name",
+    "regional_platform", "order_no", "project_name", "goods_name", "specification_model", "unit_name",
+    "quantity", "sales_tax_rate", "net_unit_price", "unit_price", "net_revenue", "order_value",
+]
+PURCHASE_EDITOR_KEYS_BY_COLUMN = {
+    24: "supplier_name",
+    25: "purchase_tax_rate",
+    26: "purchase_unit_price_no_tax",
+    27: "purchase_unit_price",
+    28: "cost_no_tax",
+    29: "purchase_amount",
+    30: "delivery_date",
+    31: "delivery_quantity",
+    32: "delivery_revenue_no_tax",
+    33: "delivery_value",
+    34: "delivery_cost_no_tax",
+    35: "delivery_cost",
+    36: "pending_delivery_quantity",
+    37: "pending_delivery_amount_no_tax",
+    38: "pending_delivery_amount",
+    39: "purchase_contract_no",
+    40: "payment_terms",
+    41: "purchase_performance_period",
+    42: "purchase_signed_amount",
+    43: "purchase_unsigned_amount",
+    44: "received_invoice_date",
+    45: "purchase_invoice_no",
+    46: "purchase_invoice_amount",
+    47: "warehouse_date",
+    48: "warehouse_voucher_no",
+    49: "warehouse_amount",
+    50: "booked_date",
+    51: "booked_voucher_code",
+    52: "booked_amount",
+    53: "pending_booked_amount",
+    54: "payment1_due_date",
+    55: "payment1_date",
+    56: "payment1_voucher_no",
+    57: "payment1_amount",
+    58: "payment2_date",
+    59: "payment2_voucher_no",
+    60: "payment2_amount",
+    61: "total_paid",
+    62: "accounts_payable",
+    63: "gross_profit_no_tax",
+    64: "tax_difference",
+    66: "gross_profit",
+    67: "gross_profit_margin_no_tax",
+}
+PURCHASE_EDITABLE_COLUMN_NUMBERS = frozenset(
+    set(range(24, 53)) | set(range(54, 61))
+)
+SALES_EDITOR_KEYS_BY_COLUMN = {
+    68: "contract_signed_date",
+    69: "sales_contract_no",
+    70: "sales_contract_value",
+    71: "sales_performance_period",
+    72: "sales_unsigned_contract_amount",
+    73: "invoice_doc_no",
+    74: "invoice_date",
+    75: "sales_invoice_no",
+    76: "sales_invoice_amount",
+    77: "pending_invoice_amount",
+    78: "delivered_not_invoiced_amount",
+    79: "receipt1_date",
+    80: "receipt1_notice_no",
+    81: "receipt1_amount",
+    82: "receipt1_ratio",
+    83: "receipt2_date",
+    84: "receipt2_notice_no",
+    85: "receipt2_amount",
+    86: "receipt2_ratio",
+    87: "total_received",
+    88: "accounts_receivable",
+    89: "close_status",
+    90: "labor_cost",
+    91: "other_cost",
+}
+SALES_EDITABLE_COLUMN_NUMBERS = frozenset(
+    set(range(68, 87)) | set(range(89, 92))
+)
+REQUIRED_ORDER_COLUMN_NUMBERS = {2, 10, 13, 15, 23}
 SAMPLE_PROJECT_CODE = "示例项目编号-请替换"
 SAMPLE_ORDER_NO = "示例销售订单号-请替换"
 SAMPLE_TEMPLATE_ROW = [
@@ -117,6 +202,93 @@ def export_ledger_bytes(conn: Connection, user: CurrentUser) -> bytes:
     return output.getvalue()
 
 
+def editor_columns(scope: str = "basic") -> list[dict[str, Any]]:
+    if scope not in {"basic", "purchase", "sales"}:
+        raise ValueError(f"Unsupported editor scope: {scope}")
+    editable_columns = (
+        PURCHASE_EDITABLE_COLUMN_NUMBERS
+        if scope == "purchase"
+        else SALES_EDITABLE_COLUMN_NUMBERS
+        if scope == "sales"
+        else frozenset(range(1, len(EDITABLE_ORDER_KEYS) + 1))
+    )
+    columns: list[dict[str, Any]] = []
+    for column_no, label in enumerate(TEMPLATE_HEADERS, start=1):
+        key = (
+            EDITABLE_ORDER_KEYS[column_no - 1]
+            if column_no <= len(EDITABLE_ORDER_KEYS)
+            else (
+                SALES_EDITOR_KEYS_BY_COLUMN.get(column_no)
+                if scope == "sales"
+                else PURCHASE_EDITOR_KEYS_BY_COLUMN.get(column_no)
+            )
+        )
+        columns.append(
+            {
+                "excel_column": _excel_column_name(column_no),
+                "label": label,
+                "key": key,
+                "value_type": (
+                    "date"
+                    if column_no in DATE_COLUMNS
+                    else "percentage"
+                    if column_no in PERCENT_COLUMNS
+                    else "number"
+                    if column_no in NUMBER_COLUMNS
+                    else "text"
+                ),
+                "editable": column_no in editable_columns,
+                "required": scope == "basic" and column_no in REQUIRED_ORDER_COLUMN_NUMBERS,
+            }
+        )
+    return columns
+
+
+def editor_rows_for_order_lines(
+    conn: Connection,
+    user: CurrentUser,
+    order_line_ids: list[int],
+) -> list[dict[str, Any]]:
+    unique_ids = list(dict.fromkeys(order_line_ids))
+    if not unique_ids:
+        return []
+    params: dict[str, object] = {}
+    placeholders: list[str] = []
+    for index, order_line_id in enumerate(unique_ids):
+        key = f"order_line_id_{index}"
+        params[key] = order_line_id
+        placeholders.append(f":{key}")
+    conditions = [
+        "p.deleted_at IS NULL",
+        "so.deleted_at IS NULL",
+        "ol.deleted_at IS NULL",
+        f"ol.id IN ({', '.join(placeholders)})",
+    ]
+    apply_department_scope(conditions, params, user, "p.department")
+    rows = conn.execute(text(_export_sql(" AND ".join(conditions))), params).mappings().all()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        mapped = dict(row)
+        values = _row_values(mapped)
+        # The editor uses the same percentage unit as the API (13 means 13%),
+        # while the downloadable workbook stores 0.13 with percentage formatting.
+        for index, key in (
+            (18, "sales_tax_rate"),
+            (24, "purchase_tax_rate"),
+            (66, "gross_profit_margin_no_tax"),
+            (81, "receipt1_ratio"),
+            (85, "receipt2_ratio"),
+        ):
+            values[index] = mapped.get(key)
+        result.append(
+            {
+                "order_line_id": int(mapped["order_line_id"]),
+                "values": [clean_value(value) for value in values],
+            }
+        )
+    return result
+
+
 DATE_COLUMNS = {6, 30, 44, 47, 50, 54, 55, 58, 68, 74, 79, 83}
 PERCENT_COLUMNS = {19, 25, 67, 82, 86}
 NUMBER_COLUMNS = (
@@ -174,7 +346,7 @@ def _row_values(row: dict[str, Any]) -> list[Any]:
         _ratio(row.get("receipt1_ratio")), _date_value(row, "receipt2_date", "receipt2_date_text"),
         row.get("receipt2_notice_no"), row.get("receipt2_amount"), _ratio(row.get("receipt2_ratio")),
         row.get("total_received"), row.get("accounts_receivable"), row.get("close_status"),
-        None, None,
+        row.get("labor_cost"), row.get("other_cost"),
     ]
 
 
@@ -185,9 +357,19 @@ def _ratio(value: Any) -> Any:
     return numeric / 100 if abs(numeric) > 1 else numeric
 
 
+def _excel_column_name(column_no: int) -> str:
+    value = column_no
+    label = ""
+    while value:
+        value, remainder = divmod(value - 1, 26)
+        label = chr(65 + remainder) + label
+    return label
+
+
 def _export_sql(where_sql: str) -> str:
     return f"""
         SELECT
+          ol.id AS order_line_id,
           so.gross_net_type, p.project_code, p.department, p.branch_company, p.account_manager,
           so.order_date, so.business_type, so.statistic_category, p.team_level3_name,
           p.customer_unit_name, p.end_user_name, p.regional_platform, so.order_no,

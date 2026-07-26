@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 import logging
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from .config import settings, validate_security_settings
 from .auth import current_user_from_token, ensure_default_admin
@@ -116,3 +118,23 @@ def health() -> dict:
         "importedRows": imported_rows,
         "error": startup_state["error"],
     }
+
+
+FRONTEND_DIST = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend_dist"))
+
+if os.path.isdir(FRONTEND_DIST):
+    assets_path = os.path.join(FRONTEND_DIST, "assets")
+    if os.path.isdir(assets_path):
+        app.mount("/assets", StaticFiles(directory=assets_path), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_frontend(full_path: str):
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404)
+        target = os.path.join(FRONTEND_DIST, full_path)
+        if os.path.isfile(target):
+            return FileResponse(target)
+        index = os.path.join(FRONTEND_DIST, "index.html")
+        if os.path.isfile(index):
+            return FileResponse(index)
+        raise HTTPException(status_code=404)
