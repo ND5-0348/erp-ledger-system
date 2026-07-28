@@ -11,6 +11,11 @@ import {
   buildSalesInformationPayload,
   pasteGrid,
 } from '../lib/batchOrderEditor';
+import {
+  EDITOR_ACTIVE_CELL_VISUAL_CLASS,
+  EDITOR_SELECTED_CELL_VISUAL_CLASS,
+  useEditorCellSelection,
+} from '../hooks/useEditorCellSelection';
 
 export interface BatchPurchaseEditorProps {
   selectedOrderLineIds: number[];
@@ -55,6 +60,14 @@ export default function BatchPurchaseEditor({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const selectedKey = selectedOrderLineIds.join(',');
+  const {
+    handleCellPointerDown,
+    handleCellPointerEnter,
+    isActiveCell,
+    isCellSelected,
+    isSelectingCells,
+    selectedCellCount,
+  } = useEditorCellSelection(`${mode}:${selectedKey}:${showFixedColumns ? 'fixed' : 'hidden'}`);
 
   useEffect(() => {
     let cancelled = false;
@@ -258,8 +271,11 @@ export default function BatchPurchaseEditor({
             </div>
           ) : (
             <table
-              className="border-separate border-spacing-0 text-left text-xs"
+              className={`border-separate border-spacing-0 text-left text-xs ${
+                isSelectingCells ? 'select-none' : ''
+              }`}
               style={{ tableLayout: 'fixed', width: tableWidth, minWidth: tableWidth }}
+              onDragStart={(event) => event.preventDefault()}
             >
               <colgroup>
                 <col style={{ width: ROW_NUMBER_WIDTH }} />
@@ -352,11 +368,19 @@ export default function BatchPurchaseEditor({
                     </td>
                     {showFixedColumns && fixedColumns.map(({ column, index: columnIndex }, fixedColumnIndex) => {
                       const value = row.values[columnIndex] ?? '';
+                      const isSelected = isCellSelected(rowIndex, fixedColumnIndex);
+                      const isActive = isActiveCell(rowIndex, fixedColumnIndex);
                       return (
                         <td
                           key={`fixed-${row.order_line_id}-${column.excel_column}`}
-                          className={`sticky z-20 border-b border-r border-slate-300 bg-amber-50 px-2 py-3 font-mono text-[11px] text-slate-700 ${
-                            fixedColumnIndex === fixedColumns.length - 1
+                          className={`sticky border-b border-r border-slate-300 px-2 py-3 font-mono text-[11px] text-slate-700 ${
+                            isSelected
+                              ? `z-30 ${EDITOR_SELECTED_CELL_VISUAL_CLASS} ${
+                                  isActive ? EDITOR_ACTIVE_CELL_VISUAL_CLASS : ''
+                                }`
+                              : 'z-20 bg-amber-50'
+                          } ${
+                            !isSelected && fixedColumnIndex === fixedColumns.length - 1
                               ? 'border-r-2 border-r-slate-400 shadow-[5px_0_8px_-5px_rgba(15,23,42,0.55)]'
                               : ''
                           }`}
@@ -365,6 +389,10 @@ export default function BatchPurchaseEditor({
                             minWidth: FIXED_COLUMN_WIDTHS[column.excel_column] || 120,
                             width: FIXED_COLUMN_WIDTHS[column.excel_column] || 120,
                           }}
+                          aria-selected={isSelected}
+                          data-editor-cell={`${rowIndex}:${fixedColumnIndex}`}
+                          onPointerDown={(event) => handleCellPointerDown(event, rowIndex, fixedColumnIndex)}
+                          onPointerEnter={(event) => handleCellPointerEnter(event, rowIndex, fixedColumnIndex)}
                         >
                           <div className="overflow-hidden text-ellipsis whitespace-nowrap" title={String(value)}>
                             {String(value)}
@@ -372,15 +400,28 @@ export default function BatchPurchaseEditor({
                         </td>
                       );
                     })}
-                    {financialColumns.map(({ column, index: columnIndex }) => {
+                    {financialColumns.map(({ column, index: columnIndex }, financialColumnIndex) => {
                       const value = row.values[columnIndex] ?? '';
+                      const selectionColumnIndex = (
+                        showFixedColumns ? fixedColumns.length : 0
+                      ) + financialColumnIndex;
+                      const isSelected = isCellSelected(rowIndex, selectionColumnIndex);
+                      const isActive = isActiveCell(rowIndex, selectionColumnIndex);
                       return (
                         <td
                           key={`${row.order_line_id}-${column.excel_column}`}
                           className={`border-b border-r border-slate-200 p-0 ${
-                            column.editable ? 'bg-white' : 'bg-slate-50'
+                            isSelected
+                              ? `relative z-10 ${EDITOR_SELECTED_CELL_VISUAL_CLASS} ${
+                                  isActive ? EDITOR_ACTIVE_CELL_VISUAL_CLASS : ''
+                                }`
+                              : column.editable ? 'bg-white' : 'bg-slate-50'
                           }`}
                           style={{ minWidth: getColumnWidth(column), width: getColumnWidth(column) }}
+                          aria-selected={isSelected}
+                          data-editor-cell={`${rowIndex}:${selectionColumnIndex}`}
+                          onPointerDown={(event) => handleCellPointerDown(event, rowIndex, selectionColumnIndex)}
+                          onPointerEnter={(event) => handleCellPointerEnter(event, rowIndex, selectionColumnIndex)}
                         >
                           {column.editable ? (
                             <input
@@ -388,7 +429,9 @@ export default function BatchPurchaseEditor({
                               value={String(value)}
                               onChange={(event) => changeCell(rowIndex, columnIndex, event.target.value)}
                               onPaste={(event) => handlePaste(event, rowIndex, columnIndex)}
-                              className="h-10 w-full min-w-0 bg-transparent px-2 font-mono text-xs text-slate-800 outline-none focus:bg-blue-50 focus:ring-2 focus:ring-inset focus:ring-blue-500"
+                              className={`h-10 w-full min-w-0 px-2 font-mono text-xs text-slate-800 outline-none focus:ring-2 focus:ring-inset focus:ring-blue-500 ${
+                                isSelected ? 'bg-blue-100' : 'bg-transparent focus:bg-blue-50'
+                              }`}
                               aria-label={`${rowIndex + 1}行 ${column.excel_column}列 ${column.label}`}
                             />
                           ) : (
@@ -410,8 +453,10 @@ export default function BatchPurchaseEditor({
         </div>
 
         <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 bg-slate-50 px-4 py-2 text-[11px] text-slate-500">
-          <span>固定列：B–G、M–O；详情按钮显示 A–W 全部基本信息。</span>
-          <span>已选择 {selectedOrderLineIds.length} 条订单明细</span>
+          <span>
+            固定列：B–G、M–O；单击或拖拽选择单元格，Ctrl/⌘ 可多选，Shift 可扩展选区。
+          </span>
+          <span>已选 {selectedCellCount} 个单元格；{selectedOrderLineIds.length} 条订单明细</span>
         </footer>
 
         {detailRow && (

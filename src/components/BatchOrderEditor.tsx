@@ -12,6 +12,11 @@ import {
   createBlankEditorRow,
   pasteGrid,
 } from '../lib/batchOrderEditor';
+import {
+  EDITOR_ACTIVE_CELL_VISUAL_CLASS,
+  EDITOR_SELECTED_CELL_VISUAL_CLASS,
+  useEditorCellSelection,
+} from '../hooks/useEditorCellSelection';
 
 interface BatchOrderEditorProps {
   mode: 'create' | 'update';
@@ -32,6 +37,15 @@ export default function BatchOrderEditor({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const selectedKey = selectedOrderLineIds.join(',');
+  const {
+    clearCellSelection,
+    handleCellPointerDown,
+    handleCellPointerEnter,
+    isActiveCell,
+    isCellSelected,
+    isSelectingCells,
+    selectedCellCount,
+  } = useEditorCellSelection(`${mode}:${selectedKey}`);
 
   useEffect(() => {
     let cancelled = false;
@@ -110,6 +124,7 @@ export default function BatchOrderEditor({
 
   const removeRow = (rowIndex: number) => {
     setRows((current) => current.filter((_, index) => index !== rowIndex));
+    clearCellSelection();
   };
 
   const submit = async () => {
@@ -211,7 +226,12 @@ export default function BatchOrderEditor({
               正在加载字段和订单数据...
             </div>
           ) : (
-            <table className="border-separate border-spacing-0 text-left text-xs">
+            <table
+              className={`border-separate border-spacing-0 text-left text-xs ${
+                isSelectingCells ? 'select-none' : ''
+              }`}
+              onDragStart={(event) => event.preventDefault()}
+            >
               <thead className="sticky top-0 z-30">
                 <tr>
                   <th className="sticky left-0 z-40 min-w-[52px] border-b border-r border-slate-300 bg-slate-200 px-2 py-2 text-center font-bold text-slate-600">
@@ -246,14 +266,24 @@ export default function BatchOrderEditor({
                     <td className="sticky left-0 z-20 border-b border-r border-slate-300 bg-slate-100 px-2 py-2 text-center font-mono text-slate-500">
                       {rowIndex + 1}
                     </td>
-                    {visibleColumns.map(({ column, index: columnIndex }) => {
+                    {visibleColumns.map(({ column, index: columnIndex }, visibleColumnIndex) => {
                       const value = row.values[columnIndex] ?? '';
+                      const isSelected = isCellSelected(rowIndex, visibleColumnIndex);
+                      const isActive = isActiveCell(rowIndex, visibleColumnIndex);
                       return (
                         <td
                           key={`${row.order_line_id}-${column.excel_column}`}
                           className={`border-b border-r border-slate-200 p-0 ${
-                            column.editable ? 'bg-white' : 'bg-slate-50'
+                            isSelected
+                              ? `relative z-10 ${EDITOR_SELECTED_CELL_VISUAL_CLASS} ${
+                                  isActive ? EDITOR_ACTIVE_CELL_VISUAL_CLASS : ''
+                                }`
+                              : column.editable ? 'bg-white' : 'bg-slate-50'
                           }`}
+                          aria-selected={isSelected}
+                          data-editor-cell={`${rowIndex}:${visibleColumnIndex}`}
+                          onPointerDown={(event) => handleCellPointerDown(event, rowIndex, visibleColumnIndex)}
+                          onPointerEnter={(event) => handleCellPointerEnter(event, rowIndex, visibleColumnIndex)}
                         >
                           {column.editable ? (
                             <input
@@ -261,7 +291,9 @@ export default function BatchOrderEditor({
                               value={String(value)}
                               onChange={(event) => changeCell(rowIndex, columnIndex, event.target.value)}
                               onPaste={(event) => handlePaste(event, rowIndex, columnIndex)}
-                              className="h-10 w-full min-w-0 bg-transparent px-2 font-mono text-xs text-slate-800 outline-none focus:bg-blue-50 focus:ring-2 focus:ring-inset focus:ring-blue-500"
+                              className={`h-10 w-full min-w-0 px-2 font-mono text-xs text-slate-800 outline-none focus:ring-2 focus:ring-inset focus:ring-blue-500 ${
+                                isSelected ? 'bg-blue-100' : 'bg-transparent focus:bg-blue-50'
+                              }`}
                               aria-label={`${rowIndex + 1}行 ${column.excel_column}列 ${column.label}`}
                             />
                           ) : (
@@ -293,8 +325,12 @@ export default function BatchOrderEditor({
         </div>
 
         <footer className="flex items-center justify-between border-t border-slate-200 bg-slate-50 px-4 py-2 text-[11px] text-slate-500">
-          <span>蓝色表头为可编辑字段；灰色表头为数据库只读字段。</span>
-          <span>{mode === 'update' ? `已选择 ${selectedOrderLineIds.length} 条明细` : `当前 ${rows.length} 行`}</span>
+          <span>
+            蓝色表头为可编辑字段；单击或拖拽选择单元格，Ctrl/⌘ 可多选，Shift 可扩展选区。
+          </span>
+          <span>
+            已选 {selectedCellCount} 个单元格；{mode === 'update' ? `${selectedOrderLineIds.length} 条明细` : `当前 ${rows.length} 行`}
+          </span>
         </footer>
       </div>
     </div>

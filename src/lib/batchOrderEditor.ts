@@ -2,6 +2,42 @@ import { BackendBatchEditorColumn, BatchEditorValue } from '../api';
 
 export const BASIC_INFORMATION_END_COLUMN = 'W';
 
+export interface EditorCellPosition {
+  rowIndex: number;
+  columnIndex: number;
+}
+
+export type CellSelectionMode = 'replace' | 'add' | 'remove';
+
+export function editorCellKey({ rowIndex, columnIndex }: EditorCellPosition): string {
+  return `${rowIndex}:${columnIndex}`;
+}
+
+export function selectEditorCellRectangle(
+  currentSelection: ReadonlySet<string>,
+  start: EditorCellPosition,
+  end: EditorCellPosition,
+  mode: CellSelectionMode = 'replace',
+): Set<string> {
+  const next = mode === 'replace' ? new Set<string>() : new Set(currentSelection);
+  const firstRow = Math.min(start.rowIndex, end.rowIndex);
+  const lastRow = Math.max(start.rowIndex, end.rowIndex);
+  const firstColumn = Math.min(start.columnIndex, end.columnIndex);
+  const lastColumn = Math.max(start.columnIndex, end.columnIndex);
+
+  for (let rowIndex = firstRow; rowIndex <= lastRow; rowIndex += 1) {
+    for (let columnIndex = firstColumn; columnIndex <= lastColumn; columnIndex += 1) {
+      const key = editorCellKey({ rowIndex, columnIndex });
+      if (mode === 'remove') {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+    }
+  }
+  return next;
+}
+
 export function createBlankEditorRow(columns: BackendBatchEditorColumn[]): BatchEditorValue[] {
   return columns.map((column) => (column.excel_column === 'A' ? '全额' : null));
 }

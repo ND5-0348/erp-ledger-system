@@ -6,8 +6,10 @@ import {
   buildPurchaseInformationPayload,
   buildSalesInformationPayload,
   createBlankEditorRow,
+  editorCellKey,
   normalizeEditorValue,
   pasteGrid,
+  selectEditorCellRectangle,
 } from '../src/lib/batchOrderEditor';
 
 const columns: BackendBatchEditorColumn[] = [
@@ -107,4 +109,32 @@ test('sales payload follows BP-CM keys and excludes CI-CJ automatic columns', ()
       labor_cost: '12.34',
     },
   );
+});
+
+test('cell selection creates Excel-style rectangles and supports additive ranges', () => {
+  const firstRange = selectEditorCellRectangle(
+    new Set(),
+    { rowIndex: 0, columnIndex: 1 },
+    { rowIndex: 1, columnIndex: 3 },
+  );
+  assert.equal(firstRange.size, 6);
+  assert.ok(firstRange.has(editorCellKey({ rowIndex: 0, columnIndex: 1 })));
+  assert.ok(firstRange.has(editorCellKey({ rowIndex: 1, columnIndex: 3 })));
+
+  const additive = selectEditorCellRectangle(
+    firstRange,
+    { rowIndex: 3, columnIndex: 5 },
+    { rowIndex: 3, columnIndex: 6 },
+    'add',
+  );
+  assert.equal(additive.size, 8);
+
+  const removed = selectEditorCellRectangle(
+    additive,
+    { rowIndex: 0, columnIndex: 2 },
+    { rowIndex: 1, columnIndex: 2 },
+    'remove',
+  );
+  assert.equal(removed.size, 6);
+  assert.equal(removed.has(editorCellKey({ rowIndex: 0, columnIndex: 2 })), false);
 });
