@@ -9,9 +9,13 @@ import {
 import {
   BASIC_INFORMATION_END_COLUMN,
   buildBasicInformationPayload,
+  copyEditorSelection,
   createBlankEditorRow,
-  pasteGrid,
+  editableEditorRowsMatch,
+  pasteGridToEditorSelection,
 } from '../lib/batchOrderEditor';
+import { useBatchEditorHistory } from '../hooks/useBatchEditorHistory';
+import { useEditorColumnWidths } from '../hooks/useEditorColumnWidths';
 import {
   EDITOR_ACTIVE_CELL_VISUAL_CLASS,
   EDITOR_SELECTED_CELL_VISUAL_CLASS,
@@ -25,6 +29,13 @@ interface BatchOrderEditorProps {
   onSaved: (count: number) => Promise<void> | void;
 }
 
+const ROW_NUMBER_WIDTH = 52;
+const ACTION_COLUMN_WIDTH = 68;
+
+function getDefaultColumnWidth(column: BackendBatchEditorColumn) {
+  return column.value_type === 'text' ? 156 : 126;
+}
+
 export default function BatchOrderEditor({
   mode,
   selectedOrderLineIds = [],
@@ -33,12 +44,14 @@ export default function BatchOrderEditor({
 }: BatchOrderEditorProps) {
   const [columns, setColumns] = useState<BackendBatchEditorColumn[]>([]);
   const [rows, setRows] = useState<BackendBatchEditorRow[]>([]);
+  const [initialRows, setInitialRows] = useState<BackendBatchEditorRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const selectedKey = selectedOrderLineIds.join(',');
   const {
     clearCellSelection,
+    selectedCells,
     handleCellPointerDown,
     handleCellPointerEnter,
     isActiveCell,
@@ -46,6 +59,17 @@ export default function BatchOrderEditor({
     isSelectingCells,
     selectedCellCount,
   } = useEditorCellSelection(`${mode}:${selectedKey}`);
+  const {
+    finishCellEdit,
+    resetHistory,
+    undo,
+    updateRows,
+  } = useBatchEditorHistory(rows, setRows);
+  const {
+    resetWidth,
+    startResize,
+    widthFor,
+  } = useEditorColumnWidths(`${mode}:${selectedKey}`);
 
   useEffect(() => {
     let cancelled = false;
@@ -57,11 +81,16 @@ export default function BatchOrderEditor({
           ? await api.batchOrderEditorRows(selectedOrderLineIds)
           : await api.batchOrderEditorSchema();
         if (cancelled) return;
+        const loadedRows = mode === 'update'
+          ? (result.rows || []).map((row) => ({ ...row, values: [...row.values] }))
+          : [{ order_line_id: 0, values: createBlankEditorRow(result.columns) }];
+        resetHistory();
         setColumns(result.columns);
-        setRows(
+        setRows(loadedRows);
+        setInitialRows(
           mode === 'update'
-            ? (result.rows || [])
-            : [{ order_line_id: 0, values: createBlankEditorRow(result.columns) }],
+            ? loadedRows.map((row) => ({ ...row, values: [...row.values] }))
+            : [],
         );
       } catch (loadError) {
         if (!cancelled) setError(loadError instanceof Error ? loadError.message : '在线表格加载失败');
@@ -73,7 +102,7 @@ export default function BatchOrderEditor({
     return () => {
       cancelled = true;
     };
-  }, [mode, selectedKey]);
+  }, [mode, resetHistory, selectedKey]);
 
   const visibleColumns = useMemo(
     () => columns
@@ -81,33 +110,76 @@ export default function BatchOrderEditor({
       .filter(({ column }) => mode === 'update' || column.editable),
     [columns, mode],
   );
+  const visibleColumnIndexes = useMemo(
+    () => visibleColumns.map(({ index }) => index),
+    [visibleColumns],
+  );
+  const tableWidth = useMemo(
+    () => ROW_NUMBER_WIDTH
+      + visibleColumns.reduce(
+        (total, { column }) => total + widthFor(
+          column.excel_column,
+          getDefaultColumnWidth(column),
+        ),
+        0,
+      )
+      + (mode === 'create' ? ACTION_COLUMN_WIDTH : 0),
+    [mode, visibleColumns, widthFor],
+  );
+  const initialRowsById = useMemo(
+    () => new Map(initialRows.map((row) => [row.order_line_id, row])),
+    [initialRows],
+  );
+  const dirtyRows = useMemo(
+    () => mode === 'update'
+      ? rows.filter((row) => {
+          const initial = initialRowsById.get(row.order_line_id);
+          return !initial || !editableEditorRowsMatch(columns, initial.values, row.values);
+        })
+      : rows,
+    [columns, initialRowsById, mode, rows],
+  );
+  const dirtyRowCount = mode === 'update' ? dirtyRows.length : 0;
 
   const changeCell = (rowIndex: number, columnIndex: number, value: BatchEditorValue) => {
     if (!columns[columnIndex]?.editable) return;
-    setRows((current) => current.map((row, index) => (
-      index === rowIndex
-        ? { ...row, values: row.values.map((cell, cellIndex) => (cellIndex === columnIndex ? value : cell)) }
-        : row
-    )));
+    updateRows((current) => {
+      if (current[rowIndex]?.values[columnIndex] === value) return current;
+      return current.map((row, index) => (
+        index === rowIndex
+          ? { ...row, values: row.values.map((cell, cellIndex) => (cellIndex === columnIndex ? value : cell)) }
+          : row
+      ));
+    }, `${rowIndex}:${columnIndex}`);
   };
 
-  const handlePaste = (
-    event: React.ClipboardEvent<HTMLInputElement>,
-    rowIndex: number,
-    columnIndex: number,
-  ) => {
-    const text = event.clipboardData.getData('text/plain');
-    if (!text.includes('\t') && !text.includes('\n')) return;
+  const handleCopy = (event: React.ClipboardEvent<HTMLTableElement>) => {
+    const text = copyEditorSelection(
+      rows.map((row) => row.values),
+      selectedCells,
+      visibleColumnIndexes,
+    );
+    if (!text && selectedCellCount === 0) return;
     event.preventDefault();
-    setRows((current) => {
-      const values = pasteGrid(
-        current.map((row) => row.values),
+    event.clipboardData.setData('text/plain', text);
+  };
+
+  const handlePaste = (event: React.ClipboardEvent<HTMLTableElement>) => {
+    if (!selectedCellCount) return;
+    const text = event.clipboardData.getData('text/plain');
+    event.preventDefault();
+    finishCellEdit();
+    updateRows((current) => {
+      const currentValues = current.map((row) => row.values);
+      const values = pasteGridToEditorSelection(
+        currentValues,
         text,
-        rowIndex,
-        columnIndex,
+        selectedCells,
+        visibleColumnIndexes,
         columns,
         mode === 'create',
       );
+      if (values === currentValues) return current;
       return values.map((rowValues, index) => ({
         order_line_id: current[index]?.order_line_id || 0,
         values: rowValues,
@@ -116,15 +188,24 @@ export default function BatchOrderEditor({
   };
 
   const addRows = (count = 1) => {
-    setRows((current) => [
+    finishCellEdit();
+    updateRows((current) => [
       ...current,
       ...Array.from({ length: count }, () => ({ order_line_id: 0, values: createBlankEditorRow(columns) })),
     ]);
   };
 
   const removeRow = (rowIndex: number) => {
-    setRows((current) => current.filter((_, index) => index !== rowIndex));
+    finishCellEdit();
+    updateRows((current) => current.filter((_, index) => index !== rowIndex));
     clearCellSelection();
+  };
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLTableElement>) => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z' && !event.shiftKey) {
+      event.preventDefault();
+      undo();
+    }
   };
 
   const submit = async () => {
@@ -132,9 +213,9 @@ export default function BatchOrderEditor({
     try {
       const submittedRows = mode === 'create'
         ? rows.filter((row) => row.values.slice(1, 23).some((value) => String(value ?? '').trim() !== ''))
-        : rows;
+        : dirtyRows;
       if (!submittedRows.length) {
-        throw new Error('请至少填写一行基本信息');
+        throw new Error(mode === 'update' ? '没有需要保存的更改' : '请至少填写一行基本信息');
       }
       const items = submittedRows.map((row) => {
         const payload = buildBasicInformationPayload(columns, row.values);
@@ -194,12 +275,18 @@ export default function BatchOrderEditor({
             )}
             <button
               type="button"
-              disabled={saving || loading}
+              disabled={saving || loading || (mode === 'update' && dirtyRowCount === 0)}
               onClick={() => void submit()}
               className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
             >
               {saving ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-              {saving ? '保存中' : '保存到数据库'}
+              {saving
+                ? '保存中'
+                : mode === 'update'
+                ? dirtyRowCount > 0
+                  ? `保存 ${dirtyRowCount} 条更改`
+                  : '没有更改'
+                : '保存到数据库'}
             </button>
             <button
               type="button"
@@ -227,30 +314,65 @@ export default function BatchOrderEditor({
             </div>
           ) : (
             <table
-              className={`border-separate border-spacing-0 text-left text-xs ${
+              className={`border-separate border-spacing-0 text-left text-xs outline-none ${
                 isSelectingCells ? 'select-none' : ''
               }`}
+              style={{ tableLayout: 'fixed', width: tableWidth, minWidth: tableWidth }}
+              tabIndex={0}
+              onCopy={handleCopy}
+              onPaste={handlePaste}
+              onKeyDown={handleKeyDown}
               onDragStart={(event) => event.preventDefault()}
             >
+              <colgroup>
+                <col style={{ width: ROW_NUMBER_WIDTH }} />
+                {visibleColumns.map(({ column }) => (
+                  <col
+                    key={`col-${column.excel_column}`}
+                    style={{
+                      width: widthFor(column.excel_column, getDefaultColumnWidth(column)),
+                    }}
+                  />
+                ))}
+                {mode === 'create' && <col style={{ width: ACTION_COLUMN_WIDTH }} />}
+              </colgroup>
               <thead className="sticky top-0 z-30">
                 <tr>
-                  <th className="sticky left-0 z-40 min-w-[52px] border-b border-r border-slate-300 bg-slate-200 px-2 py-2 text-center font-bold text-slate-600">
+                  <th
+                    className="sticky left-0 z-40 border-b border-r border-slate-300 bg-slate-200 px-2 py-2 text-center font-bold text-slate-600"
+                    style={{ minWidth: ROW_NUMBER_WIDTH, width: ROW_NUMBER_WIDTH }}
+                  >
                     行
                   </th>
                   {visibleColumns.map(({ column }) => (
                     <th
                       key={column.excel_column}
-                      className={`border-b border-r border-slate-300 px-2 py-2 text-center font-semibold ${
+                      className={`relative border-b border-r border-slate-300 px-2 py-2 text-center font-semibold ${
                         column.editable ? 'bg-blue-50 text-blue-800' : 'bg-slate-200 text-slate-500'
                       }`}
-                      style={{ minWidth: column.value_type === 'text' ? 156 : 126 }}
-                      title={column.editable ? '可编辑字段' : '只读字段'}
+                      style={{
+                        minWidth: widthFor(column.excel_column, getDefaultColumnWidth(column)),
+                        width: widthFor(column.excel_column, getDefaultColumnWidth(column)),
+                      }}
+                      title={`${column.editable ? '可编辑字段' : '只读字段'}；拖动右侧边缘调整列宽`}
                     >
                       <span className="block font-mono text-[10px]">{column.excel_column}</span>
                       <span className="mt-0.5 block whitespace-nowrap">
                         {column.label}
                         {column.required && <span className="ml-0.5 text-rose-500">*</span>}
                       </span>
+                      <span
+                        className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize touch-none hover:bg-blue-400/50"
+                        role="separator"
+                        aria-orientation="vertical"
+                        aria-label={`调整${column.label}列宽`}
+                        onPointerDown={(event) => startResize(
+                          event,
+                          column.excel_column,
+                          widthFor(column.excel_column, getDefaultColumnWidth(column)),
+                        )}
+                        onDoubleClick={() => resetWidth(column.excel_column)}
+                      />
                     </th>
                   ))}
                   {mode === 'create' && (
@@ -280,6 +402,10 @@ export default function BatchOrderEditor({
                                 }`
                               : column.editable ? 'bg-white' : 'bg-slate-50'
                           }`}
+                          style={{
+                            minWidth: widthFor(column.excel_column, getDefaultColumnWidth(column)),
+                            width: widthFor(column.excel_column, getDefaultColumnWidth(column)),
+                          }}
                           aria-selected={isSelected}
                           data-editor-cell={`${rowIndex}:${visibleColumnIndex}`}
                           onPointerDown={(event) => handleCellPointerDown(event, rowIndex, visibleColumnIndex)}
@@ -290,7 +416,7 @@ export default function BatchOrderEditor({
                               type={column.value_type === 'date' ? 'date' : 'text'}
                               value={String(value)}
                               onChange={(event) => changeCell(rowIndex, columnIndex, event.target.value)}
-                              onPaste={(event) => handlePaste(event, rowIndex, columnIndex)}
+                              onBlur={finishCellEdit}
                               className={`h-10 w-full min-w-0 px-2 font-mono text-xs text-slate-800 outline-none focus:ring-2 focus:ring-inset focus:ring-blue-500 ${
                                 isSelected ? 'bg-blue-100' : 'bg-transparent focus:bg-blue-50'
                               }`}
@@ -326,10 +452,12 @@ export default function BatchOrderEditor({
 
         <footer className="flex items-center justify-between border-t border-slate-200 bg-slate-50 px-4 py-2 text-[11px] text-slate-500">
           <span>
-            蓝色表头为可编辑字段；单击或拖拽选择单元格，Ctrl/⌘ 可多选，Shift 可扩展选区。
+            蓝色表头可编辑；Ctrl+C/V 复制粘贴，Ctrl+Z 撤回；拖动表头右侧边缘调整列宽。
           </span>
           <span>
-            已选 {selectedCellCount} 个单元格；{mode === 'update' ? `${selectedOrderLineIds.length} 条明细` : `当前 ${rows.length} 行`}
+            已选 {selectedCellCount} 个单元格；{mode === 'update'
+              ? `${dirtyRowCount} 条已更改 / ${selectedOrderLineIds.length} 条明细`
+              : `当前 ${rows.length} 行`}
           </span>
         </footer>
       </div>

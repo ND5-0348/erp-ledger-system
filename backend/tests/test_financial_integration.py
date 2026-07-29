@@ -336,8 +336,18 @@ def test_batch_basic_editor_schema_create_update_and_readonly_boundary(
     )
     assert update_response.status_code == 200, update_response.text
     assert update_response.json()["updated"] == 2
-    assert _action_count("batch_update_basic_order") == 2
+    assert _action_count("batch_update_basic_order") == 1
     with db() as conn:
+        logs = conn.execute(
+            text(
+                """
+                SELECT detail
+                FROM operation_log
+                WHERE action_name = 'batch_update_basic_order'
+                ORDER BY id
+                """
+            )
+        ).scalars().all()
         manager = conn.execute(
             text("SELECT account_manager FROM project WHERE project_code = :code"),
             {"code": first["project_code"]},
@@ -346,8 +356,29 @@ def test_batch_basic_editor_schema_create_update_and_readonly_boundary(
             text("SELECT goods_name FROM order_line WHERE id IN (:first, :second) ORDER BY id"),
             {"first": order_line_ids[0], "second": order_line_ids[1]},
         ).scalars().all()
+    assert len(logs) == 1
+    audit_detail = json.loads(str(logs[0]))
+    audit_entries = audit_detail["batch_entries"]
+    assert audit_detail["summary"] == "在线表格批量修改 2 条基本信息，共 4 个单元格"
+    assert audit_detail["before"] is None
+    assert audit_detail["after"] is None
+    assert len(audit_entries) == 2
+    assert all(set(entry["before"]) == {"order_line_id", *EDITABLE_ORDER_KEYS} for entry in audit_entries)
+    assert all(entry["before"]["account_manager"] == first["account_manager"] for entry in audit_entries)
+    assert all(entry["after"]["account_manager"] == "批量客户经理" for entry in audit_entries)
+    assert all(entry["before"]["customer_unit_name"] == first["customer_unit_name"] for entry in audit_entries)
+    assert all(entry["after"]["customer_unit_name"] == "批量修改客户单位" for entry in audit_entries)
     assert manager == "批量客户经理"
     assert goods == [first["goods_name"], second["goods_name"]]
+
+    unchanged_response = client.put(
+        "/api/orders/batch-basic",
+        json={"items": update_items},
+        headers=headers,
+    )
+    assert unchanged_response.status_code == 200, unchanged_response.text
+    assert unchanged_response.json() == {"updated": 0, "order_line_ids": []}
+    assert _action_count("batch_update_basic_order") == 1
 
     forbidden_readonly = {
         **update_items[0],
@@ -427,6 +458,24 @@ def test_purchase_batch_editor_round_trip_and_readonly_boundary(
     assert update_response.status_code == 200, update_response.text
     assert update_response.json()["updated"] == 1
     assert _action_count("batch_update_purchases") == 1
+    with db() as conn:
+        audit_detail = json.loads(
+            conn.execute(
+                text(
+                    """
+                    SELECT detail
+                    FROM operation_log
+                    WHERE action_name = 'batch_update_purchases'
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """
+                )
+            ).scalar_one()
+        )
+    assert audit_detail["summary"].startswith("在线表格批量修改 1 条采购信息，共 ")
+    assert len(audit_detail["batch_entries"]) == 1
+    assert audit_detail["batch_entries"][0]["before"]["supplier_name"] == "QA Supplier"
+    assert audit_detail["batch_entries"][0]["after"]["supplier_name"] == "批量采购厂商"
 
     refreshed_response = client.post(
         "/api/purchases/batch-editor/rows",
@@ -449,6 +498,15 @@ def test_purchase_batch_editor_round_trip_and_readonly_boundary(
     assert values_by_key["payment2_voucher_no"] == "PAY2-BATCH-001"
     assert _d(values_by_key["total_paid"]) == Decimal("150.00")
     assert _d(values_by_key["accounts_payable"]) == Decimal("750.00")
+
+    unchanged_response = client.put(
+        "/api/purchases/batch",
+        json={"items": [item]},
+        headers=headers,
+    )
+    assert unchanged_response.status_code == 200, unchanged_response.text
+    assert unchanged_response.json() == {"updated": 0, "order_line_ids": []}
+    assert _action_count("batch_update_purchases") == 1
 
     forbidden = {**item, "gross_profit": "1.00"}
     forbidden_response = client.put(
@@ -549,6 +607,24 @@ def test_sales_batch_editor_round_trip_and_readonly_boundary(
     assert update_response.status_code == 200, update_response.text
     assert update_response.json()["updated"] == 1
     assert _action_count("batch_update_sales") == 1
+    with db() as conn:
+        audit_detail = json.loads(
+            conn.execute(
+                text(
+                    """
+                    SELECT detail
+                    FROM operation_log
+                    WHERE action_name = 'batch_update_sales'
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """
+                )
+            ).scalar_one()
+        )
+    assert audit_detail["summary"].startswith("在线表格批量修改 1 条销售信息，共 ")
+    assert len(audit_detail["batch_entries"]) == 1
+    assert audit_detail["batch_entries"][0]["before"]["sales_contract_no"] is None
+    assert audit_detail["batch_entries"][0]["after"]["sales_contract_no"] == "SC-BATCH-001"
 
     refreshed_response = client.post(
         "/api/sales/batch-editor/rows",
@@ -571,6 +647,15 @@ def test_sales_batch_editor_round_trip_and_readonly_boundary(
     assert values_by_key["close_status"] == "进行中"
     assert _d(values_by_key["labor_cost"]) == Decimal("12.34")
     assert _d(values_by_key["other_cost"]) == Decimal("5.67")
+
+    unchanged_response = client.put(
+        "/api/sales/batch",
+        json={"items": [item]},
+        headers=headers,
+    )
+    assert unchanged_response.status_code == 200, unchanged_response.text
+    assert unchanged_response.json() == {"updated": 0, "order_line_ids": []}
+    assert _action_count("batch_update_sales") == 1
 
     forbidden = {**item, "total_received": "1.00"}
     forbidden_response = client.put(

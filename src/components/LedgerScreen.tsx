@@ -6,8 +6,6 @@ import {
   ChevronLeft, 
   ChevronRight, 
   Eye,
-  Pencil,
-  Trash2,
   X,
   AlertTriangle,
   FileSpreadsheet,
@@ -33,9 +31,6 @@ interface LedgerScreenProps {
   purchases: PurchaseRecord[];
   sales: SalesRecord[];
   onAddLedger: (ledger: ProjectLedger) => void;
-  onManageOrder: (orderLineId: number, intent: 'edit' | 'delete') => void;
-  canEditOrders: boolean;
-  canDeleteOrders: boolean;
   onDownloadTemplate: () => Promise<Blob>;
   onExportExcel: () => Promise<Blob>;
 }
@@ -66,9 +61,6 @@ export default function LedgerScreen({
   purchases,
   sales,
   onAddLedger,
-  onManageOrder,
-  canEditOrders,
-  canDeleteOrders,
   onDownloadTemplate,
   onExportExcel,
 }: LedgerScreenProps) {
@@ -86,12 +78,10 @@ export default function LedgerScreen({
   const [invoiceEndDate, setInvoiceEndDate] = useState('');
   const [submittedFilters, setSubmittedFilters] = useState(emptyLedgerFilters);
   const [selectedLedger, setSelectedLedger] = useState<ProjectLedger | null>(null);
-  const [detailIntent, setDetailIntent] = useState<'view' | 'edit' | 'delete'>('view');
   const [expandedOrderRows, setExpandedOrderRows] = useState<Set<string>>(() => new Set());
 
-  const openLedgerDetail = (ledger: ProjectLedger, intent: 'view' | 'edit' | 'delete') => {
+  const openLedgerDetail = (ledger: ProjectLedger) => {
     setExpandedOrderRows(new Set());
-    setDetailIntent(intent);
     setSelectedLedger(ledger);
   };
 
@@ -538,35 +528,13 @@ export default function LedgerScreen({
                         <div className="inline-flex items-center justify-center gap-1">
                           <button
                             type="button"
-                            onClick={() => openLedgerDetail(item, 'view')}
+                            onClick={() => openLedgerDetail(item)}
                             className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-blue-100 bg-blue-50 text-blue-600 hover:bg-blue-100 hover:border-blue-200 transition-colors"
                             title="查看项目全部信息"
                             aria-label={`查看项目 ${item.id} 的全部信息`}
                           >
                             <Eye className="w-4 h-4" />
                           </button>
-                          {canEditOrders && (
-                            <button
-                              type="button"
-                              onClick={() => openLedgerDetail(item, 'edit')}
-                              className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-blue-100 bg-blue-50 text-blue-600 hover:bg-blue-100 hover:border-blue-200 transition-colors"
-                              title="进入项目订单明细进行修改"
-                              aria-label={`修改项目 ${item.id} 的具体订单明细`}
-                            >
-                              <Pencil className="w-4 h-4" />
-                            </button>
-                          )}
-                          {canDeleteOrders && (
-                            <button
-                              type="button"
-                              onClick={() => openLedgerDetail(item, 'delete')}
-                              className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-rose-100 bg-rose-50 text-rose-600 hover:bg-rose-100 hover:border-rose-200 transition-colors"
-                              title="进入项目订单明细进行删除"
-                              aria-label={`删除项目 ${item.id} 中的具体订单明细`}
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          )}
                         </div>
                       </td>
                     </tr>
@@ -698,7 +666,6 @@ export default function LedgerScreen({
                 type="button"
                 onClick={() => {
                   setSelectedLedger(null);
-                  setDetailIntent('view');
                   setExpandedOrderRows(new Set());
                 }}
                 className="inline-flex items-center justify-center w-8 h-8 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
@@ -709,17 +676,6 @@ export default function LedgerScreen({
             </div>
 
             <div className="p-6 space-y-5 overflow-y-auto max-h-[calc(88vh-73px)]">
-              {detailIntent !== 'view' && (
-                <div className={`rounded-lg border px-4 py-3 text-xs ${
-                  detailIntent === 'delete'
-                    ? 'border-rose-200 bg-rose-50 text-rose-700'
-                    : 'border-blue-200 bg-blue-50 text-blue-700'
-                }`}>
-                  {detailIntent === 'edit'
-                    ? '请在“销售信息”中展开订单号，再选择具体货物明细进行修改。'
-                    : '请在“销售信息”中展开订单号，再选择具体货物明细进行删除；不会直接删除整个项目。'}
-                </div>
-              )}
               <section>
                 <h3 className="text-sm font-bold text-slate-900 mb-3">项目信息</h3>
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
@@ -767,9 +723,6 @@ export default function LedgerScreen({
                 rows={selectedOrderSummaries}
                 expandedRows={expandedOrderRows}
                 onToggle={toggleOrderRow}
-                actionMode={detailIntent}
-                onEditLine={(orderLineId) => onManageOrder(orderLineId, 'edit')}
-                onDeleteLine={(orderLineId) => onManageOrder(orderLineId, 'delete')}
               />
               <OrderOperatingSummarySection
                 title="采购信息"

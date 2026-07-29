@@ -145,6 +145,47 @@ def write_operation_log(
         "before": before_snapshot,
         "after": after_snapshot,
     }
+    _insert_operation_log(conn, user, module_name, action_name, audit_detail, status)
+
+
+def write_batch_operation_log(
+    conn: Connection,
+    user: CurrentUser,
+    module_name: str,
+    action_name: str,
+    detail: str,
+    *,
+    entries: list[tuple[Mapping[str, Any], Mapping[str, Any]]],
+    status: str = "success",
+) -> None:
+    batch_entries: list[dict[str, Any]] = []
+    for before, after in entries:
+        before_snapshot = _snapshot(before)
+        after_snapshot = _snapshot(after)
+        context = _order_context(conn, before_snapshot, after_snapshot)
+        batch_entries.append(
+            {
+                "before": _merge_context(before_snapshot, context),
+                "after": _merge_context(after_snapshot, context),
+            }
+        )
+    audit_detail = {
+        "summary": detail,
+        "before": None,
+        "after": None,
+        "batch_entries": batch_entries,
+    }
+    _insert_operation_log(conn, user, module_name, action_name, audit_detail, status)
+
+
+def _insert_operation_log(
+    conn: Connection,
+    user: CurrentUser,
+    module_name: str,
+    action_name: str,
+    audit_detail: Mapping[str, Any],
+    status: str,
+) -> None:
     conn.execute(
         text(
             """

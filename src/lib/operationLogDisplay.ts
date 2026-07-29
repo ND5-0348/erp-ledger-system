@@ -10,11 +10,23 @@ interface AuditDetail {
   summary?: string;
   before?: AuditSnapshot | null;
   after?: AuditSnapshot | null;
+  batch_entries?: AuditBatchEntry[];
+}
+
+interface AuditBatchEntry {
+  before?: AuditSnapshot | null;
+  after?: AuditSnapshot | null;
+}
+
+export interface OperationLogChangeGroup {
+  title: string;
+  changes: string[];
 }
 
 const FIELD_LABELS: Record<string, string> = {
   project_code: '项目编号',
   order_no: '销售订单号',
+  amount_type: '全额/净额',
   gross_net_type: '全额/净额',
   department: '部门',
   branch_company: '分公司',
@@ -23,6 +35,7 @@ const FIELD_LABELS: Record<string, string> = {
   account_manager: '客户经理',
   order_date: '销售订单日期',
   business_type: '业务类型',
+  statistical_category: '统计类别',
   statistic_category: '统计类别',
   customer_unit_name: '客户单位名称',
   user_name: '用户',
@@ -36,8 +49,11 @@ const FIELD_LABELS: Record<string, string> = {
   quantity: '销售数量',
   sales_tax_rate: '销售税率',
   sales_unit_price_no_tax: '不含税单价',
+  net_unit_price: '不含税单价',
   sales_unit_price: '含税单价',
+  unit_price: '含税单价',
   revenue_no_tax: '不含税订单金额',
+  net_revenue: '不含税订单金额',
   order_value: '销售订单金额',
   sales_tax_amount: '销售税金',
   supplier_name: '采购厂商',
@@ -61,17 +77,32 @@ const FIELD_LABELS: Record<string, string> = {
   purchase_contract_no: '采购合同号',
   payment_terms: '付款条件',
   performance_period: '履约周期',
+  purchase_performance_period: '采购履约周期',
   signed_amount: '签约金额',
   unsigned_amount: '未签约金额',
+  purchase_signed_amount: '采购合同签约金额',
+  purchase_unsigned_amount: '采购合同待签金额',
   phase_no: '期次',
   received_invoice_date: '收票日期',
   invoice_no: '发票号码',
   invoice_amount: '发票金额',
+  purchase_invoice_no: '采购发票号码',
+  purchase_invoice_amount: '采购发票金额',
+  warehouse_date: '入库日期',
+  warehouse_voucher_no: '入库凭证号',
   warehouse_entry_date: '入库日期',
   warehouse_amount: '入库金额',
   received_invoice_amount: '已收发票金额',
   booked_date: '入账日期',
+  booked_voucher_code: '入账凭证号',
   booked_amount: '入账金额',
+  payment1_due_date: '第一期到期付款日期',
+  payment1_date: '第一期付款日期',
+  payment1_voucher_no: '第一期付款凭证号',
+  payment1_amount: '第一期付款金额',
+  payment2_date: '第二期付款日期',
+  payment2_voucher_no: '第二期付款凭证号',
+  payment2_amount: '第二期付款金额',
   due_payment_date: '应付款日期',
   payment_date: '付款日期',
   payment_voucher_no: '付款凭证号',
@@ -79,11 +110,24 @@ const FIELD_LABELS: Record<string, string> = {
   contract_signed_date: '合同签订日期',
   sales_contract_no: '销售合同号',
   contract_value: '合同金额',
+  sales_contract_value: '销售合同金额',
+  sales_performance_period: '销售合同履约周期',
   unsigned_contract_amount: '未签合同金额',
+  sales_unsigned_contract_amount: '销售合同待签金额',
   invoice_doc_no: '开票单号',
   invoice_date: '开票日期',
+  sales_invoice_no: '销售发票号码',
+  sales_invoice_amount: '销售发票金额',
   pending_invoice_amount: '待开票金额',
   delivered_not_invoiced_amount: '已交付未开票金额',
+  receipt1_date: '第一次回款日期',
+  receipt1_notice_no: '第一次回款通知单号',
+  receipt1_amount: '第一次回款金额',
+  receipt1_ratio: '第一次回款占比',
+  receipt2_date: '第二次回款日期',
+  receipt2_notice_no: '第二次回款通知单号',
+  receipt2_amount: '第二次回款金额',
+  receipt2_ratio: '第二次回款占比',
   receipt_date: '回款日期',
   payment_notice_no: '收款通知单号',
   receipt_amount: '回款金额',
@@ -100,6 +144,9 @@ const FIELD_LABELS: Record<string, string> = {
 };
 
 const UPDATE_ENTITY_LABELS: Record<string, string> = {
+  batch_update_basic_order: '基本信息',
+  batch_update_purchases: '采购信息',
+  batch_update_sales: '销售信息',
   update_order: '订单',
   update_purchase_summary: '采购基础信息',
   update_purchase_contract: '采购合同',
@@ -233,12 +280,38 @@ export function formatOperationLogDetails(item: OperationLogSource) {
   const before = isSnapshot(audit?.before) ? audit.before : null;
   const after = isSnapshot(audit?.after) ? audit.after : null;
 
-  if (item.action_name.startsWith('update_') && before && after) {
+  if (
+    (item.action_name.startsWith('update_') || item.action_name.startsWith('batch_update_'))
+    && before
+    && after
+  ) {
     const changes = changedFields(before, after);
     if (changes.length) {
       return `${userName}修改了${snapshotIdentifier(item.action_name, before, after)}的${changes.join('；')}`;
     }
+    if (item.action_name === 'batch_update_basic_order') {
+      return `${userName}对${snapshotIdentifier(item.action_name, before, after)}执行了在线表格批量修改（历史日志未保存具体字段差异）`;
+    }
   }
 
   return formatSummary(userName, item.action_name, item.detail, audit);
+}
+
+export function formatOperationLogChangeGroups(
+  item: OperationLogSource,
+): OperationLogChangeGroup[] {
+  const audit = parseAuditDetail(item.detail);
+  if (!Array.isArray(audit?.batch_entries)) return [];
+
+  return audit.batch_entries.flatMap((entry, index) => {
+    const before = isSnapshot(entry?.before) ? entry.before : null;
+    const after = isSnapshot(entry?.after) ? entry.after : null;
+    if (!before || !after) return [];
+    const changes = changedFields(before, after);
+    if (!changes.length) return [];
+    return [{
+      title: `第 ${index + 1} 条 · ${snapshotIdentifier(item.action_name, before, after)}`,
+      changes,
+    }];
+  });
 }

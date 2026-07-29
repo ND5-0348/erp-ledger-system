@@ -32,11 +32,14 @@ import {
   UNAUTHORIZED_EVENT,
 } from './api';
 import { AuthUser, hasPermission, normalizeUser } from './lib/permissions';
-import { formatOperationLogDetails } from './lib/operationLogDisplay';
+import {
+  formatOperationLogChangeGroups,
+  formatOperationLogDetails,
+} from './lib/operationLogDisplay';
 
 import DashboardScreen from './components/DashboardScreen';
 import LedgerScreen from './components/LedgerScreen';
-import OrdersScreen, { OrderActionRequest } from './components/OrdersScreen';
+import OrdersScreen from './components/OrdersScreen';
 import PurchasesScreen from './components/PurchasesScreen';
 import SalesScreen from './components/SalesScreen';
 import SystemScreen, { CreateUserPayload } from './components/SystemScreen';
@@ -166,6 +169,7 @@ function mapLog(item: BackendOperationLog): OperationLog {
     user: item.user_name || 'system',
     module: item.module_name,
     details: formatOperationLogDetails(item),
+    changeGroups: formatOperationLogChangeGroups(item),
     status: item.status === 'success' ? '成功' : item.status === 'failed' ? '失败' : '进行中',
     time: dateTime(item.created_at),
   };
@@ -186,7 +190,6 @@ function mapAuthUser(item: BackendAuthUser): AuthUser {
 
 export default function App() {
   const [currentScreen, setCurrentScreen] = useState<ScreenType>('dashboard');
-  const [orderActionRequest, setOrderActionRequest] = useState<OrderActionRequest | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.matchMedia('(max-width: 767px)').matches);
   const [ledgers, setLedgers] = useState<ProjectLedger[]>([]);
   const [orders, setOrders] = useState<OrderRecord[]>([]);
@@ -403,11 +406,6 @@ export default function App() {
     if (window.matchMedia('(max-width: 767px)').matches) setSidebarCollapsed(true);
   };
 
-  const handleManageOrderFromLedger = (orderLineId: number, intent: 'edit' | 'delete') => {
-    setOrderActionRequest({ orderLineId, intent, nonce: Date.now() });
-    setCurrentScreen('orders');
-  };
-
   const screenNameMap: Record<ScreenType, string> = {
     dashboard: '首页仪表盘',
     ledger: '台账管理',
@@ -577,9 +575,6 @@ export default function App() {
               purchases={purchases}
               sales={sales}
               onAddLedger={handleAddLedger}
-              onManageOrder={handleManageOrderFromLedger}
-              canEditOrders={canEditOrders}
-              canDeleteOrders={canDeleteOrders}
               onDownloadTemplate={api.downloadOrderTemplate}
               onExportExcel={api.exportOrdersExcel}
             />
@@ -595,8 +590,6 @@ export default function App() {
               canEnterOrders={canEnterOrders}
               canEditOrders={canEditOrders}
               canDeleteOrders={canDeleteOrders}
-              actionRequest={orderActionRequest}
-              onActionRequestHandled={() => setOrderActionRequest(null)}
             />
           )}
           {currentScreen === 'purchases' && <PurchasesScreen purchases={purchases} orders={orders} canEnterPurchases={canEnterPurchases} canEditPurchases={canEditPurchases} canDeletePurchases={canDeletePurchases} onRefresh={loadBackendData} />}

@@ -1,11 +1,12 @@
 from dataclasses import replace
 
 import pytest
+from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app import config
 from app.auth import CurrentUser, ROLE_PERMISSIONS, can_access_department, has_permission, normalize_permissions
-from app.routers.auth import UserCreate
+from app.routers.auth import UserCreate, _validate_department_permissions
 
 
 def test_admin_can_use_every_permission():
@@ -94,3 +95,20 @@ def test_department_scope_limits_view_and_entry():
     assert can_access_department(user, "科贸部")
     assert not can_access_department(user, "物流部")
     assert not can_access_department(user, "科贸部", require_entry=True)
+
+
+def test_department_entry_requires_view_permission():
+    for department_scope in (["QA"], []):
+        with pytest.raises(HTTPException) as exc_info:
+            _validate_department_permissions(
+                department_scope,
+                department_can_view=False,
+                department_can_entry=True,
+            )
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "勾选录入权限时必须同时勾选查看权限，用于核对录入数据是否有误"
+
+    _validate_department_permissions(["QA"], department_can_view=True, department_can_entry=True)
+    _validate_department_permissions(["QA"], department_can_view=True, department_can_entry=False)
+    _validate_department_permissions([], department_can_view=False, department_can_entry=False)

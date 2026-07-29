@@ -58,14 +58,6 @@ interface OrdersScreenProps {
   canEnterOrders: boolean;
   canEditOrders: boolean;
   canDeleteOrders: boolean;
-  actionRequest?: OrderActionRequest | null;
-  onActionRequestHandled?: () => void;
-}
-
-export interface OrderActionRequest {
-  orderLineId: number;
-  intent: 'edit' | 'delete';
-  nonce: number;
 }
 
 function getPaginationItems(totalPages: number): Array<number | 'ellipsis'> {
@@ -81,7 +73,15 @@ function optionalFormNumber(value: string) {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpdateOrder, onDeleteOrder, onBatchSaved, canEnterOrders, canEditOrders, canDeleteOrders, actionRequest, onActionRequestHandled }: OrdersScreenProps) {
+const deleteVerificationAlphabet = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+
+function createDeleteVerificationCode() {
+  const randomValues = new Uint32Array(4);
+  window.crypto.getRandomValues(randomValues);
+  return Array.from(randomValues, (value) => deleteVerificationAlphabet[value % deleteVerificationAlphabet.length]).join('');
+}
+
+export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpdateOrder, onDeleteOrder, onBatchSaved, canEnterOrders, canEditOrders, canDeleteOrders }: OrdersScreenProps) {
   // Query Filters State
   const [projectId, setProjectId] = useState('');
   const [orderId, setOrderId] = useState('');
@@ -100,6 +100,11 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
   const [editingDeliveryId, setEditingDeliveryId] = useState<string | null>(null);
   const [batchEditorMode, setBatchEditorMode] = useState<'create' | 'update' | null>(null);
   const [selectedBatchOrderIds, setSelectedBatchOrderIds] = useState<Set<number>>(new Set());
+  const [deleteTarget, setDeleteTarget] = useState<OrderRecord | null>(null);
+  const [deleteVerificationCode, setDeleteVerificationCode] = useState('');
+  const [deleteVerificationInput, setDeleteVerificationInput] = useState('');
+  const [deleteVerificationError, setDeleteVerificationError] = useState('');
+  const [deletingOrder, setDeletingOrder] = useState(false);
 
   // Pagination State
   const [currentPage, setCurrentPage] = useState(1);
@@ -565,33 +570,48 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
     }
   };
 
-  const handleDeleteOrder = async (order: OrderRecord) => {
-    const confirmed = window.confirm(`确定删除订单 "${order.orderId}" 吗？`);
-    if (!confirmed) return;
-    try {
-      await onDeleteOrder(order);
-      if (selectedOrder === order) {
-        setSelectedOrder(null);
-      }
-    } catch (error) {
-      alert(error instanceof Error ? error.message : '订单删除失败');
-    }
+  const openDeleteVerification = (order: OrderRecord) => {
+    setDeleteTarget(order);
+    setDeleteVerificationCode(createDeleteVerificationCode());
+    setDeleteVerificationInput('');
+    setDeleteVerificationError('');
   };
 
-  React.useEffect(() => {
-    if (!actionRequest) return;
-    const target = orders.find((order) => order.orderLineId === actionRequest.orderLineId);
-    if (target) {
-      if (actionRequest.intent === 'edit') {
-        openEditOrder(target);
-      } else {
-        void handleDeleteOrder(target);
-      }
-    } else {
-      alert('未找到对应的订单明细，数据可能已经更新。');
+  const closeDeleteVerification = () => {
+    if (deletingOrder) return;
+    setDeleteTarget(null);
+    setDeleteVerificationInput('');
+    setDeleteVerificationError('');
+  };
+
+  const refreshDeleteVerificationCode = () => {
+    setDeleteVerificationCode(createDeleteVerificationCode());
+    setDeleteVerificationInput('');
+    setDeleteVerificationError('');
+  };
+
+  const handleDeleteOrder = async () => {
+    if (!deleteTarget) return;
+    if (deleteVerificationInput.trim().toUpperCase() !== deleteVerificationCode) {
+      setDeleteVerificationError('验证码不正确，请重新输入。');
+      return;
     }
-    onActionRequestHandled?.();
-  }, [actionRequest?.nonce]);
+    setDeletingOrder(true);
+    try {
+      await onDeleteOrder(deleteTarget);
+      if (selectedOrder?.orderLineId === deleteTarget.orderLineId) {
+        setSelectedOrder(null);
+      }
+      setDeleteTarget(null);
+      setDeleteVerificationInput('');
+      setDeleteVerificationError('');
+    } catch (error) {
+      alert(error instanceof Error ? error.message : '订单删除失败');
+      refreshDeleteVerificationCode();
+    } finally {
+      setDeletingOrder(false);
+    }
+  };
 
   const handleBatchImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -1063,7 +1083,7 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
                         </button>
                       )}
                       {canDeleteOrders && (
-                        <button type="button" onClick={() => handleDeleteOrder(item)} title="删除订单" aria-label={`删除订单 ${item.orderId}`} className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-rose-100 bg-rose-50 text-rose-600 hover:bg-rose-100 hover:border-rose-200 transition-colors">
+                        <button type="button" onClick={() => openDeleteVerification(item)} title="删除订单" aria-label={`删除订单 ${item.orderId}`} className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-rose-100 bg-rose-50 text-rose-600 hover:bg-rose-100 hover:border-rose-200 transition-colors">
                           <Trash2 className="w-4 h-4" />
                         </button>
                       )}
@@ -1146,6 +1166,112 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
           onClose={() => setBatchEditorMode(null)}
           onSaved={handleBatchSaved}
         />
+      )}
+
+      {deleteTarget && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              void handleDeleteOrder();
+            }}
+            className="w-full max-w-md overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-verification-title"
+          >
+            <div className="flex items-start justify-between border-b border-slate-200 bg-rose-50 px-6 py-4">
+              <div>
+                <h2 id="delete-verification-title" className="text-base font-bold text-slate-900">删除基本信息</h2>
+                <p className="mt-1 text-xs text-rose-600">删除后无法恢复，请完成验证码验证。</p>
+              </div>
+              <button
+                type="button"
+                onClick={closeDeleteVerification}
+                disabled={deletingOrder}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-white hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+                aria-label="关闭删除验证"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="space-y-4 px-6 py-5">
+              <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600">
+                <p>订单号：<span className="font-mono font-semibold text-slate-900">{deleteTarget.orderId}</span></p>
+                <p className="mt-1 truncate" title={deleteTarget.goodsName}>物资/服务：<span className="font-medium text-slate-900">{deleteTarget.goodsName}</span></p>
+              </div>
+
+              <div>
+                <label htmlFor="delete-verification-input" className="mb-2 block text-xs font-semibold text-slate-700">
+                  请输入下方验证码
+                </label>
+                <div className="flex items-stretch gap-2">
+                  <div
+                    className="flex min-w-0 flex-1 select-none items-center justify-center rounded-lg border border-slate-200 bg-slate-100 px-4 font-mono text-xl font-bold tracking-[0.35em] text-slate-800"
+                    aria-label={`验证码 ${deleteVerificationCode}`}
+                  >
+                    {deleteVerificationCode}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={refreshDeleteVerificationCode}
+                    disabled={deletingOrder}
+                    className="inline-flex items-center justify-center rounded-lg border border-slate-200 px-3 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    title="更换验证码"
+                  >
+                    <RotateCcw className="mr-1.5 h-4 w-4" />
+                    换一张
+                  </button>
+                </div>
+                <input
+                  id="delete-verification-input"
+                  type="text"
+                  value={deleteVerificationInput}
+                  onChange={(event) => {
+                    setDeleteVerificationInput(event.target.value.toUpperCase());
+                    setDeleteVerificationError('');
+                  }}
+                  maxLength={4}
+                  autoComplete="off"
+                  autoFocus
+                  disabled={deletingOrder}
+                  placeholder="输入 4 位验证码"
+                  className={`mt-3 w-full rounded-lg border px-3 py-2.5 text-sm uppercase outline-none transition-colors ${
+                    deleteVerificationError
+                      ? 'border-rose-300 bg-rose-50 focus:border-rose-500'
+                      : 'border-slate-200 focus:border-blue-500'
+                  }`}
+                  aria-invalid={Boolean(deleteVerificationError)}
+                  aria-describedby={deleteVerificationError ? 'delete-verification-error' : undefined}
+                />
+                {deleteVerificationError && (
+                  <p id="delete-verification-error" className="mt-2 text-xs text-rose-600">
+                    {deleteVerificationError}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 border-t border-slate-100 bg-slate-50 px-6 py-4">
+              <button
+                type="button"
+                onClick={closeDeleteVerification}
+                disabled={deletingOrder}
+                className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                type="submit"
+                disabled={deletingOrder || deleteVerificationInput.trim().length !== 4}
+                className="rounded-lg bg-rose-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {deletingOrder ? '正在删除...' : '验证并删除'}
+              </button>
+            </div>
+          </form>
+        </div>
       )}
 
       {selectedOrder && (

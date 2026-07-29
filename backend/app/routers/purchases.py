@@ -6,10 +6,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
 
-from ..audit import write_operation_log
+from ..audit import write_batch_operation_log, write_operation_log
 from ..auth import CurrentUser, apply_department_scope, can_access_department, get_current_user, require_permission
 from ..db import db
-from ..ledger_excel import editor_columns, editor_rows_for_order_lines
+from ..ledger_excel import (
+    editor_changed_keys,
+    editor_columns,
+    editor_payload_snapshot,
+    editor_rows_for_order_lines,
+)
 from ..serializers import clean_row, clean_rows
 from ..validation import BusinessDate, Money, PreciseNumber, Ratio
 
@@ -221,29 +226,40 @@ def update_purchases_batch(
     if len(set(order_line_ids)) != len(order_line_ids):
         raise HTTPException(status_code=422, detail="批量修改中不能重复提交同一条订单明细")
 
-    prepared: list[tuple[int, dict[str, object], dict[str, object]]] = []
+    prepared: list[tuple[int, dict[str, object], dict[str, object], dict[str, object]]] = []
     with db() as conn:
         for item in payload.items:
             order_line = _ensure_order_line_in_conn(conn, item.order_line_id, user, lock=True)
             data = _payload_dict(item)
             data.pop("order_line_id", None)
-            prepared.append((item.order_line_id, order_line, data))
+            before = editor_payload_snapshot(conn, user, item.order_line_id, "purchase")
+            if editor_changed_keys("purchase", before, data):
+                prepared.append((item.order_line_id, order_line, data, before))
 
-        for order_line_id, order_line, data in prepared:
+        for order_line_id, order_line, data, _ in prepared:
             _validate_purchase_batch_item(conn, order_line_id, order_line, data)
 
-        for order_line_id, _, data in prepared:
+        audit_entries: list[tuple[dict[str, object], dict[str, object]]] = []
+        for order_line_id, _, data, before in prepared:
             _save_purchase_batch_item(conn, order_line_id, data)
-
-        write_operation_log(
-            conn,
-            user,
-            "采购管理",
-            "batch_update_purchases",
-            f"在线表格批量修改 {len(prepared)} 条采购信息",
-            after={"order_line_ids": order_line_ids, "editable_columns": "X-BO（自动汇总列只读）"},
-        )
-    return {"updated": len(prepared), "order_line_ids": order_line_ids}
+            audit_entries.append(
+                (before, editor_payload_snapshot(conn, user, order_line_id, "purchase"))
+            )
+        if audit_entries:
+            changed_cell_count = sum(
+                len(editor_changed_keys("purchase", before, after))
+                for before, after in audit_entries
+            )
+            write_batch_operation_log(
+                conn,
+                user,
+                "采购管理",
+                "batch_update_purchases",
+                f"在线表格批量修改 {len(audit_entries)} 条采购信息，共 {changed_cell_count} 个单元格",
+                entries=audit_entries,
+            )
+    updated_ids = [order_line_id for order_line_id, _, _, _ in prepared]
+    return {"updated": len(prepared), "order_line_ids": updated_ids}
 
 
 @router.get("/{order_line_id}")

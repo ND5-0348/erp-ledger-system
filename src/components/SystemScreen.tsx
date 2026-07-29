@@ -16,7 +16,8 @@ import {
   Plus,
   X,
   Pencil,
-  Trash2
+  Trash2,
+  ChevronDown,
 } from 'lucide-react';
 import { BackendUserRecord } from '../api';
 import { Permission, ROLE_LABELS, RoleCode, SYSTEM_PERMISSION_OPTIONS } from '../lib/permissions';
@@ -52,6 +53,7 @@ interface SystemScreenProps {
 
 const PERMISSION_OPTIONS = SYSTEM_PERMISSION_OPTIONS;
 const PERMISSION_LABELS = Object.fromEntries(PERMISSION_OPTIONS.map((item) => [item.value, item.label])) as Record<Permission, string>;
+const ENTRY_REQUIRES_VIEW_MESSAGE = '已勾选录入权限，请同时勾选“查看”权限，用于核对录入数据是否有误。';
 
 function deriveRoleCode(permissions: Permission[]): RoleCode {
   if (permissions.includes('system_admin')) return 'admin';
@@ -88,6 +90,7 @@ export default function SystemScreen({
 }: SystemScreenProps) {
   // Pagination State for Logs
   const [logPage, setLogPage] = useState(1);
+  const [expandedLogIds, setExpandedLogIds] = useState<Set<string>>(() => new Set());
   const itemsPerPage = 5;
 
   // Pagination State for Backups
@@ -166,6 +169,10 @@ export default function SystemScreen({
     setUserMessage('');
     if (userForm.password !== userForm.confirm_password) {
       setUserMessage('两次输入的密码不一致');
+      return;
+    }
+    if (userForm.department_can_entry && !userForm.department_can_view) {
+      setUserMessage(ENTRY_REQUIRES_VIEW_MESSAGE);
       return;
     }
     if (userForm.department_scope.length > 0 && !userForm.department_can_view && !userForm.department_can_entry) {
@@ -277,6 +284,10 @@ export default function SystemScreen({
     event.preventDefault();
     if (!editingUser) return;
     setUserMessage('');
+    if (editForm.department_can_entry && !editForm.department_can_view) {
+      setUserMessage(ENTRY_REQUIRES_VIEW_MESSAGE);
+      return;
+    }
     if (editForm.department_scope.length > 0 && !editForm.department_can_view && !editForm.department_can_entry) {
       setUserMessage('选择部门后至少勾选查看或录入权限');
       return;
@@ -383,15 +394,44 @@ export default function SystemScreen({
                   <span className="text-xs font-semibold text-slate-700">部门权限</span>
                   <div className="flex items-center gap-3 text-xs text-slate-600">
                     <label className="inline-flex items-center gap-1.5">
-                      <input type="checkbox" checked={userForm.department_can_view} onChange={(e) => setUserForm({ ...userForm, department_can_view: e.target.checked })} />
+                      <input
+                        type="checkbox"
+                        checked={userForm.department_can_view}
+                        onChange={(event) => {
+                          const departmentCanView = event.target.checked;
+                          setUserForm({ ...userForm, department_can_view: departmentCanView });
+                          setUserMessage(
+                            !departmentCanView && userForm.department_can_entry
+                              ? ENTRY_REQUIRES_VIEW_MESSAGE
+                              : '',
+                          );
+                        }}
+                      />
                       <span>查看</span>
                     </label>
                     <label className="inline-flex items-center gap-1.5">
-                      <input type="checkbox" checked={userForm.department_can_entry} onChange={(e) => setUserForm({ ...userForm, department_can_entry: e.target.checked })} />
+                      <input
+                        type="checkbox"
+                        checked={userForm.department_can_entry}
+                        onChange={(event) => {
+                          const departmentCanEntry = event.target.checked;
+                          setUserForm({ ...userForm, department_can_entry: departmentCanEntry });
+                          setUserMessage(
+                            departmentCanEntry && !userForm.department_can_view
+                              ? ENTRY_REQUIRES_VIEW_MESSAGE
+                              : '',
+                          );
+                        }}
+                      />
                       <span>录入</span>
                     </label>
                   </div>
                 </div>
+                {userForm.department_can_entry && !userForm.department_can_view && (
+                  <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800">
+                    {ENTRY_REQUIRES_VIEW_MESSAGE}
+                  </div>
+                )}
                 <div className="flex gap-2">
                   <input
                     list="department-options"
@@ -523,15 +563,44 @@ export default function SystemScreen({
                   <span className="text-xs font-semibold text-slate-700">部门权限</span>
                   <div className="flex items-center gap-3 text-xs text-slate-600">
                     <label className="inline-flex items-center gap-1.5">
-                      <input type="checkbox" checked={editForm.department_can_view} onChange={(e) => setEditForm({ ...editForm, department_can_view: e.target.checked })} />
+                      <input
+                        type="checkbox"
+                        checked={editForm.department_can_view}
+                        onChange={(event) => {
+                          const departmentCanView = event.target.checked;
+                          setEditForm({ ...editForm, department_can_view: departmentCanView });
+                          setUserMessage(
+                            !departmentCanView && editForm.department_can_entry
+                              ? ENTRY_REQUIRES_VIEW_MESSAGE
+                              : '',
+                          );
+                        }}
+                      />
                       <span>查看</span>
                     </label>
                     <label className="inline-flex items-center gap-1.5">
-                      <input type="checkbox" checked={editForm.department_can_entry} onChange={(e) => setEditForm({ ...editForm, department_can_entry: e.target.checked })} />
+                      <input
+                        type="checkbox"
+                        checked={editForm.department_can_entry}
+                        onChange={(event) => {
+                          const departmentCanEntry = event.target.checked;
+                          setEditForm({ ...editForm, department_can_entry: departmentCanEntry });
+                          setUserMessage(
+                            departmentCanEntry && !editForm.department_can_view
+                              ? ENTRY_REQUIRES_VIEW_MESSAGE
+                              : '',
+                          );
+                        }}
+                      />
                       <span>录入</span>
                     </label>
                   </div>
                 </div>
+                {editForm.department_can_entry && !editForm.department_can_view && (
+                  <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800">
+                    {ENTRY_REQUIRES_VIEW_MESSAGE}
+                  </div>
+                )}
                 <div className="flex gap-2">
                   <input
                     list="edit-department-options"
@@ -597,34 +666,89 @@ export default function SystemScreen({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {paginatedLogs.map((log) => (
-                <tr key={log.id} className="hover:bg-slate-50/80 transition-colors">
-                  <td className="px-6 py-3.5 text-xs font-medium text-slate-700 flex items-center gap-2">
-                    <span className="w-5 h-5 rounded-full bg-slate-100 text-slate-600 flex items-center justify-center text-[10px] font-bold">
-                      {log.user.charAt(0)}
-                    </span>
-                    <span>{log.user}</span>
-                  </td>
-                  <td className="px-6 py-3.5 text-xs">
-                    <span className="inline-block px-2 py-0.5 rounded text-[10px] font-semibold bg-blue-50 text-blue-700 border border-blue-100">
-                      {log.module}
-                    </span>
-                  </td>
-                  <td className="px-6 py-3.5 text-xs text-slate-600 whitespace-normal break-words leading-5" title={log.details}>{log.details}</td>
-                  <td className="px-6 py-3.5 text-xs text-center">
-                    <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                      log.status === '成功'
-                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-100'
-                        : log.status === '失败'
-                          ? 'bg-red-50 text-red-700 border border-red-100'
-                          : 'bg-amber-50 text-amber-700 border border-amber-100'
-                    }`}>
-                      {log.status}
-                    </span>
-                  </td>
-                  <td className="px-6 py-3.5 text-xs text-center text-slate-400 font-mono">{log.time}</td>
-                </tr>
-              ))}
+              {paginatedLogs.map((log) => {
+                const changeGroups = log.changeGroups || [];
+                const expandable = changeGroups.length > 0;
+                const expanded = expandable && expandedLogIds.has(log.id);
+                const changedCellCount = changeGroups.reduce(
+                  (total, group) => total + group.changes.length,
+                  0,
+                );
+                return (
+                  <React.Fragment key={log.id}>
+                    <tr className="hover:bg-slate-50/80 transition-colors">
+                      <td className="px-6 py-3.5 text-xs font-medium text-slate-700 flex items-center gap-2">
+                        <span className="w-5 h-5 rounded-full bg-slate-100 text-slate-600 flex items-center justify-center text-[10px] font-bold">
+                          {log.user.charAt(0)}
+                        </span>
+                        <span>{log.user}</span>
+                      </td>
+                      <td className="px-6 py-3.5 text-xs">
+                        <span className="inline-block px-2 py-0.5 rounded text-[10px] font-semibold bg-blue-50 text-blue-700 border border-blue-100">
+                          {log.module}
+                        </span>
+                      </td>
+                      <td className="px-6 py-3.5 text-xs text-slate-600 whitespace-normal break-words leading-5">
+                        {expandable ? (
+                          <button
+                            type="button"
+                            onClick={() => setExpandedLogIds((current) => {
+                              const next = new Set(current);
+                              if (next.has(log.id)) next.delete(log.id);
+                              else next.add(log.id);
+                              return next;
+                            })}
+                            className="flex w-full items-start gap-2 rounded-md text-left hover:text-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
+                            aria-expanded={expanded}
+                            aria-controls={`log-batch-details-${log.id}`}
+                          >
+                            <ChevronDown className={`mt-0.5 h-4 w-4 shrink-0 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+                            <span className="flex-1">{log.details}</span>
+                            <span className="shrink-0 rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-semibold text-blue-700">
+                              {changedCellCount} 个单元格
+                            </span>
+                          </button>
+                        ) : (
+                          <span title={log.details}>{log.details}</span>
+                        )}
+                      </td>
+                      <td className="px-6 py-3.5 text-xs text-center">
+                        <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                          log.status === '成功'
+                            ? 'bg-emerald-50 text-emerald-700 border border-emerald-100'
+                            : log.status === '失败'
+                              ? 'bg-red-50 text-red-700 border border-red-100'
+                              : 'bg-amber-50 text-amber-700 border border-amber-100'
+                        }`}>
+                          {log.status}
+                        </span>
+                      </td>
+                      <td className="px-6 py-3.5 text-xs text-center text-slate-400 font-mono">{log.time}</td>
+                    </tr>
+                    {expanded && (
+                      <tr id={`log-batch-details-${log.id}`} className="bg-blue-50/35">
+                        <td colSpan={5} className="px-6 py-4">
+                          <div className="space-y-3 border-l-2 border-blue-200 pl-4">
+                            {changeGroups.map((group) => (
+                              <section key={group.title} className="rounded-lg border border-blue-100 bg-white p-3">
+                                <h4 className="text-xs font-semibold text-slate-700">{group.title}</h4>
+                                <ol className="mt-2 space-y-1.5">
+                                  {group.changes.map((change, changeIndex) => (
+                                    <li key={`${change}-${changeIndex}`} className="flex gap-2 text-xs text-slate-600">
+                                      <span className="font-mono text-blue-500">{changeIndex + 1}.</span>
+                                      <span className="break-words">{change}</span>
+                                    </li>
+                                  ))}
+                                </ol>
+                              </section>
+                            ))}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>

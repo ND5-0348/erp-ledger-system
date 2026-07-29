@@ -6,10 +6,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
 
-from ..audit import write_operation_log
+from ..audit import write_batch_operation_log, write_operation_log
 from ..auth import CurrentUser, apply_department_scope, can_access_department, get_current_user, require_permission
 from ..db import db
-from ..ledger_excel import editor_columns, editor_rows_for_order_lines
+from ..ledger_excel import (
+    editor_changed_keys,
+    editor_columns,
+    editor_payload_snapshot,
+    editor_rows_for_order_lines,
+)
 from ..serializers import clean_row, clean_rows
 from ..validation import BusinessDate, Money, Ratio
 
@@ -194,7 +199,7 @@ def update_sales_batch(
     if len(set(order_line_ids)) != len(order_line_ids):
         raise HTTPException(status_code=422, detail="批量修改中不能重复提交同一条订单明细")
 
-    prepared: list[tuple[int, dict[str, object], dict[str, object]]] = []
+    prepared: list[tuple[int, dict[str, object], dict[str, object], dict[str, object]]] = []
     close_status_by_order: dict[int, str | None] = {}
     with db() as conn:
         for item in payload.items:
@@ -203,6 +208,10 @@ def update_sales_batch(
             data.pop("order_line_id", None)
             sales_order_id = int(order_line["sales_order_id"])
             close_status = _normalized_optional_text(data.get("close_status"))
+            data["close_status"] = close_status
+            before = editor_payload_snapshot(conn, user, item.order_line_id, "sales")
+            if not editor_changed_keys("sales", before, data):
+                continue
             if (
                 sales_order_id in close_status_by_order
                 and close_status_by_order[sales_order_id] != close_status
@@ -212,13 +221,12 @@ def update_sales_batch(
                     detail=f"同一销售订单的 CK 列“是否关闭”必须保持一致（订单ID {sales_order_id}）",
                 )
             close_status_by_order[sales_order_id] = close_status
-            data["close_status"] = close_status
-            prepared.append((item.order_line_id, order_line, data))
+            prepared.append((item.order_line_id, order_line, data, before))
 
-        for order_line_id, order_line, data in prepared:
+        for order_line_id, order_line, data, _ in prepared:
             _validate_sales_batch_item(conn, order_line_id, order_line, data)
 
-        for order_line_id, _, data in prepared:
+        for order_line_id, _, data, _ in prepared:
             _save_sales_batch_item(conn, order_line_id, data)
 
         for sales_order_id, close_status in close_status_by_order.items():
@@ -227,15 +235,25 @@ def update_sales_batch(
                 {"sales_order_id": sales_order_id, "close_status": close_status},
             )
 
-        write_operation_log(
-            conn,
-            user,
-            "销售管理",
-            "batch_update_sales",
-            f"在线表格批量修改 {len(prepared)} 条销售信息",
-            after={"order_line_ids": order_line_ids, "editable_columns": "BP-CM（CI-CJ自动汇总列只读）"},
-        )
-    return {"updated": len(prepared), "order_line_ids": order_line_ids}
+        audit_entries = [
+            (before, editor_payload_snapshot(conn, user, order_line_id, "sales"))
+            for order_line_id, _, _, before in prepared
+        ]
+        if audit_entries:
+            changed_cell_count = sum(
+                len(editor_changed_keys("sales", before, after))
+                for before, after in audit_entries
+            )
+            write_batch_operation_log(
+                conn,
+                user,
+                "销售管理",
+                "batch_update_sales",
+                f"在线表格批量修改 {len(audit_entries)} 条销售信息，共 {changed_cell_count} 个单元格",
+                entries=audit_entries,
+            )
+    updated_ids = [order_line_id for order_line_id, _, _, _ in prepared]
+    return {"updated": len(prepared), "order_line_ids": updated_ids}
 
 
 @router.get("/by-order")

@@ -9,8 +9,12 @@ import {
 import {
   buildPurchaseInformationPayload,
   buildSalesInformationPayload,
-  pasteGrid,
+  copyEditorSelection,
+  editableEditorRowsMatch,
+  pasteGridToEditorSelection,
 } from '../lib/batchOrderEditor';
+import { useBatchEditorHistory } from '../hooks/useBatchEditorHistory';
+import { useEditorColumnWidths } from '../hooks/useEditorColumnWidths';
 import {
   EDITOR_ACTIVE_CELL_VISUAL_CLASS,
   EDITOR_SELECTED_CELL_VISUAL_CLASS,
@@ -53,6 +57,7 @@ export default function BatchPurchaseEditor({
 }: BatchPurchaseEditorProps) {
   const [columns, setColumns] = useState<BackendBatchEditorColumn[]>([]);
   const [rows, setRows] = useState<BackendBatchEditorRow[]>([]);
+  const [initialRows, setInitialRows] = useState<BackendBatchEditorRow[]>([]);
   const [fixedColumnLetters, setFixedColumnLetters] = useState(DEFAULT_FIXED_COLUMNS);
   const [showFixedColumns, setShowFixedColumns] = useState(true);
   const [detailRowIndex, setDetailRowIndex] = useState<number | null>(null);
@@ -61,6 +66,7 @@ export default function BatchPurchaseEditor({
   const [error, setError] = useState('');
   const selectedKey = selectedOrderLineIds.join(',');
   const {
+    selectedCells,
     handleCellPointerDown,
     handleCellPointerEnter,
     isActiveCell,
@@ -68,6 +74,17 @@ export default function BatchPurchaseEditor({
     isSelectingCells,
     selectedCellCount,
   } = useEditorCellSelection(`${mode}:${selectedKey}:${showFixedColumns ? 'fixed' : 'hidden'}`);
+  const {
+    finishCellEdit,
+    resetHistory,
+    undo,
+    updateRows,
+  } = useBatchEditorHistory(rows, setRows);
+  const {
+    resetWidth,
+    startResize,
+    widthFor,
+  } = useEditorColumnWidths(`${mode}:${selectedKey}`);
 
   useEffect(() => {
     let cancelled = false;
@@ -79,8 +96,11 @@ export default function BatchPurchaseEditor({
           ? await api.batchSalesEditorRows(selectedOrderLineIds)
           : await api.batchPurchaseEditorRows(selectedOrderLineIds);
         if (cancelled) return;
+        const loadedRows = (result.rows || []).map((row) => ({ ...row, values: [...row.values] }));
+        resetHistory();
         setColumns(result.columns);
-        setRows(result.rows || []);
+        setRows(loadedRows);
+        setInitialRows(loadedRows.map((row) => ({ ...row, values: [...row.values] })));
         setFixedColumnLetters(result.fixed_columns?.length ? result.fixed_columns : DEFAULT_FIXED_COLUMNS);
       } catch (loadError) {
         if (!cancelled) {
@@ -96,7 +116,7 @@ export default function BatchPurchaseEditor({
     return () => {
       cancelled = true;
     };
-  }, [mode, selectedKey]);
+  }, [mode, resetHistory, selectedKey]);
 
   const indexedColumns = useMemo(
     () => columns.map((column, index) => ({ column, index })),
@@ -116,6 +136,14 @@ export default function BatchPurchaseEditor({
     )),
     [indexedColumns, mode],
   );
+  const selectionColumns = useMemo(
+    () => showFixedColumns ? [...fixedColumns, ...financialColumns] : financialColumns,
+    [financialColumns, fixedColumns, showFixedColumns],
+  );
+  const visibleColumnIndexes = useMemo(
+    () => selectionColumns.map(({ index }) => index),
+    [selectionColumns],
+  );
   const basicDetailColumns = useMemo(
     () => indexedColumns.filter(({ index }) => index <= 22),
     [indexedColumns],
@@ -124,66 +152,111 @@ export default function BatchPurchaseEditor({
     let offset = ROW_NUMBER_WIDTH + DETAIL_BUTTON_WIDTH;
     return new Map(fixedColumns.map(({ column }) => {
       const currentOffset = offset;
-      offset += FIXED_COLUMN_WIDTHS[column.excel_column] || 120;
+      offset += widthFor(
+        column.excel_column,
+        FIXED_COLUMN_WIDTHS[column.excel_column] || 120,
+      );
       return [column.excel_column, currentOffset];
     }));
-  }, [fixedColumns]);
+  }, [fixedColumns, widthFor]);
   const tableWidth = useMemo(
     () => ROW_NUMBER_WIDTH
       + DETAIL_BUTTON_WIDTH
       + (showFixedColumns
         ? fixedColumns.reduce(
-            (total, { column }) => total + (FIXED_COLUMN_WIDTHS[column.excel_column] || 120),
+            (total, { column }) => total + widthFor(
+              column.excel_column,
+              FIXED_COLUMN_WIDTHS[column.excel_column] || 120,
+            ),
             0,
           )
         : 0)
       + financialColumns.reduce(
-        (total, { column }) => total + getColumnWidth(column),
+        (total, { column }) => total + widthFor(
+          column.excel_column,
+          getColumnWidth(column),
+        ),
         0,
       ),
-    [financialColumns, fixedColumns, showFixedColumns],
+    [financialColumns, fixedColumns, showFixedColumns, widthFor],
   );
+  const initialRowsById = useMemo(
+    () => new Map(initialRows.map((row) => [row.order_line_id, row])),
+    [initialRows],
+  );
+  const dirtyRows = useMemo(
+    () => rows.filter((row) => {
+      const initial = initialRowsById.get(row.order_line_id);
+      return !initial || !editableEditorRowsMatch(columns, initial.values, row.values);
+    }),
+    [columns, initialRowsById, rows],
+  );
+  const dirtyRowCount = dirtyRows.length;
 
   const changeCell = (rowIndex: number, columnIndex: number, value: BatchEditorValue) => {
     if (!columns[columnIndex]?.editable) return;
-    setRows((current) => current.map((row, index) => (
-      index === rowIndex
-        ? {
-            ...row,
-            values: row.values.map((cell, cellIndex) => (
-              cellIndex === columnIndex ? value : cell
-            )),
-          }
-        : row
-    )));
+    updateRows((current) => {
+      if (current[rowIndex]?.values[columnIndex] === value) return current;
+      return current.map((row, index) => (
+        index === rowIndex
+          ? {
+              ...row,
+              values: row.values.map((cell, cellIndex) => (
+                cellIndex === columnIndex ? value : cell
+              )),
+            }
+          : row
+      ));
+    }, `${rowIndex}:${columnIndex}`);
   };
 
-  const handlePaste = (
-    event: React.ClipboardEvent<HTMLInputElement>,
-    rowIndex: number,
-    columnIndex: number,
-  ) => {
-    const text = event.clipboardData.getData('text/plain');
-    if (!text.includes('\t') && !text.includes('\n')) return;
+  const handleCopy = (event: React.ClipboardEvent<HTMLTableElement>) => {
+    const text = copyEditorSelection(
+      rows.map((row) => row.values),
+      selectedCells,
+      visibleColumnIndexes,
+    );
+    if (!text && selectedCellCount === 0) return;
     event.preventDefault();
-    setRows((current) => {
-      const pasted = pasteGrid(
-        current.map((row) => row.values),
+    event.clipboardData.setData('text/plain', text);
+  };
+
+  const handlePaste = (event: React.ClipboardEvent<HTMLTableElement>) => {
+    if (!selectedCellCount) return;
+    const text = event.clipboardData.getData('text/plain');
+    event.preventDefault();
+    finishCellEdit();
+    updateRows((current) => {
+      const currentValues = current.map((row) => row.values);
+      const pasted = pasteGridToEditorSelection(
+        currentValues,
         text,
-        rowIndex,
-        columnIndex,
+        selectedCells,
+        visibleColumnIndexes,
         columns,
         false,
       );
+      if (pasted === currentValues) return current;
       return current.map((row, index) => ({ ...row, values: pasted[index] }));
     });
+  };
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLTableElement>) => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z' && !event.shiftKey) {
+      event.preventDefault();
+      undo();
+    }
   };
 
   const submit = async () => {
     setError('');
     setSaving(true);
     try {
-      const items = rows.map((row, rowIndex) => {
+      if (!dirtyRows.length) {
+        throw new Error('没有需要保存的更改');
+      }
+      const items = dirtyRows.map((row) => {
+        const rowIndex = rows.findIndex((candidate) => candidate.order_line_id === row.order_line_id);
         try {
           return {
             order_line_id: row.order_line_id,
@@ -235,12 +308,12 @@ export default function BatchPurchaseEditor({
             </button>
             <button
               type="button"
-              disabled={saving || loading || rows.length === 0}
+              disabled={saving || loading || rows.length === 0 || dirtyRowCount === 0}
               onClick={() => void submit()}
               className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
             >
               {saving ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-              {saving ? '保存中' : '保存到数据库'}
+              {saving ? '保存中' : dirtyRowCount > 0 ? `保存 ${dirtyRowCount} 条更改` : '没有更改'}
             </button>
             <button
               type="button"
@@ -271,10 +344,14 @@ export default function BatchPurchaseEditor({
             </div>
           ) : (
             <table
-              className={`border-separate border-spacing-0 text-left text-xs ${
+              className={`border-separate border-spacing-0 text-left text-xs outline-none ${
                 isSelectingCells ? 'select-none' : ''
               }`}
               style={{ tableLayout: 'fixed', width: tableWidth, minWidth: tableWidth }}
+              tabIndex={0}
+              onCopy={handleCopy}
+              onPaste={handlePaste}
+              onKeyDown={handleKeyDown}
               onDragStart={(event) => event.preventDefault()}
             >
               <colgroup>
@@ -283,13 +360,18 @@ export default function BatchPurchaseEditor({
                 {showFixedColumns && fixedColumns.map(({ column }) => (
                   <col
                     key={`fixed-col-${column.excel_column}`}
-                    style={{ width: FIXED_COLUMN_WIDTHS[column.excel_column] || 120 }}
+                    style={{
+                      width: widthFor(
+                        column.excel_column,
+                        FIXED_COLUMN_WIDTHS[column.excel_column] || 120,
+                      ),
+                    }}
                   />
                 ))}
                 {financialColumns.map(({ column }) => (
                   <col
                     key={`financial-col-${column.excel_column}`}
-                    style={{ width: getColumnWidth(column) }}
+                    style={{ width: widthFor(column.excel_column, getColumnWidth(column)) }}
                   />
                 ))}
               </colgroup>
@@ -317,28 +399,64 @@ export default function BatchPurchaseEditor({
                       }`}
                       style={{
                         left: fixedOffsets.get(column.excel_column),
-                        minWidth: FIXED_COLUMN_WIDTHS[column.excel_column] || 120,
-                        width: FIXED_COLUMN_WIDTHS[column.excel_column] || 120,
+                        minWidth: widthFor(
+                          column.excel_column,
+                          FIXED_COLUMN_WIDTHS[column.excel_column] || 120,
+                        ),
+                        width: widthFor(
+                          column.excel_column,
+                          FIXED_COLUMN_WIDTHS[column.excel_column] || 120,
+                        ),
                       }}
-                      title="订单关联字段（固定、只读）"
+                      title="订单关联字段（固定、只读）；拖动右侧边缘调整列宽"
                     >
                       <span className="block font-mono text-[10px]">{column.excel_column}</span>
                       <span className="mt-0.5 block truncate">{column.label}</span>
+                      <span
+                        className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize touch-none hover:bg-blue-400/50"
+                        role="separator"
+                        aria-orientation="vertical"
+                        aria-label={`调整${column.label}列宽`}
+                        onPointerDown={(event) => startResize(
+                          event,
+                          column.excel_column,
+                          widthFor(
+                            column.excel_column,
+                            FIXED_COLUMN_WIDTHS[column.excel_column] || 120,
+                          ),
+                        )}
+                        onDoubleClick={() => resetWidth(column.excel_column)}
+                      />
                     </th>
                   ))}
                   {financialColumns.map(({ column }) => (
                     <th
                       key={column.excel_column}
-                      className={`border-b border-r border-slate-300 px-2 py-2 text-center font-semibold ${
+                      className={`relative border-b border-r border-slate-300 px-2 py-2 text-center font-semibold ${
                         column.editable ? 'bg-blue-50 text-blue-800' : 'bg-slate-200 text-slate-500'
                       }`}
-                      style={{ minWidth: getColumnWidth(column), width: getColumnWidth(column) }}
+                      style={{
+                        minWidth: widthFor(column.excel_column, getColumnWidth(column)),
+                        width: widthFor(column.excel_column, getColumnWidth(column)),
+                      }}
                       title={column.editable
-                        ? `可编辑${mode === 'sales' ? '销售' : '采购'}字段`
-                        : '数据库自动计算，只读'}
+                        ? `可编辑${mode === 'sales' ? '销售' : '采购'}字段；拖动右侧边缘调整列宽`
+                        : '数据库自动计算，只读；拖动右侧边缘调整列宽'}
                     >
                       <span className="block font-mono text-[10px]">{column.excel_column}</span>
                       <span className="mt-0.5 block whitespace-nowrap">{column.label}</span>
+                      <span
+                        className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize touch-none hover:bg-blue-400/50"
+                        role="separator"
+                        aria-orientation="vertical"
+                        aria-label={`调整${column.label}列宽`}
+                        onPointerDown={(event) => startResize(
+                          event,
+                          column.excel_column,
+                          widthFor(column.excel_column, getColumnWidth(column)),
+                        )}
+                        onDoubleClick={() => resetWidth(column.excel_column)}
+                      />
                     </th>
                   ))}
                 </tr>
@@ -386,8 +504,14 @@ export default function BatchPurchaseEditor({
                           }`}
                           style={{
                             left: fixedOffsets.get(column.excel_column),
-                            minWidth: FIXED_COLUMN_WIDTHS[column.excel_column] || 120,
-                            width: FIXED_COLUMN_WIDTHS[column.excel_column] || 120,
+                            minWidth: widthFor(
+                              column.excel_column,
+                              FIXED_COLUMN_WIDTHS[column.excel_column] || 120,
+                            ),
+                            width: widthFor(
+                              column.excel_column,
+                              FIXED_COLUMN_WIDTHS[column.excel_column] || 120,
+                            ),
                           }}
                           aria-selected={isSelected}
                           data-editor-cell={`${rowIndex}:${fixedColumnIndex}`}
@@ -417,7 +541,10 @@ export default function BatchPurchaseEditor({
                                 }`
                               : column.editable ? 'bg-white' : 'bg-slate-50'
                           }`}
-                          style={{ minWidth: getColumnWidth(column), width: getColumnWidth(column) }}
+                          style={{
+                            minWidth: widthFor(column.excel_column, getColumnWidth(column)),
+                            width: widthFor(column.excel_column, getColumnWidth(column)),
+                          }}
                           aria-selected={isSelected}
                           data-editor-cell={`${rowIndex}:${selectionColumnIndex}`}
                           onPointerDown={(event) => handleCellPointerDown(event, rowIndex, selectionColumnIndex)}
@@ -428,7 +555,7 @@ export default function BatchPurchaseEditor({
                               type={column.value_type === 'date' ? 'date' : 'text'}
                               value={String(value)}
                               onChange={(event) => changeCell(rowIndex, columnIndex, event.target.value)}
-                              onPaste={(event) => handlePaste(event, rowIndex, columnIndex)}
+                              onBlur={finishCellEdit}
                               className={`h-10 w-full min-w-0 px-2 font-mono text-xs text-slate-800 outline-none focus:ring-2 focus:ring-inset focus:ring-blue-500 ${
                                 isSelected ? 'bg-blue-100' : 'bg-transparent focus:bg-blue-50'
                               }`}
@@ -454,9 +581,9 @@ export default function BatchPurchaseEditor({
 
         <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 bg-slate-50 px-4 py-2 text-[11px] text-slate-500">
           <span>
-            固定列：B–G、M–O；单击或拖拽选择单元格，Ctrl/⌘ 可多选，Shift 可扩展选区。
+            固定列：B–G、M–O；Ctrl+C/V 复制粘贴，Ctrl+Z 撤回；拖动表头右侧边缘调整列宽。
           </span>
-          <span>已选 {selectedCellCount} 个单元格；{selectedOrderLineIds.length} 条订单明细</span>
+          <span>已选 {selectedCellCount} 个单元格；{dirtyRowCount} 条已更改 / {selectedOrderLineIds.length} 条订单明细</span>
         </footer>
 
         {detailRow && (

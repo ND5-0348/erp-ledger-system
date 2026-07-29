@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import text
 
-from ..audit import write_operation_log
+from ..audit import write_batch_operation_log, write_operation_log
 from ..auth import CurrentUser, apply_department_scope, can_access_department, get_current_user, require_permission
 from ..backup import create_backup
 from ..db import db
@@ -20,7 +20,9 @@ from ..ledger_excel import (
     EXPORT_FILE_NAME,
     TEMPLATE_FILE_NAME,
     content_disposition,
+    editor_changed_keys,
     editor_columns,
+    editor_payload_snapshot,
     editor_rows_for_order_lines,
     export_ledger_bytes,
     template_bytes,
@@ -461,27 +463,45 @@ def update_basic_order_lines_batch(
     if len(set(order_line_ids)) != len(order_line_ids):
         raise HTTPException(status_code=422, detail="批量修改中不能重复提交同一条订单明细")
 
-    prepared: list[tuple[dict, OrderUpdate, dict[str, object]]] = []
+    prepared: list[tuple[dict, OrderUpdate, dict[str, object], dict[str, object]]] = []
     try:
         with db() as conn:
             for item in payload.items:
                 ids = _ensure_order_line_in_conn(conn, item.order_line_id, user, require_entry=True, lock=True)
                 order_payload = _basic_order_update(item)
                 _validate_create_payload(order_payload, user)
-                prepared.append((ids, order_payload, _calculated_payload_data(order_payload)))
+                data = _calculated_payload_data(order_payload)
+                current = editor_payload_snapshot(conn, user, item.order_line_id, "basic")
+                if editor_changed_keys("basic", current, data):
+                    prepared.append((ids, order_payload, data, current))
             _validate_batch_update_targets(conn, prepared)
-            for ids, order_payload, data in prepared:
+            audit_entries: list[tuple[dict[str, object], dict[str, object]]] = []
+            for ids, _, data, before in prepared:
                 _update_basic_order_line_in_conn(
                     conn,
                     int(ids["order_line_id"]),
                     ids,
-                    order_payload,
                     data,
+                )
+                after = editor_payload_snapshot(conn, user, int(ids["order_line_id"]), "basic")
+                audit_entries.append((before, after))
+            if audit_entries:
+                changed_cell_count = sum(
+                    len(editor_changed_keys("basic", before, after))
+                    for before, after in audit_entries
+                )
+                write_batch_operation_log(
+                    conn,
                     user,
+                    "订单管理",
+                    "batch_update_basic_order",
+                    f"在线表格批量修改 {len(audit_entries)} 条基本信息，共 {changed_cell_count} 个单元格",
+                    entries=audit_entries,
                 )
     except IntegrityError as exc:
         raise HTTPException(status_code=409, detail="批量修改后的项目编号或订单号与现有数据冲突") from exc
-    return {"updated": len(prepared), "order_line_ids": order_line_ids}
+    updated_ids = [int(ids["order_line_id"]) for ids, _, _, _ in prepared]
+    return {"updated": len(prepared), "order_line_ids": updated_ids}
 
 
 @router.put("/{order_line_id}")
@@ -730,14 +750,14 @@ def _validate_create_payload(payload: OrderUpdate, user: CurrentUser) -> None:
 
 def _validate_batch_update_targets(
     conn,
-    prepared: list[tuple[dict, OrderUpdate, dict[str, object]]],
+    prepared: list[tuple[dict, OrderUpdate, dict[str, object], dict[str, object]]],
 ) -> None:
     project_targets: dict[int, tuple[object, ...]] = {}
     order_targets: dict[int, tuple[object, ...]] = {}
     line_targets: dict[int, tuple[str, str]] = {}
     order_ids: set[int] = set()
 
-    for ids, _, data in prepared:
+    for ids, _, data, _ in prepared:
         project_id = int(ids["project_id"])
         sales_order_id = int(ids["sales_order_id"])
         order_line_id = int(ids["order_line_id"])
@@ -833,14 +853,8 @@ def _update_basic_order_line_in_conn(
     conn,
     order_line_id: int,
     ids: dict,
-    payload: OrderUpdate,
     data: dict[str, object],
-    user: CurrentUser,
 ) -> None:
-    before = conn.execute(
-        text("SELECT * FROM v_order_line_finance WHERE order_line_id = :order_line_id"),
-        {"order_line_id": order_line_id},
-    ).mappings().first()
     conn.execute(
         text(
             """
@@ -920,21 +934,6 @@ def _update_basic_order_line_in_conn(
             "order_value": data["order_value"],
         },
     )
-    after = conn.execute(
-        text("SELECT * FROM v_order_line_finance WHERE order_line_id = :order_line_id"),
-        {"order_line_id": order_line_id},
-    ).mappings().first()
-    write_operation_log(
-        conn,
-        user,
-        "订单管理",
-        "batch_update_basic_order",
-        f"在线表格批量修改订单明细 {order_line_id} 的 A-W 基本信息",
-        before=before,
-        after=after,
-    )
-
-
 def _create_order_line(conn, payload: OrderUpdate) -> int:
     data = _calculated_payload_data(payload)
     project = conn.execute(

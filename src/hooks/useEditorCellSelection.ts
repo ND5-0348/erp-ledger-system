@@ -150,12 +150,14 @@ export function useEditorCellSelection(resetKey: string) {
   );
 
   return {
+    activeCellKey,
     clearCellSelection,
     handleCellPointerDown,
     handleCellPointerEnter,
     isActiveCell,
     isCellSelected,
     isSelectingCells,
+    selectedCells,
     selectedCellCount: selectedCells.size,
   };
 }
