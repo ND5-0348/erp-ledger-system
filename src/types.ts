@@ -105,6 +105,10 @@ export interface OperationLog {
   details: string; // 详情
   status: '成功' | '失败' | '进行中'; // 状态
   time: string; // 操作时间 (YYYY-MM-DD HH:mm:ss)
+  changeGroups?: Array<{
+    title: string;
+    changes: string[];
+  }>;
 }
 
 export interface BackupInfo {

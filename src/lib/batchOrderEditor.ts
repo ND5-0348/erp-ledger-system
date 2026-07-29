@@ -13,6 +13,23 @@ export function editorCellKey({ rowIndex, columnIndex }: EditorCellPosition): st
   return `${rowIndex}:${columnIndex}`;
 }
 
+export function parseEditorCellKey(key: string): EditorCellPosition | null {
+  const [rowIndex, columnIndex] = key.split(':').map(Number);
+  if (!Number.isInteger(rowIndex) || !Number.isInteger(columnIndex)) return null;
+  return { rowIndex, columnIndex };
+}
+
+export function editorSelectionPositions(
+  selection: ReadonlySet<string>,
+): EditorCellPosition[] {
+  return [...selection]
+    .map(parseEditorCellKey)
+    .filter((position): position is EditorCellPosition => Boolean(position))
+    .sort((left, right) => (
+      left.rowIndex - right.rowIndex || left.columnIndex - right.columnIndex
+    ));
+}
+
 export function selectEditorCellRectangle(
   currentSelection: ReadonlySet<string>,
   start: EditorCellPosition,
@@ -67,6 +84,127 @@ export function pasteGrid(
   return next;
 }
 
+export function copyEditorSelection(
+  rows: BatchEditorValue[][],
+  selection: ReadonlySet<string>,
+  visibleColumnIndexes: number[],
+): string {
+  const positions = editorSelectionPositions(selection);
+  if (!positions.length) return '';
+
+  const firstRow = Math.min(...positions.map(({ rowIndex }) => rowIndex));
+  const lastRow = Math.max(...positions.map(({ rowIndex }) => rowIndex));
+  const firstColumn = Math.min(...positions.map(({ columnIndex }) => columnIndex));
+  const lastColumn = Math.max(...positions.map(({ columnIndex }) => columnIndex));
+
+  const lines: string[] = [];
+  for (let rowIndex = firstRow; rowIndex <= lastRow; rowIndex += 1) {
+    const cells: string[] = [];
+    for (let columnIndex = firstColumn; columnIndex <= lastColumn; columnIndex += 1) {
+      const selected = selection.has(editorCellKey({ rowIndex, columnIndex }));
+      const dataColumnIndex = visibleColumnIndexes[columnIndex];
+      const value = selected && dataColumnIndex !== undefined
+        ? rows[rowIndex]?.[dataColumnIndex]
+        : '';
+      cells.push(sanitizeClipboardCell(value));
+    }
+    lines.push(cells.join('\t'));
+  }
+  return lines.join('\n');
+}
+
+export function pasteGridToEditorSelection(
+  rows: BatchEditorValue[][],
+  text: string,
+  selection: ReadonlySet<string>,
+  visibleColumnIndexes: number[],
+  columns: BackendBatchEditorColumn[],
+  allowAddRows: boolean,
+): BatchEditorValue[][] {
+  const positions = editorSelectionPositions(selection);
+  const clipboardRows = parseClipboardGrid(text);
+  if (!positions.length || !clipboardRows.length) return rows;
+
+  if (positions.length === 1) {
+    const [{ rowIndex, columnIndex }] = positions;
+    const dataColumnIndex = visibleColumnIndexes[columnIndex];
+    if (dataColumnIndex === undefined) return rows;
+    return pasteVisibleGrid(
+      rows,
+      clipboardRows,
+      rowIndex,
+      columnIndex,
+      visibleColumnIndexes,
+      columns,
+      allowAddRows,
+    );
+  }
+
+  const firstRow = Math.min(...positions.map(({ rowIndex }) => rowIndex));
+  const firstColumn = Math.min(...positions.map(({ columnIndex }) => columnIndex));
+  const next = rows.map((row) => [...row]);
+  let changed = false;
+
+  positions.forEach(({ rowIndex, columnIndex }) => {
+    const dataColumnIndex = visibleColumnIndexes[columnIndex];
+    const column = dataColumnIndex === undefined ? undefined : columns[dataColumnIndex];
+    if (!column?.editable || !next[rowIndex]) return;
+
+    const sourceRow = clipboardRows[(rowIndex - firstRow) % clipboardRows.length];
+    const sourceValue = sourceRow[(columnIndex - firstColumn) % sourceRow.length] ?? '';
+    if (next[rowIndex][dataColumnIndex] === sourceValue) return;
+    next[rowIndex][dataColumnIndex] = sourceValue;
+    changed = true;
+  });
+
+  return changed ? next : rows;
+}
+
+function parseClipboardGrid(text: string): string[][] {
+  return text
+    .replace(/\r/g, '')
+    .split('\n')
+    .filter((row, index, all) => row || index < all.length - 1)
+    .map((row) => row.split('\t'));
+}
+
+function pasteVisibleGrid(
+  rows: BatchEditorValue[][],
+  clipboardRows: string[][],
+  startRow: number,
+  startVisibleColumn: number,
+  visibleColumnIndexes: number[],
+  columns: BackendBatchEditorColumn[],
+  allowAddRows: boolean,
+): BatchEditorValue[][] {
+  const next = rows.map((row) => [...row]);
+  let changed = false;
+
+  clipboardRows.forEach((clipboardRow, rowOffset) => {
+    const targetRow = startRow + rowOffset;
+    while (allowAddRows && targetRow >= next.length) {
+      next.push(createBlankEditorRow(columns));
+      changed = true;
+    }
+    if (!next[targetRow]) return;
+
+    clipboardRow.forEach((value, columnOffset) => {
+      const visibleColumnIndex = startVisibleColumn + columnOffset;
+      const dataColumnIndex = visibleColumnIndexes[visibleColumnIndex];
+      const column = dataColumnIndex === undefined ? undefined : columns[dataColumnIndex];
+      if (!column?.editable || next[targetRow][dataColumnIndex] === value) return;
+      next[targetRow][dataColumnIndex] = value;
+      changed = true;
+    });
+  });
+
+  return changed ? next : rows;
+}
+
+function sanitizeClipboardCell(value: BatchEditorValue): string {
+  return String(value ?? '').replace(/\t/g, ' ').replace(/\r?\n/g, ' ');
+}
+
 export function buildBasicInformationPayload(
   columns: BackendBatchEditorColumn[],
   values: BatchEditorValue[],
@@ -86,6 +224,41 @@ export function buildSalesInformationPayload(
   values: BatchEditorValue[],
 ): Record<string, string | number | null> {
   return buildEditablePayload(columns, values);
+}
+
+export function editableEditorRowsMatch(
+  columns: BackendBatchEditorColumn[],
+  beforeValues: BatchEditorValue[],
+  afterValues: BatchEditorValue[],
+): boolean {
+  return columns.every((column, index) => {
+    if (!column.editable || !column.key) return true;
+    return comparableEditorValue(column, beforeValues[index]) === comparableEditorValue(column, afterValues[index]);
+  });
+}
+
+function comparableEditorValue(
+  column: BackendBatchEditorColumn,
+  value: BatchEditorValue,
+): string | number | null {
+  try {
+    const normalized = normalizeEditorValue(column, value);
+    if (
+      normalized !== null
+      && (column.value_type === 'number' || column.value_type === 'percentage')
+    ) {
+      const match = String(normalized).match(/^([+-]?)(\d+)(?:\.(\d*))?$/);
+      if (match) {
+        const integer = match[2].replace(/^0+(?=\d)/, '');
+        const fraction = (match[3] || '').replace(/0+$/, '');
+        const sign = match[1] === '-' && (integer !== '0' || fraction) ? '-' : '';
+        return `${sign}${integer}${fraction ? `.${fraction}` : ''}`;
+      }
+    }
+    return normalized;
+  } catch {
+    return value === null || value === undefined ? null : String(value).trim();
+  }
 }
 
 function buildEditablePayload(

@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 
-import { formatOperationLogDetails } from '../src/lib/operationLogDisplay';
+import {
+  formatOperationLogChangeGroups,
+  formatOperationLogDetails,
+} from '../src/lib/operationLogDisplay';
 
 const updateDetail = JSON.stringify({
   summary: '修改订单明细 487',
@@ -85,3 +88,152 @@ assert.equal(
 );
 
 assert.equal(updateDetail.includes('"before"'), true);
+
+const batchPurchaseDetail = formatOperationLogDetails({
+  user_name: '系统管理员（账号：admin）',
+  action_name: 'batch_update_purchases',
+  detail: JSON.stringify({
+    summary: '在线表格修改订单明细 487 的采购信息',
+    before: {
+      order_line_id: 487,
+      project_code: 'AH24000082-01',
+      order_no: 'SO-2026-001',
+      goods_name: '测试设备',
+      supplier_name: '采购商甲',
+      purchase_contract_no: 'HT-001',
+    },
+    after: {
+      order_line_id: 487,
+      project_code: 'AH24000082-01',
+      order_no: 'SO-2026-001',
+      goods_name: '测试设备',
+      supplier_name: '采购商乙',
+      purchase_contract_no: 'HT-002',
+    },
+  }),
+});
+
+assert.match(batchPurchaseDetail, /采购厂商：采购商甲 → 采购商乙/);
+assert.match(batchPurchaseDetail, /采购合同号：HT-001 → HT-002/);
+
+const batchBasicDetail = formatOperationLogDetails({
+  user_name: '系统管理员（账号：admin）',
+  action_name: 'batch_update_basic_order',
+  detail: JSON.stringify({
+    summary: '在线表格批量修改订单明细 490 的 A-W 基本信息',
+    before: {
+      order_line_id: 490,
+      project_code: 'AH24000082-01',
+      order_no: 'XSDD2026021000233',
+      goods_name: '测试设备',
+      user_name: '电信',
+      amount_type: '全额',
+      statistical_category: '非电商贸易',
+      net_unit_price: '100.000000',
+    },
+    after: {
+      order_line_id: 490,
+      project_code: 'AH24000082-01',
+      order_no: 'XSDD2026021000233',
+      goods_name: '测试设备',
+      user_name: '电信测试',
+      amount_type: '全额',
+      statistical_category: '非电商贸易',
+      net_unit_price: '100.000000',
+    },
+  }),
+});
+
+assert.equal(
+  batchBasicDetail,
+  '系统管理员（账号：admin）修改了项目“AH24000082-01”、订单“XSDD2026021000233”、货物/服务“测试设备”中的基本信息“490”的用户：电信 → 电信测试',
+);
+
+assert.equal(
+  formatOperationLogDetails({
+    user_name: '系统管理员（账号：admin）',
+    action_name: 'batch_update_basic_order',
+    detail: JSON.stringify({
+      summary: '在线表格批量修改订单明细 490 的 A-W 基本信息',
+      before: {
+        order_line_id: 490,
+        project_code: 'AH24000082-01',
+        order_no: 'XSDD2026021000233',
+        goods_name: '测试设备',
+        user_name: '电信测试',
+      },
+      after: {
+        order_line_id: 490,
+        project_code: 'AH24000082-01',
+        order_no: 'XSDD2026021000233',
+        goods_name: '测试设备',
+        user_name: '电信测试',
+      },
+    }),
+  }),
+  '系统管理员（账号：admin）对项目“AH24000082-01”、订单“XSDD2026021000233”、货物/服务“测试设备”中的基本信息“490”执行了在线表格批量修改（历史日志未保存具体字段差异）',
+);
+
+const mergedBatchLog = {
+  user_name: '系统管理员（账号：admin）',
+  action_name: 'batch_update_basic_order',
+  detail: JSON.stringify({
+    summary: '在线表格批量修改 2 条基本信息，共 3 个单元格',
+    before: null,
+    after: null,
+    batch_entries: [
+      {
+        before: {
+          order_line_id: 489,
+          project_code: 'AH24000082-01',
+          order_no: 'XSDD2026021000233',
+          goods_name: '枪机',
+          user_name: '电信',
+        },
+        after: {
+          order_line_id: 489,
+          project_code: 'AH24000082-01',
+          order_no: 'XSDD2026021000233',
+          goods_name: '枪机',
+          user_name: '电信测试',
+        },
+      },
+      {
+        before: {
+          order_line_id: 490,
+          project_code: 'AH24000082-01',
+          order_no: 'XSDD2026021000233',
+          goods_name: '球机',
+          statistical_category: '非电商贸易',
+          user_name: '电信',
+        },
+        after: {
+          order_line_id: 490,
+          project_code: 'AH24000082-01',
+          order_no: 'XSDD2026021000233',
+          goods_name: '球机',
+          statistical_category: '商品销售',
+          user_name: '电信测试',
+        },
+      },
+    ],
+  }),
+};
+
+assert.equal(
+  formatOperationLogDetails(mergedBatchLog),
+  '系统管理员（账号：admin）在线表格批量修改 2 条基本信息，共 3 个单元格',
+);
+assert.deepEqual(
+  formatOperationLogChangeGroups(mergedBatchLog),
+  [
+    {
+      title: '第 1 条 · 项目“AH24000082-01”、订单“XSDD2026021000233”、货物/服务“枪机”中的基本信息“489”',
+      changes: ['用户：电信 → 电信测试'],
+    },
+    {
+      title: '第 2 条 · 项目“AH24000082-01”、订单“XSDD2026021000233”、货物/服务“球机”中的基本信息“490”',
+      changes: ['统计类别：非电商贸易 → 商品销售', '用户：电信 → 电信测试'],
+    },
+  ],
+);

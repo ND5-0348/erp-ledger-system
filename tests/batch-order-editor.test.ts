@@ -5,10 +5,13 @@ import {
   buildBasicInformationPayload,
   buildPurchaseInformationPayload,
   buildSalesInformationPayload,
+  copyEditorSelection,
   createBlankEditorRow,
+  editableEditorRowsMatch,
   editorCellKey,
   normalizeEditorValue,
   pasteGrid,
+  pasteGridToEditorSelection,
   selectEditorCellRectangle,
 } from '../src/lib/batchOrderEditor';
 
@@ -111,6 +114,15 @@ test('sales payload follows BP-CM keys and excludes CI-CJ automatic columns', ()
   );
 });
 
+test('dirty-row comparison ignores formatting-only differences and detects editable changes', () => {
+  const before = ['全额', 'AH-001', '2026-07-26', 1130, null];
+  const formattingOnly = ['全额', 'AH-001', '2026/7/26', '1,130.00', '只读变化'];
+  const changed = ['全额', 'AH-002', '2026-07-26', '1130', null];
+
+  assert.equal(editableEditorRowsMatch(columns, before, formattingOnly), true);
+  assert.equal(editableEditorRowsMatch(columns, before, changed), false);
+});
+
 test('cell selection creates Excel-style rectangles and supports additive ranges', () => {
   const firstRange = selectEditorCellRectangle(
     new Set(),
@@ -137,4 +149,63 @@ test('cell selection creates Excel-style rectangles and supports additive ranges
   );
   assert.equal(removed.size, 6);
   assert.equal(removed.has(editorCellKey({ rowIndex: 0, columnIndex: 2 })), false);
+});
+
+test('copy serializes a rectangular selection in visible-column order', () => {
+  const selection = selectEditorCellRectangle(
+    new Set(),
+    { rowIndex: 0, columnIndex: 0 },
+    { rowIndex: 1, columnIndex: 1 },
+  );
+  const text = copyEditorSelection(
+    [
+      ['全额', 'P-001', null, null, null],
+      ['净额', 'P-002', null, null, null],
+    ],
+    selection,
+    [1, 0],
+  );
+
+  assert.equal(text, 'P-001\t全额\nP-002\t净额');
+});
+
+test('pasting one copied cell fills every editable cell in a multi-selection', () => {
+  const selection = new Set([
+    editorCellKey({ rowIndex: 0, columnIndex: 1 }),
+    editorCellKey({ rowIndex: 1, columnIndex: 1 }),
+    editorCellKey({ rowIndex: 1, columnIndex: 2 }),
+  ]);
+  const rows = [
+    ['全额', 'P-001', '2026-07-26', '10', null],
+    ['全额', 'P-002', '2026-07-27', '20', null],
+  ];
+  const pasted = pasteGridToEditorSelection(
+    rows,
+    '批量值',
+    selection,
+    [0, 1, 4],
+    columns,
+    false,
+  );
+
+  assert.deepEqual(pasted, [
+    ['全额', '批量值', '2026-07-26', '10', null],
+    ['全额', '批量值', '2026-07-27', '20', null],
+  ]);
+});
+
+test('pasting a grid into one selected cell follows visible columns and can add rows', () => {
+  const rows = [createBlankEditorRow(columns)];
+  const pasted = pasteGridToEditorSelection(
+    rows,
+    'P-001\t2026-07-26\nP-002\t2026-07-27',
+    new Set([editorCellKey({ rowIndex: 0, columnIndex: 1 })]),
+    [0, 1, 2, 3, 4],
+    columns,
+    true,
+  );
+
+  assert.equal(pasted.length, 2);
+  assert.deepEqual(pasted[0], ['全额', 'P-001', '2026-07-26', null, null]);
+  assert.deepEqual(pasted[1], ['全额', 'P-002', '2026-07-27', null, null]);
 });

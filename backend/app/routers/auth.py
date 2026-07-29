@@ -90,6 +90,20 @@ class UserPermissionUpdate(BaseModel):
     department_can_entry: bool = False
 
 
+def _validate_department_permissions(
+    department_scope: list[str],
+    department_can_view: bool,
+    department_can_entry: bool,
+) -> None:
+    if department_can_entry and not department_can_view:
+        raise HTTPException(
+            status_code=400,
+            detail="勾选录入权限时必须同时勾选查看权限，用于核对录入数据是否有误",
+        )
+    if department_scope and not (department_can_view or department_can_entry):
+        raise HTTPException(status_code=400, detail="选择部门后至少需要勾选查看或录入权限")
+
+
 @router.post("/login")
 def login(payload: LoginRequest) -> dict:
     with db() as conn:
@@ -166,8 +180,11 @@ def create_user(payload: UserCreate, admin: CurrentUser = Depends(require_permis
         raise HTTPException(status_code=400, detail="无效的角色")
     permissions = normalize_permissions(payload.role_code, payload.permissions)
     department_scope = [department.strip() for department in payload.department_scope if department.strip()]
-    if department_scope and not (payload.department_can_view or payload.department_can_entry):
-        raise HTTPException(status_code=400, detail="选择部门后至少需要勾选查看或录入权限")
+    _validate_department_permissions(
+        department_scope,
+        payload.department_can_view,
+        payload.department_can_entry,
+    )
     with db() as conn:
         exists = conn.execute(
             text("SELECT 1 FROM erp_user WHERE username = :username"),
@@ -228,8 +245,11 @@ def update_user_permissions(
         raise HTTPException(status_code=400, detail="无效的角色")
     permissions = normalize_permissions(payload.role_code, payload.permissions)
     department_scope = [department.strip() for department in payload.department_scope if department.strip()]
-    if department_scope and not (payload.department_can_view or payload.department_can_entry):
-        raise HTTPException(status_code=400, detail="选择部门后至少需要勾选查看或录入权限")
+    _validate_department_permissions(
+        department_scope,
+        payload.department_can_view,
+        payload.department_can_entry,
+    )
     with db() as conn:
         target = conn.execute(
             text(

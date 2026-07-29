@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import copy
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -289,8 +290,62 @@ def editor_rows_for_order_lines(
     return result
 
 
+def editor_payload_snapshot(
+    conn: Connection,
+    user: CurrentUser,
+    order_line_id: int,
+    scope: str,
+) -> dict[str, Any]:
+    rows = editor_rows_for_order_lines(conn, user, [order_line_id])
+    if not rows:
+        raise LookupError(f"Order line {order_line_id} is unavailable")
+    values = rows[0]["values"]
+    snapshot: dict[str, Any] = {"order_line_id": order_line_id}
+    for index, column in enumerate(editor_columns(scope)):
+        if column["editable"] and column["key"]:
+            snapshot[str(column["key"])] = values[index]
+    return snapshot
+
+
+def editor_changed_keys(
+    scope: str,
+    current: dict[str, Any],
+    submitted: dict[str, object],
+) -> list[str]:
+    changed: list[str] = []
+    for column in editor_columns(scope):
+        key = column["key"]
+        if not column["editable"] or not key:
+            continue
+        if _editor_comparison_value(column["value_type"], current.get(key)) != _editor_comparison_value(
+            column["value_type"],
+            submitted.get(key),
+        ):
+            changed.append(str(key))
+    return changed
+
+
+def _editor_comparison_value(value_type: str, value: Any) -> Any:
+    if value is None or str(value).strip() == "":
+        return None
+    if value_type in {"number", "percentage"}:
+        try:
+            return Decimal(str(value).replace(",", "").strip())
+        except InvalidOperation:
+            return str(value).strip()
+    if value_type == "date":
+        if isinstance(value, (date, datetime)):
+            return value.isoformat()[:10]
+        return str(value).strip().replace("/", "-")
+    return str(value).strip()
+
+
 DATE_COLUMNS = {6, 30, 44, 47, 50, 54, 55, 58, 68, 74, 79, 83}
 PERCENT_COLUMNS = {19, 25, 67, 82, 86}
+TEXT_COLUMNS_WITHIN_NUMERIC_RANGES = {
+    24,  # X: supplier_name
+    84,  # CF: receipt2_notice_no
+}
 NUMBER_COLUMNS = (
     set(range(18, 39))
     | {42, 43, 46, 49, 52, 53, 57, 60, 61, 62}
@@ -299,7 +354,7 @@ NUMBER_COLUMNS = (
     | set(range(76, 79))
     | set(range(81, 89))
     | {90, 91}
-)
+) - DATE_COLUMNS - PERCENT_COLUMNS - TEXT_COLUMNS_WITHIN_NUMERIC_RANGES
 
 
 def _copy_header_alignment(header: Any, target: Any) -> None:
