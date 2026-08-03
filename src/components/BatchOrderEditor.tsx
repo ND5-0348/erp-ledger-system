@@ -12,12 +12,13 @@ import {
   copyEditorSelection,
   createBlankEditorRow,
   editableEditorRowsMatch,
+  editorSelectionOutlineBoxShadow,
+  editorTargetHasTextSelection,
   pasteGridToEditorSelection,
 } from '../lib/batchOrderEditor';
 import { useBatchEditorHistory } from '../hooks/useBatchEditorHistory';
 import { useEditorColumnWidths } from '../hooks/useEditorColumnWidths';
 import {
-  EDITOR_ACTIVE_CELL_VISUAL_CLASS,
   EDITOR_SELECTED_CELL_VISUAL_CLASS,
   useEditorCellSelection,
 } from '../hooks/useEditorCellSelection';
@@ -54,7 +55,6 @@ export default function BatchOrderEditor({
     selectedCells,
     handleCellPointerDown,
     handleCellPointerEnter,
-    isActiveCell,
     isCellSelected,
     isSelectingCells,
     selectedCellCount,
@@ -154,6 +154,7 @@ export default function BatchOrderEditor({
   };
 
   const handleCopy = (event: React.ClipboardEvent<HTMLTableElement>) => {
+    if (editorTargetHasTextSelection(event.target)) return;
     const text = copyEditorSelection(
       rows.map((row) => row.values),
       selectedCells,
@@ -391,20 +392,22 @@ export default function BatchOrderEditor({
                     {visibleColumns.map(({ column, index: columnIndex }, visibleColumnIndex) => {
                       const value = row.values[columnIndex] ?? '';
                       const isSelected = isCellSelected(rowIndex, visibleColumnIndex);
-                      const isActive = isActiveCell(rowIndex, visibleColumnIndex);
                       return (
                         <td
                           key={`${row.order_line_id}-${column.excel_column}`}
                           className={`border-b border-r border-slate-200 p-0 ${
                             isSelected
-                              ? `relative z-10 ${EDITOR_SELECTED_CELL_VISUAL_CLASS} ${
-                                  isActive ? EDITOR_ACTIVE_CELL_VISUAL_CLASS : ''
-                                }`
+                              ? `relative z-10 ${EDITOR_SELECTED_CELL_VISUAL_CLASS}`
                               : column.editable ? 'bg-white' : 'bg-slate-50'
                           }`}
                           style={{
                             minWidth: widthFor(column.excel_column, getDefaultColumnWidth(column)),
                             width: widthFor(column.excel_column, getDefaultColumnWidth(column)),
+                            boxShadow: editorSelectionOutlineBoxShadow(
+                              selectedCells,
+                              rowIndex,
+                              visibleColumnIndex,
+                            ),
                           }}
                           aria-selected={isSelected}
                           data-editor-cell={`${rowIndex}:${visibleColumnIndex}`}
@@ -417,8 +420,10 @@ export default function BatchOrderEditor({
                               value={String(value)}
                               onChange={(event) => changeCell(rowIndex, columnIndex, event.target.value)}
                               onBlur={finishCellEdit}
-                              className={`h-10 w-full min-w-0 px-2 font-mono text-xs text-slate-800 outline-none focus:ring-2 focus:ring-inset focus:ring-blue-500 ${
-                                isSelected ? 'bg-blue-100' : 'bg-transparent focus:bg-blue-50'
+                              className={`h-10 w-full min-w-0 px-2 font-mono text-xs text-slate-800 outline-none ${
+                                isSelected
+                                  ? 'bg-blue-100'
+                                  : 'bg-transparent focus:bg-blue-50 focus:ring-2 focus:ring-inset focus:ring-blue-500'
                               }`}
                               aria-label={`${rowIndex + 1}行 ${column.excel_column}列 ${column.label}`}
                             />

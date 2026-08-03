@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
@@ -90,6 +90,10 @@ class UserPermissionUpdate(BaseModel):
     department_can_entry: bool = False
 
 
+class UserPasswordReset(BaseModel):
+    password: str = Field(min_length=6, max_length=128)
+
+
 def _validate_department_permissions(
     department_scope: list[str],
     department_can_view: bool,
@@ -156,22 +160,31 @@ def roles(user: CurrentUser = Depends(get_current_user)) -> dict:
     }
 
 
-@router.get("/users")
-def list_users(_: CurrentUser = Depends(require_permission("system_admin"))) -> dict:
+def _list_users(status: str) -> dict:
+    is_active = 1 if status == "active" else 0
     with db() as conn:
         rows = conn.execute(
             text(
                 """
                 SELECT id, username, display_name, role_code, permissions_json,
                        department_scope_json, department_can_view, department_can_entry,
-                       is_active, last_login_at, created_at
+                       is_active, last_login_at, created_at, updated_at
                 FROM erp_user
-                WHERE is_active = 1
+                WHERE is_active = :is_active
                 ORDER BY id
                 """
-            )
+            ),
+            {"is_active": is_active},
         ).mappings().all()
     return {"items": clean_rows(rows)}
+
+
+@router.get("/users")
+def list_users(
+    status: str = Query(default="active", pattern="^(active|inactive)$"),
+    _: CurrentUser = Depends(require_permission("system_admin")),
+) -> dict:
+    return _list_users(status)
 
 
 @router.post("/users")
@@ -232,7 +245,7 @@ def create_user(payload: UserCreate, admin: CurrentUser = Depends(require_permis
             f"创建账号“{payload.username}”，角色为“{ROLE_LABELS.get(payload.role_code, payload.role_code)}”",
             after=_user_audit_snapshot(created, permissions=permissions, department_scope=department_scope),
         )
-    return list_users(admin)
+    return _list_users("active")
 
 
 @router.put("/users/{user_id}")
@@ -326,11 +339,47 @@ def update_user_permissions(
             before=before,
             after=after,
         )
-    return list_users(admin)
+    return _list_users("active")
+
+
+@router.post("/users/{user_id}/reset-password")
+def reset_user_password(
+    user_id: int,
+    payload: UserPasswordReset,
+    admin: CurrentUser = Depends(require_permission("system_admin")),
+) -> dict:
+    with db() as conn:
+        target = conn.execute(
+            text("SELECT id, username, is_active FROM erp_user WHERE id = :user_id"),
+            {"user_id": user_id},
+        ).mappings().first()
+        if target is None:
+            raise HTTPException(status_code=404, detail="账号不存在")
+        if not target["is_active"]:
+            raise HTTPException(status_code=400, detail="账号已停用，请先恢复账号再重置密码")
+        conn.execute(
+            text(
+                """
+                UPDATE erp_user
+                SET password_hash = :password_hash,
+                    updated_at = NOW()
+                WHERE id = :user_id
+                """
+            ),
+            {"user_id": user_id, "password_hash": hash_password(payload.password)},
+        )
+        write_operation_log(
+            conn,
+            admin,
+            "账号管理",
+            "reset_user_password",
+            f"重置账号“{target['username']}”的密码",
+        )
+    return {"message": "密码重置成功"}
 
 
 @router.delete("/users/{user_id}")
-def delete_user(user_id: int, admin: CurrentUser = Depends(require_permission("system_admin"))) -> dict:
+def deactivate_user(user_id: int, admin: CurrentUser = Depends(require_permission("system_admin"))) -> dict:
     if user_id == admin.id:
         raise HTTPException(status_code=400, detail="不能删除当前登录账号")
     with db() as conn:
@@ -388,4 +437,93 @@ def delete_user(user_id: int, admin: CurrentUser = Depends(require_permission("s
             before=before,
             after={**before, "account_status": "停用"},
         )
-    return list_users(admin)
+    return _list_users("active")
+
+
+@router.post("/users/{user_id}/restore")
+def restore_user(
+    user_id: int,
+    admin: CurrentUser = Depends(require_permission("system_admin")),
+) -> dict:
+    with db() as conn:
+        target = conn.execute(
+            text(
+                """
+                SELECT id, username, display_name, role_code, permissions_json, department_scope_json,
+                       department_can_view, department_can_entry, is_active
+                FROM erp_user
+                WHERE id = :user_id
+                """
+            ),
+            {"user_id": user_id},
+        ).mappings().first()
+        if target is None:
+            raise HTTPException(status_code=404, detail="账号不存在")
+        if target["is_active"]:
+            raise HTTPException(status_code=400, detail="账号当前已启用，无需恢复")
+        before = _user_audit_snapshot(target)
+        conn.execute(
+            text("UPDATE erp_user SET is_active = 1, updated_at = NOW() WHERE id = :user_id"),
+            {"user_id": user_id},
+        )
+        write_operation_log(
+            conn,
+            admin,
+            "账号管理",
+            "restore_user",
+            f"恢复停用账号“{target['username']}”",
+            before={**before, "account_status": "停用"},
+            after={**before, "account_status": "启用"},
+        )
+    return _list_users("active")
+
+
+@router.delete("/users/{user_id}/permanent")
+def permanently_delete_user(
+    user_id: int,
+    admin: CurrentUser = Depends(require_permission("system_admin")),
+) -> dict:
+    if user_id == admin.id:
+        raise HTTPException(status_code=400, detail="不能删除当前登录账号")
+    with db() as conn:
+        target = conn.execute(
+            text(
+                """
+                SELECT id, username, display_name, role_code, permissions_json, department_scope_json,
+                       department_can_view, department_can_entry, is_active
+                FROM erp_user
+                WHERE id = :user_id
+                """
+            ),
+            {"user_id": user_id},
+        ).mappings().first()
+        if target is None:
+            raise HTTPException(status_code=404, detail="账号不存在")
+        if target["is_active"]:
+            raise HTTPException(status_code=400, detail="请先停用账号，再执行永久删除")
+        before = _user_audit_snapshot(target)
+        conn.execute(
+            text("UPDATE operation_log SET user_id = NULL WHERE user_id = :user_id"),
+            {"user_id": user_id},
+        )
+        conn.execute(
+            text("UPDATE backup_record SET created_by = NULL WHERE created_by = :user_id"),
+            {"user_id": user_id},
+        )
+        conn.execute(
+            text("UPDATE import_batch SET uploaded_by = NULL WHERE uploaded_by = :user_id"),
+            {"user_id": user_id},
+        )
+        conn.execute(
+            text("DELETE FROM erp_user WHERE id = :user_id"),
+            {"user_id": user_id},
+        )
+        write_operation_log(
+            conn,
+            admin,
+            "账号管理",
+            "permanently_delete_user",
+            f"永久删除停用账号“{target['username']}”",
+            before=before,
+        )
+    return _list_users("inactive")

@@ -22,6 +22,7 @@ import OrderOperatingSummarySection from './OrderOperatingSummarySection';
 import {
   applyLedgerFilters,
   emptyLedgerFilters,
+  ledgerFiltersToQuery,
   submitQueryFilters,
 } from '../lib/queryFilterModel';
 
@@ -32,7 +33,7 @@ interface LedgerScreenProps {
   sales: SalesRecord[];
   onAddLedger: (ledger: ProjectLedger) => void;
   onDownloadTemplate: () => Promise<Blob>;
-  onExportExcel: () => Promise<Blob>;
+  onExportExcel: (filters: Record<string, string>) => Promise<Blob>;
 }
 
 const statusOptions = [
@@ -157,8 +158,8 @@ export default function LedgerScreen({
 
   // Filtered Ledgers
   const filteredLedgers = useMemo(() => {
-    return applyLedgerFilters(ledgers, submittedFilters, { purchases, sales });
-  }, [ledgers, purchases, sales, submittedFilters]);
+    return applyLedgerFilters(ledgers, submittedFilters, { orders, purchases, sales });
+  }, [ledgers, orders, purchases, sales, submittedFilters]);
 
   // Paginated Ledgers
   const paginatedLedgers = useMemo(() => {
@@ -187,7 +188,10 @@ export default function LedgerScreen({
 
   const handleExportExcel = async () => {
     try {
-      downloadBlob(await onExportExcel(), '市场部业务台账.xlsx');
+      downloadBlob(
+        await onExportExcel(ledgerFiltersToQuery(submittedFilters)),
+        '市场部业务台账.xlsx',
+      );
     } catch (error) {
       alert(error instanceof Error ? error.message : '台账导出失败');
     }

@@ -308,6 +308,7 @@ export interface BackendUserRecord {
   is_active: number | boolean;
   last_login_at: string | null;
   created_at: string;
+  updated_at: string;
 }
 
 export interface PageResult<T> {
@@ -404,7 +405,8 @@ export const api = {
       body: JSON.stringify(data),
     }),
   me: () => request<{ user: BackendAuthUser }>('/auth/me'),
-  users: () => request<{ items: BackendUserRecord[] }>('/auth/users'),
+  users: (status: 'active' | 'inactive' = 'active') =>
+    request<{ items: BackendUserRecord[] }>(`/auth/users${query({ status })}`),
   createUser: (data: {
     username: string;
     password: string;
@@ -426,7 +428,17 @@ export const api = {
       department_can_entry: boolean;
     },
   ) => request<{ items: BackendUserRecord[] }>(`/auth/users/${userId}`, { method: 'PUT', body: JSON.stringify(data) }),
-  deleteUser: (userId: number) => request<{ items: BackendUserRecord[] }>(`/auth/users/${userId}`, { method: 'DELETE' }),
+  resetUserPassword: (userId: number, password: string) =>
+    request<{ message: string }>(`/auth/users/${userId}/reset-password`, {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    }),
+  deactivateUser: (userId: number) =>
+    request<{ items: BackendUserRecord[] }>(`/auth/users/${userId}`, { method: 'DELETE' }),
+  restoreUser: (userId: number) =>
+    request<{ items: BackendUserRecord[] }>(`/auth/users/${userId}/restore`, { method: 'POST' }),
+  permanentlyDeleteUser: (userId: number) =>
+    request<{ items: BackendUserRecord[] }>(`/auth/users/${userId}/permanent`, { method: 'DELETE' }),
   health: () => request<BackendHealth>('/health'),
   importExcel: () => request<{ success_rows: number; failed_rows: number }>('/import/excel', { method: 'POST' }),
   dashboardSummary: () => request<BackendDashboardSummary>('/dashboard/summary'),
@@ -458,7 +470,8 @@ export const api = {
       body: JSON.stringify({ items }),
     }),
   downloadOrderTemplate: () => requestBlob('/orders/template'),
-  exportOrdersExcel: () => requestBlob('/orders/export'),
+  exportOrdersExcel: (params: Record<string, string | number | undefined> = {}) =>
+    requestBlob(`/orders/export${query(params)}`),
   importOrdersExcel: (file: File) =>
     uploadExcel<{ batch_id: number; source_file: string; success_rows: number; failed_rows: number }>(
       `/orders/import-excel${query({ filename: file.name })}`,

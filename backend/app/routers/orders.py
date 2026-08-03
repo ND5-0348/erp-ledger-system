@@ -340,10 +340,48 @@ def download_order_template(user: CurrentUser = Depends(get_current_user)) -> Re
 
 
 @router.get("/export")
-def export_orders(user: CurrentUser = Depends(get_current_user)) -> Response:
+def export_orders(
+    project_id: str | None = Query(default=None, max_length=255),
+    department: str | None = Query(default=None, max_length=255),
+    manager: str | None = Query(default=None, max_length=255),
+    client_unit: str | None = Query(default=None, max_length=255),
+    order_id: str | None = Query(default=None, max_length=255),
+    order_status: str | None = Query(default=None, pattern="^(open|closed)$"),
+    supplier_name: str | None = Query(default=None, max_length=255),
+    start_date: BusinessDate | None = None,
+    end_date: BusinessDate | None = None,
+    invoice_start_date: BusinessDate | None = None,
+    invoice_end_date: BusinessDate | None = None,
+    user: CurrentUser = Depends(get_current_user),
+) -> Response:
+    if start_date and end_date and start_date > end_date:
+        raise HTTPException(status_code=400, detail="订单日期的开始日期不能晚于结束日期。")
+    if invoice_start_date and invoice_end_date and invoice_start_date > invoice_end_date:
+        raise HTTPException(status_code=400, detail="开票日期的开始日期不能晚于结束日期。")
+    filters = {
+        "project_id": project_id,
+        "department": department,
+        "manager": manager,
+        "client_unit": client_unit,
+        "order_id": order_id,
+        "order_status": order_status,
+        "supplier_name": supplier_name,
+        "start_date": start_date,
+        "end_date": end_date,
+        "invoice_start_date": invoice_start_date,
+        "invoice_end_date": invoice_end_date,
+    }
+    active_filters = {key: value for key, value in filters.items() if value not in (None, "")}
     with db() as conn:
-        content = export_ledger_bytes(conn, user)
-        write_operation_log(conn, user, "订单管理", "export_orders", "导出当前账号权限范围内的业务台账")
+        content = export_ledger_bytes(conn, user, active_filters)
+        write_operation_log(
+            conn,
+            user,
+            "订单管理",
+            "export_orders",
+            "按查询条件导出业务台账" if active_filters else "全量导出当前账号权限范围内的业务台账",
+            after={key: value.isoformat() if hasattr(value, "isoformat") else value for key, value in active_filters.items()},
+        )
     return Response(
         content=content,
         media_type=EXCEL_MEDIA_TYPE,

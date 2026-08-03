@@ -70,6 +70,9 @@ def test_edit_and_delete_routes_exist():
         "/api/sales/invoices/{invoice_id}": {"PUT", "DELETE"},
         "/api/sales/receipts/{receipt_id}": {"PUT", "DELETE"},
         "/api/auth/users/{user_id}": {"PUT", "DELETE"},
+        "/api/auth/users/{user_id}/reset-password": {"POST"},
+        "/api/auth/users/{user_id}/restore": {"POST"},
+        "/api/auth/users/{user_id}/permanent": {"DELETE"},
     }
 
     for path, methods in expected_routes.items():

@@ -5,7 +5,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import quote
 
 from openpyxl import load_workbook
@@ -174,7 +174,11 @@ def is_template_sample_row(row: tuple[Any, ...]) -> bool:
     return str(row[1] or "").strip() == SAMPLE_PROJECT_CODE and str(row[12] or "").strip() == SAMPLE_ORDER_NO
 
 
-def export_ledger_bytes(conn: Connection, user: CurrentUser) -> bytes:
+def export_ledger_bytes(
+    conn: Connection,
+    user: CurrentUser,
+    filters: Mapping[str, object] | None = None,
+) -> bytes:
     workbook = load_workbook(TEMPLATE_PATH)
     worksheet = workbook["Sheet1"]
     if worksheet.max_row > 2:
@@ -182,6 +186,111 @@ def export_ledger_bytes(conn: Connection, user: CurrentUser) -> bytes:
 
     conditions = ["p.deleted_at IS NULL", "so.deleted_at IS NULL", "ol.deleted_at IS NULL"]
     params: dict[str, object] = {}
+    active_filters = filters or {}
+    project_text_filters = {
+        "project_id": ("p.project_code", True),
+        "department": ("p.department", False),
+        "manager": ("p.account_manager", True),
+        "client_unit": ("p.customer_unit_name", True),
+    }
+    for key, (column, use_like) in project_text_filters.items():
+        value = active_filters.get(key)
+        if value in (None, ""):
+            continue
+        conditions.append(f"{column} {'LIKE' if use_like else '='} :{key}")
+        params[key] = f"%{value}%" if use_like else value
+
+    order_conditions = [
+        "export_order.project_id = p.id",
+        "export_order.deleted_at IS NULL",
+    ]
+    order_id = active_filters.get("order_id")
+    if order_id not in (None, ""):
+        order_conditions.append("export_order.order_no LIKE :order_id")
+        params["order_id"] = f"%{order_id}%"
+    start_date = active_filters.get("start_date")
+    if start_date not in (None, ""):
+        order_conditions.append("export_order.order_date >= :start_date")
+        params["start_date"] = start_date
+    end_date = active_filters.get("end_date")
+    if end_date not in (None, ""):
+        order_conditions.append("export_order.order_date <= :end_date")
+        params["end_date"] = end_date
+    if len(order_conditions) > 2:
+        conditions.append(
+            f"""
+            EXISTS (
+              SELECT 1
+              FROM sales_order export_order
+              WHERE {' AND '.join(order_conditions)}
+            )
+            """
+        )
+
+    order_status = active_filters.get("order_status")
+    if order_status not in (None, ""):
+        conditions.append(
+            """
+            EXISTS (
+              SELECT 1
+              FROM v_project_ledger_summary export_summary
+              WHERE export_summary.project_code = p.project_code
+                AND export_summary.computed_close_status = :order_status
+            )
+            """
+        )
+        params["order_status"] = order_status
+
+    supplier_name = active_filters.get("supplier_name")
+    if supplier_name not in (None, ""):
+        conditions.append(
+            """
+            EXISTS (
+              SELECT 1
+              FROM sales_order export_supplier_order
+              JOIN order_line export_supplier_line
+                ON export_supplier_line.sales_order_id = export_supplier_order.id
+               AND export_supplier_line.deleted_at IS NULL
+              JOIN purchase_info export_purchase
+                ON export_purchase.order_line_id = export_supplier_line.id
+               AND export_purchase.deleted_at IS NULL
+              WHERE export_supplier_order.project_id = p.id
+                AND export_supplier_order.deleted_at IS NULL
+                AND export_purchase.supplier_name LIKE :supplier_name
+            )
+            """
+        )
+        params["supplier_name"] = f"%{supplier_name}%"
+
+    invoice_conditions = [
+        "export_invoice_order.project_id = p.id",
+        "export_invoice_order.deleted_at IS NULL",
+        "export_invoice_line.deleted_at IS NULL",
+        "export_invoice.deleted_at IS NULL",
+    ]
+    invoice_start_date = active_filters.get("invoice_start_date")
+    if invoice_start_date not in (None, ""):
+        invoice_conditions.append("export_invoice.invoice_date >= :invoice_start_date")
+        params["invoice_start_date"] = invoice_start_date
+    invoice_end_date = active_filters.get("invoice_end_date")
+    if invoice_end_date not in (None, ""):
+        invoice_conditions.append("export_invoice.invoice_date <= :invoice_end_date")
+        params["invoice_end_date"] = invoice_end_date
+    if len(invoice_conditions) > 4:
+        conditions.append(
+            f"""
+            EXISTS (
+              SELECT 1
+              FROM sales_order export_invoice_order
+              JOIN order_line export_invoice_line
+                ON export_invoice_line.sales_order_id = export_invoice_order.id
+              JOIN sales_invoice export_invoice
+                ON export_invoice.order_line_id = export_invoice_line.id
+              WHERE {' AND '.join(invoice_conditions)}
+            )
+            """
+        )
+
     apply_department_scope(conditions, params, user, "p.department")
     rows = conn.execute(text(_export_sql(" AND ".join(conditions))), params).mappings().all()
 

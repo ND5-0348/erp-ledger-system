@@ -9,6 +9,22 @@ export interface EditorCellPosition {
 
 export type CellSelectionMode = 'replace' | 'add' | 'remove';
 
+export function editorTargetHasTextSelection(target: EventTarget | null): boolean {
+  if (!target || typeof target !== 'object') return false;
+  const {
+    selectionStart,
+    selectionEnd,
+  } = target as {
+    selectionStart?: unknown;
+    selectionEnd?: unknown;
+  };
+  return (
+    typeof selectionStart === 'number'
+    && typeof selectionEnd === 'number'
+    && selectionStart !== selectionEnd
+  );
+}
+
 export function editorCellKey({ rowIndex, columnIndex }: EditorCellPosition): string {
   return `${rowIndex}:${columnIndex}`;
 }
@@ -28,6 +44,44 @@ export function editorSelectionPositions(
     .sort((left, right) => (
       left.rowIndex - right.rowIndex || left.columnIndex - right.columnIndex
     ));
+}
+
+export interface EditorSelectionEdges {
+  top: boolean;
+  right: boolean;
+  bottom: boolean;
+  left: boolean;
+}
+
+export function editorSelectionEdges(
+  selection: ReadonlySet<string>,
+  rowIndex: number,
+  columnIndex: number,
+): EditorSelectionEdges | null {
+  if (!selection.has(editorCellKey({ rowIndex, columnIndex }))) return null;
+  return {
+    top: !selection.has(editorCellKey({ rowIndex: rowIndex - 1, columnIndex })),
+    right: !selection.has(editorCellKey({ rowIndex, columnIndex: columnIndex + 1 })),
+    bottom: !selection.has(editorCellKey({ rowIndex: rowIndex + 1, columnIndex })),
+    left: !selection.has(editorCellKey({ rowIndex, columnIndex: columnIndex - 1 })),
+  };
+}
+
+export function editorSelectionOutlineBoxShadow(
+  selection: ReadonlySet<string>,
+  rowIndex: number,
+  columnIndex: number,
+): string | undefined {
+  const edges = editorSelectionEdges(selection, rowIndex, columnIndex);
+  if (!edges) return undefined;
+  const color = 'rgb(37 99 235)';
+  const shadows = [
+    edges.top ? `inset 0 2px 0 ${color}` : '',
+    edges.right ? `inset -2px 0 0 ${color}` : '',
+    edges.bottom ? `inset 0 -2px 0 ${color}` : '',
+    edges.left ? `inset 2px 0 0 ${color}` : '',
+  ].filter(Boolean);
+  return shadows.length ? shadows.join(', ') : undefined;
 }
 
 export function selectEditorCellRectangle(
