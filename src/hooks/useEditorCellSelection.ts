@@ -20,8 +20,6 @@ interface DragSelection {
 
 export const EDITOR_SELECTED_CELL_VISUAL_CLASS =
   'bg-blue-100';
-export const EDITOR_ACTIVE_CELL_VISUAL_CLASS =
-  'shadow-[inset_0_0_0_2px_rgb(37_99_235)]';
 
 export function useEditorCellSelection(resetKey: string) {
   const [selectedCells, setSelectedCells] = useState<Set<string>>(() => new Set());
@@ -145,16 +143,11 @@ export function useEditorCellSelection(resetKey: string) {
   const isCellSelected = (rowIndex: number, columnIndex: number) => (
     selectedCells.has(editorCellKey({ rowIndex, columnIndex }))
   );
-  const isActiveCell = (rowIndex: number, columnIndex: number) => (
-    activeCellKey === editorCellKey({ rowIndex, columnIndex })
-  );
 
   return {
-    activeCellKey,
     clearCellSelection,
     handleCellPointerDown,
     handleCellPointerEnter,
-    isActiveCell,
     isCellSelected,
     isSelectingCells,
     selectedCells,

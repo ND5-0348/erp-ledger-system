@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from decimal import Decimal
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -985,6 +986,355 @@ def test_excel_template_import_export_round_trip(client: TestClient, headers: di
     assert Decimal(str(worksheet.cell(3, 91).value)) == Decimal("5.67")
     exported.close()
 
+    filtered_export_response = client.get(
+        "/api/orders/export",
+        params={
+            "project_id": "XL-IMPORT",
+            "department": "QA",
+            "manager": "QA Manager",
+            "client_unit": "QA Customer",
+            "order_id": "SO-XL-IMPORT",
+            "order_status": "closed",
+            "supplier_name": "Excel Supplier",
+            "start_date": "2026-07-21",
+            "end_date": "2026-07-21",
+            "invoice_start_date": "2026-07-28",
+            "invoice_end_date": "2026-07-28",
+        },
+        headers=headers,
+    )
+    assert filtered_export_response.status_code == 200, filtered_export_response.text
+    filtered_export = load_workbook(
+        BytesIO(filtered_export_response.content),
+        read_only=True,
+        data_only=True,
+    )
+    assert filtered_export["Sheet1"].max_row == 3
+    assert filtered_export["Sheet1"].cell(3, 2).value == "XL-IMPORT-001"
+    filtered_export.close()
+
+    empty_filtered_export_response = client.get(
+        "/api/orders/export",
+        params={"supplier_name": "不存在的采购厂商"},
+        headers=headers,
+    )
+    assert empty_filtered_export_response.status_code == 200, empty_filtered_export_response.text
+    empty_filtered_export = load_workbook(
+        BytesIO(empty_filtered_export_response.content),
+        read_only=True,
+        data_only=True,
+    )
+    assert empty_filtered_export["Sheet1"].max_row == 2
+    empty_filtered_export.close()
+
+    invalid_date_range_response = client.get(
+        "/api/orders/export",
+        params={"start_date": "2026-07-22", "end_date": "2026-07-21"},
+        headers=headers,
+    )
+    assert invalid_date_range_response.status_code == 400
+    assert "开始日期不能晚于结束日期" in invalid_date_range_response.json()["detail"]
+
+
+def test_release_multi_project_excel_round_trip_and_contamination_guard(
+    client: TestClient,
+    headers: dict[str, str],
+) -> None:
+    input_path_value = os.getenv("RELEASE_QA_INPUT_XLSX")
+    invalid_path_value = os.getenv("RELEASE_QA_INVALID_XLSX")
+    output_dir_value = os.getenv("RELEASE_QA_OUTPUT_DIR")
+    if not input_path_value or not invalid_path_value or not output_dir_value:
+        pytest.skip("Release QA workbook paths are not configured.")
+
+    input_path = Path(input_path_value)
+    invalid_path = Path(invalid_path_value)
+    output_dir = Path(output_dir_value)
+    assert input_path.is_file()
+    assert invalid_path.is_file()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    business_tables = (
+        "import_batch",
+        "ledger_raw_row",
+        "project",
+        "sales_order",
+        "order_line",
+        "purchase_info",
+        "delivery_record",
+        "purchase_contract",
+        "purchase_invoice",
+        "warehouse_entry",
+        "finance_invoice_check",
+        "finance_payment_entry",
+        "purchase_payment",
+        "sales_contract",
+        "sales_invoice",
+        "sales_receipt",
+    )
+
+    def normalized(value: object) -> object:
+        return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+    def business_snapshot() -> dict[str, list[dict]]:
+        snapshot: dict[str, list[dict]] = {}
+        with db() as conn:
+            for table_name in business_tables:
+                rows = conn.execute(text(f"SELECT * FROM `{table_name}` ORDER BY id")).mappings().all()
+                snapshot[table_name] = normalized([dict(row) for row in rows])
+        return snapshot
+
+    def finance_snapshot(order_line_id: int) -> dict:
+        with db() as conn:
+            row = conn.execute(
+                text("SELECT * FROM v_order_line_finance WHERE order_line_id = :id"),
+                {"id": order_line_id},
+            ).mappings().one()
+        return normalized(dict(row))
+
+    def editor_response(endpoint: str, order_line_ids: list[int]) -> dict:
+        response = client.post(endpoint, json={"order_line_ids": order_line_ids}, headers=headers)
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    def editable_payload(editor: dict, row: dict) -> dict:
+        payload = {"order_line_id": int(row["order_line_id"])}
+        for index, column in enumerate(editor["columns"]):
+            if column["editable"] and column["key"]:
+                payload[column["key"]] = row["values"][index]
+        return payload
+
+    assert all(_count(table_name) == 0 for table_name in business_tables)
+    workbook_bytes = input_path.read_bytes()
+    import_response = client.post(
+        "/api/orders/import-excel?filename=qa_multi_project_import.xlsx",
+        content=workbook_bytes,
+        headers={**headers, "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+    )
+    assert import_response.status_code == 200, import_response.text
+    assert import_response.json()["success_rows"] == 4
+    expected_counts = {
+        "import_batch": 1,
+        "ledger_raw_row": 4,
+        "project": 2,
+        "sales_order": 3,
+        "order_line": 4,
+        "purchase_info": 4,
+        "delivery_record": 4,
+        "purchase_contract": 4,
+        "purchase_invoice": 4,
+        "warehouse_entry": 4,
+        "finance_invoice_check": 0,
+        "finance_payment_entry": 4,
+        "purchase_payment": 8,
+        "sales_contract": 4,
+        "sales_invoice": 4,
+        "sales_receipt": 8,
+    }
+    actual_counts = {table_name: _count(table_name) for table_name in business_tables}
+    assert actual_counts == expected_counts
+
+    with db() as conn:
+        imported_rows = conn.execute(
+            text(
+                """
+                SELECT order_line_id, project_code, order_no, goods_name,
+                       specification_model, supplier_name
+                FROM v_order_line_finance
+                ORDER BY order_line_id
+                """
+            )
+        ).mappings().all()
+    row_ids = {
+        (str(row["project_code"]), str(row["order_no"]), str(row["goods_name"])): int(row["order_line_id"])
+        for row in imported_rows
+    }
+    assert set(row_ids) == {
+        ("QA-REL-001", "QA-SO-001", "边界路由器"),
+        ("QA-REL-001", "QA-SO-001", "光模块"),
+        ("QA-REL-001", "QA-SO-002", "维护服务"),
+        ("QA-REL-002", "QA-SO-003", "零税率测试设备"),
+    }
+    first_id = row_ids[("QA-REL-001", "QA-SO-001", "边界路由器")]
+    sibling_id = row_ids[("QA-REL-001", "QA-SO-001", "光模块")]
+    third_id = row_ids[("QA-REL-001", "QA-SO-002", "维护服务")]
+    sentinel_id = row_ids[("QA-REL-002", "QA-SO-003", "零税率测试设备")]
+    sibling_before = finance_snapshot(sibling_id)
+    sentinel_before = finance_snapshot(sentinel_id)
+
+    basic_editor = editor_response("/api/orders/batch-editor/rows", [first_id, sibling_id])
+    basic_rows = {int(row["order_line_id"]): row for row in basic_editor["rows"]}
+    first_basic = editable_payload(basic_editor, basic_rows[first_id])
+    sibling_basic = editable_payload(basic_editor, basic_rows[sibling_id])
+    first_basic["goods_name"] = "边界路由器-已验收修改"
+    basic_update = client.put(
+        "/api/orders/batch-basic",
+        json={
+            "items": [
+                first_basic,
+                sibling_basic,
+            ]
+        },
+        headers=headers,
+    )
+    assert basic_update.status_code == 200, basic_update.text
+    assert basic_update.json() == {"updated": 1, "order_line_ids": [first_id]}
+    basic_log_count = _action_count("batch_update_basic_order")
+    basic_noop = client.put(
+        "/api/orders/batch-basic",
+        json={"items": [first_basic]},
+        headers=headers,
+    )
+    assert basic_noop.status_code == 200, basic_noop.text
+    assert basic_noop.json() == {"updated": 0, "order_line_ids": []}
+    assert _action_count("batch_update_basic_order") == basic_log_count
+
+    purchase_editor = editor_response("/api/purchases/batch-editor/rows", [first_id, sibling_id])
+    purchase_rows = {int(row["order_line_id"]): row for row in purchase_editor["rows"]}
+    first_purchase = editable_payload(purchase_editor, purchase_rows[first_id])
+    sibling_purchase = editable_payload(purchase_editor, purchase_rows[sibling_id])
+    first_purchase["supplier_name"] = "QA采购厂商甲-已验收修改"
+    purchase_update = client.put(
+        "/api/purchases/batch",
+        json={
+            "items": [
+                first_purchase,
+                sibling_purchase,
+            ]
+        },
+        headers=headers,
+    )
+    assert purchase_update.status_code == 200, purchase_update.text
+    assert purchase_update.json() == {"updated": 1, "order_line_ids": [first_id]}
+
+    sales_editor = editor_response("/api/sales/batch-editor/rows", [third_id, sentinel_id])
+    sales_rows = {int(row["order_line_id"]): row for row in sales_editor["rows"]}
+    third_sales = editable_payload(sales_editor, sales_rows[third_id])
+    sentinel_sales = editable_payload(sales_editor, sales_rows[sentinel_id])
+    third_sales["sales_contract_no"] = "QA-SC-002-已验收修改"
+    sales_update = client.put(
+        "/api/sales/batch",
+        json={
+            "items": [
+                third_sales,
+                sentinel_sales,
+            ]
+        },
+        headers=headers,
+    )
+    assert sales_update.status_code == 200, sales_update.text
+    assert sales_update.json() == {"updated": 1, "order_line_ids": [third_id]}
+
+    first_after = finance_snapshot(first_id)
+    third_after = finance_snapshot(third_id)
+    assert first_after["goods_name"] == "边界路由器-已验收修改"
+    assert first_after["supplier_name"] == "QA采购厂商甲-已验收修改"
+    assert third_after["sales_contract_no"] == "QA-SC-002-已验收修改"
+    assert finance_snapshot(sibling_id) == sibling_before
+    assert finance_snapshot(sentinel_id) == sentinel_before
+
+    with db() as conn:
+        audit_rows = conn.execute(
+            text(
+                """
+                SELECT action_name, detail
+                FROM operation_log
+                WHERE action_name IN (
+                  'batch_update_basic_order',
+                  'batch_update_purchases',
+                  'batch_update_sales'
+                )
+                ORDER BY id
+                """
+            )
+        ).mappings().all()
+    audit_changed_keys: dict[str, list[str]] = {}
+    for row in audit_rows:
+        detail = json.loads(str(row["detail"]))
+        assert len(detail["batch_entries"]) == 1
+        entry = detail["batch_entries"][0]
+        changed_keys = sorted(
+            key
+            for key in set(entry["before"]) | set(entry["after"])
+            if entry["before"].get(key) != entry["after"].get(key)
+        )
+        audit_changed_keys[str(row["action_name"])] = changed_keys
+    assert audit_changed_keys["batch_update_basic_order"] == ["goods_name"]
+    assert audit_changed_keys["batch_update_purchases"] == ["supplier_name"]
+    assert audit_changed_keys["batch_update_sales"] == ["sales_contract_no"]
+
+    before_invalid = business_snapshot()
+    invalid_response = client.post(
+        "/api/orders/import-excel?filename=qa_invalid_tax_rollback.xlsx",
+        content=invalid_path.read_bytes(),
+        headers={**headers, "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+    )
+    assert invalid_response.status_code == 422, invalid_response.text
+    assert business_snapshot() == before_invalid
+
+    duplicate_response = client.post(
+        "/api/orders/import-excel?filename=qa_multi_project_import.xlsx",
+        content=workbook_bytes,
+        headers={**headers, "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+    )
+    assert duplicate_response.status_code == 422, duplicate_response.text
+    assert business_snapshot() == before_invalid
+
+    before_export = business_snapshot()
+    filtered_export = client.get(
+        "/api/orders/export",
+        params={"project_id": "QA-REL-001"},
+        headers=headers,
+    )
+    assert filtered_export.status_code == 200, filtered_export.text
+    (output_dir / "qa_filtered_export.xlsx").write_bytes(filtered_export.content)
+    full_export = client.get("/api/orders/export", headers=headers)
+    assert full_export.status_code == 200, full_export.text
+    (output_dir / "qa_full_export.xlsx").write_bytes(full_export.content)
+    assert business_snapshot() == before_export
+
+    before_backup_restore = business_snapshot()
+    backup_response = client.post("/api/backups", headers=headers)
+    assert backup_response.status_code == 200, backup_response.text
+    backup_id = int(backup_response.json()["id"])
+    restore_probe_editor = editor_response("/api/orders/batch-editor/rows", [first_id])
+    restore_probe = editable_payload(restore_probe_editor, restore_probe_editor["rows"][0])
+    restore_probe["goods_name"] = "恢复演练临时值"
+    restore_probe_response = client.put(
+        "/api/orders/batch-basic",
+        json={"items": [restore_probe]},
+        headers=headers,
+    )
+    assert restore_probe_response.status_code == 200, restore_probe_response.text
+    assert finance_snapshot(first_id)["goods_name"] == "恢复演练临时值"
+    restore_response = client.post(f"/api/backups/{backup_id}/restore", headers=headers)
+    assert restore_response.status_code == 200, restore_response.text
+    assert restore_response.json()["restored"] is True
+    assert business_snapshot() == before_backup_restore
+
+    result = {
+        "database": settings.mysql_database,
+        "imported_rows": 4,
+        "expected_counts": expected_counts,
+        "actual_counts": actual_counts,
+        "modified_order_line_ids": {
+            "basic_and_purchase": first_id,
+            "sales": third_id,
+        },
+        "unchanged_order_line_ids": [sibling_id, sentinel_id],
+        "audit_changed_keys": audit_changed_keys,
+        "invalid_import_status": invalid_response.status_code,
+        "duplicate_import_status": duplicate_response.status_code,
+        "filtered_export_file": "qa_filtered_export.xlsx",
+        "full_export_file": "qa_full_export.xlsx",
+        "business_tables_unchanged_by_export": True,
+        "backup_restore_id": backup_id,
+        "business_tables_restored_exactly": True,
+    }
+    (output_dir / "qa_api_database_results.json").write_text(
+        json.dumps(result, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
 
 def _admin_user() -> CurrentUser:
     with db() as conn:
@@ -999,6 +1349,185 @@ def _admin_user() -> CurrentUser:
         department_can_view=True,
         department_can_entry=True,
     )
+
+
+def test_user_deactivation_and_permanent_deletion_lifecycle(
+    client: TestClient,
+    headers: dict[str, str],
+) -> None:
+    username = "lifecycle-user"
+    password = "Lifecycle-Test-20260730!"
+    created = client.post(
+        "/api/auth/users",
+        json={
+            "username": username,
+            "password": password,
+            "display_name": "Lifecycle User",
+            "role_code": "viewer",
+        },
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+    created_user = next(item for item in created.json()["items"] if item["username"] == username)
+    user_id = int(created_user["id"])
+    reset_password = "Lifecycle-Reset-20260730!"
+
+    invalid_reset = client.post(
+        f"/api/auth/users/{user_id}/reset-password",
+        json={"password": "short"},
+        headers=headers,
+    )
+    assert invalid_reset.status_code == 422
+
+    reset = client.post(
+        f"/api/auth/users/{user_id}/reset-password",
+        json={"password": reset_password},
+        headers=headers,
+    )
+    assert reset.status_code == 200, reset.text
+    assert client.post(
+        "/api/auth/login",
+        json={"username": username, "password": password},
+    ).status_code == 401
+    assert client.post(
+        "/api/auth/login",
+        json={"username": username, "password": reset_password},
+    ).status_code == 200
+    with db() as conn:
+        reset_log_detail = conn.execute(
+            text(
+                """
+                SELECT detail
+                FROM operation_log
+                WHERE action_name = 'reset_user_password'
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+        ).scalar_one()
+    assert reset_password not in str(reset_log_detail)
+
+    permanent_while_active = client.delete(
+        f"/api/auth/users/{user_id}/permanent",
+        headers=headers,
+    )
+    assert permanent_while_active.status_code == 400
+    assert "先停用账号" in permanent_while_active.json()["detail"]
+
+    login = client.post(
+        "/api/auth/login",
+        json={"username": username, "password": reset_password},
+    )
+    assert login.status_code == 200, login.text
+    user_headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    assert client.get("/api/orders/export", headers=user_headers).status_code == 200
+
+    with db() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO backup_record
+                  (file_name, backup_type, status, created_by)
+                VALUES
+                  ('lifecycle-test.json.gz', 'test', 'success', :user_id)
+                """
+            ),
+            {"user_id": user_id},
+        )
+
+    deactivated = client.delete(f"/api/auth/users/{user_id}", headers=headers)
+    assert deactivated.status_code == 200, deactivated.text
+    assert all(item["username"] != username for item in deactivated.json()["items"])
+
+    inactive = client.get(
+        "/api/auth/users",
+        params={"status": "inactive"},
+        headers=headers,
+    )
+    assert inactive.status_code == 200, inactive.text
+    assert any(item["username"] == username for item in inactive.json()["items"])
+    assert client.post(
+        "/api/auth/login",
+        json={"username": username, "password": reset_password},
+    ).status_code == 401
+
+    reset_inactive = client.post(
+        f"/api/auth/users/{user_id}/reset-password",
+        json={"password": "Should-Not-Apply-20260730!"},
+        headers=headers,
+    )
+    assert reset_inactive.status_code == 400
+    assert "先恢复账号" in reset_inactive.json()["detail"]
+
+    restored = client.post(
+        f"/api/auth/users/{user_id}/restore",
+        headers=headers,
+    )
+    assert restored.status_code == 200, restored.text
+    assert any(item["username"] == username for item in restored.json()["items"])
+    assert client.post(
+        "/api/auth/login",
+        json={"username": username, "password": reset_password},
+    ).status_code == 200
+    inactive_after_restore = client.get(
+        "/api/auth/users",
+        params={"status": "inactive"},
+        headers=headers,
+    )
+    assert inactive_after_restore.status_code == 200, inactive_after_restore.text
+    assert all(item["username"] != username for item in inactive_after_restore.json()["items"])
+
+    already_active = client.post(
+        f"/api/auth/users/{user_id}/restore",
+        headers=headers,
+    )
+    assert already_active.status_code == 400
+    assert "已启用" in already_active.json()["detail"]
+
+    deactivated_again = client.delete(f"/api/auth/users/{user_id}", headers=headers)
+    assert deactivated_again.status_code == 200, deactivated_again.text
+
+    permanently_deleted = client.delete(
+        f"/api/auth/users/{user_id}/permanent",
+        headers=headers,
+    )
+    assert permanently_deleted.status_code == 200, permanently_deleted.text
+    assert all(item["username"] != username for item in permanently_deleted.json()["items"])
+    assert _count("erp_user", "id = :id", id=user_id) == 0
+    with db() as conn:
+        detached_logs = conn.execute(
+            text(
+                """
+                SELECT COUNT(*)
+                FROM operation_log
+                WHERE user_id IS NULL AND user_name LIKE :user_name
+                """
+            ),
+            {"user_name": f"%{username}%"},
+        ).scalar()
+        detached_backup_creator = conn.execute(
+            text(
+                """
+                SELECT created_by
+                FROM backup_record
+                WHERE file_name = 'lifecycle-test.json.gz'
+                """
+            )
+        ).scalar()
+    assert int(detached_logs or 0) >= 1
+    assert detached_backup_creator is None
+
+    recreated = client.post(
+        "/api/auth/users",
+        json={
+            "username": username,
+            "password": password,
+            "display_name": "Lifecycle User Recreated",
+            "role_code": "viewer",
+        },
+        headers=headers,
+    )
+    assert recreated.status_code == 200, recreated.text
 
 
 def test_tax_calculation_and_finance_entry_mapping(client: TestClient, headers: dict[str, str]) -> None:

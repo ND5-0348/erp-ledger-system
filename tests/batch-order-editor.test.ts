@@ -9,6 +9,9 @@ import {
   createBlankEditorRow,
   editableEditorRowsMatch,
   editorCellKey,
+  editorSelectionEdges,
+  editorSelectionOutlineBoxShadow,
+  editorTargetHasTextSelection,
   normalizeEditorValue,
   pasteGrid,
   pasteGridToEditorSelection,
@@ -151,6 +154,49 @@ test('cell selection creates Excel-style rectangles and supports additive ranges
   assert.equal(removed.has(editorCellKey({ rowIndex: 0, columnIndex: 2 })), false);
 });
 
+test('rectangular selection draws one continuous outer border without internal blue borders', () => {
+  const selection = selectEditorCellRectangle(
+    new Set<string>(),
+    { rowIndex: 1, columnIndex: 2 },
+    { rowIndex: 3, columnIndex: 4 },
+  );
+
+  assert.deepEqual(editorSelectionEdges(selection, 1, 2), {
+    top: true,
+    right: false,
+    bottom: false,
+    left: true,
+  });
+  assert.deepEqual(editorSelectionEdges(selection, 1, 4), {
+    top: true,
+    right: true,
+    bottom: false,
+    left: false,
+  });
+  assert.deepEqual(editorSelectionEdges(selection, 3, 2), {
+    top: false,
+    right: false,
+    bottom: true,
+    left: true,
+  });
+  assert.deepEqual(editorSelectionEdges(selection, 3, 4), {
+    top: false,
+    right: true,
+    bottom: true,
+    left: false,
+  });
+  assert.deepEqual(editorSelectionEdges(selection, 2, 3), {
+    top: false,
+    right: false,
+    bottom: false,
+    left: false,
+  });
+  assert.equal(editorSelectionEdges(selection, 0, 0), null);
+  assert.equal(editorSelectionOutlineBoxShadow(selection, 2, 3), undefined);
+  assert.match(editorSelectionOutlineBoxShadow(selection, 1, 2) || '', /inset 0 2px/);
+  assert.match(editorSelectionOutlineBoxShadow(selection, 1, 2) || '', /inset 2px 0/);
+});
+
 test('copy serializes a rectangular selection in visible-column order', () => {
   const selection = selectEditorCellRectangle(
     new Set(),
@@ -167,6 +213,24 @@ test('copy serializes a rectangular selection in visible-column order', () => {
   );
 
   assert.equal(text, 'P-001\t全额\nP-002\t净额');
+});
+
+test('copy preserves the browser text selection when part of an input value is selected', () => {
+  assert.equal(
+    editorTargetHasTextSelection({
+      selectionStart: 0,
+      selectionEnd: 2,
+    } as unknown as EventTarget),
+    true,
+  );
+  assert.equal(
+    editorTargetHasTextSelection({
+      selectionStart: 2,
+      selectionEnd: 2,
+    } as unknown as EventTarget),
+    false,
+  );
+  assert.equal(editorTargetHasTextSelection(null), false);
 });
 
 test('pasting one copied cell fills every editable cell in a multi-selection', () => {

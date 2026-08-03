@@ -94,7 +94,11 @@ def failed_mutation_metadata(method: str, path: str) -> tuple[str, str, str] | N
     module = next((label for prefix, label in MUTATION_MODULES.items() if path.startswith(prefix)), None)
     if module is None:
         return None
-    if "import" in path:
+    if path.startswith("/api/auth/users") and "reset-password" in path:
+        action_name, action_label = "reset_user_password_failed", "重置账号密码"
+    elif path.startswith("/api/auth/users") and "restore" in path:
+        action_name, action_label = "restore_user_failed", "恢复停用账号"
+    elif "import" in path:
         action_name, action_label = "import_excel", "导入业务台账"
     elif "restore" in path:
         action_name, action_label = "restore_backup", "恢复数据备份"

@@ -11,12 +11,13 @@ import {
   buildSalesInformationPayload,
   copyEditorSelection,
   editableEditorRowsMatch,
+  editorSelectionOutlineBoxShadow,
+  editorTargetHasTextSelection,
   pasteGridToEditorSelection,
 } from '../lib/batchOrderEditor';
 import { useBatchEditorHistory } from '../hooks/useBatchEditorHistory';
 import { useEditorColumnWidths } from '../hooks/useEditorColumnWidths';
 import {
-  EDITOR_ACTIVE_CELL_VISUAL_CLASS,
   EDITOR_SELECTED_CELL_VISUAL_CLASS,
   useEditorCellSelection,
 } from '../hooks/useEditorCellSelection';
@@ -69,7 +70,6 @@ export default function BatchPurchaseEditor({
     selectedCells,
     handleCellPointerDown,
     handleCellPointerEnter,
-    isActiveCell,
     isCellSelected,
     isSelectingCells,
     selectedCellCount,
@@ -211,6 +211,7 @@ export default function BatchPurchaseEditor({
   };
 
   const handleCopy = (event: React.ClipboardEvent<HTMLTableElement>) => {
+    if (editorTargetHasTextSelection(event.target)) return;
     const text = copyEditorSelection(
       rows.map((row) => row.values),
       selectedCells,
@@ -487,15 +488,12 @@ export default function BatchPurchaseEditor({
                     {showFixedColumns && fixedColumns.map(({ column, index: columnIndex }, fixedColumnIndex) => {
                       const value = row.values[columnIndex] ?? '';
                       const isSelected = isCellSelected(rowIndex, fixedColumnIndex);
-                      const isActive = isActiveCell(rowIndex, fixedColumnIndex);
                       return (
                         <td
                           key={`fixed-${row.order_line_id}-${column.excel_column}`}
                           className={`sticky border-b border-r border-slate-300 px-2 py-3 font-mono text-[11px] text-slate-700 ${
                             isSelected
-                              ? `z-30 ${EDITOR_SELECTED_CELL_VISUAL_CLASS} ${
-                                  isActive ? EDITOR_ACTIVE_CELL_VISUAL_CLASS : ''
-                                }`
+                              ? `z-30 ${EDITOR_SELECTED_CELL_VISUAL_CLASS}`
                               : 'z-20 bg-amber-50'
                           } ${
                             !isSelected && fixedColumnIndex === fixedColumns.length - 1
@@ -511,6 +509,11 @@ export default function BatchPurchaseEditor({
                             width: widthFor(
                               column.excel_column,
                               FIXED_COLUMN_WIDTHS[column.excel_column] || 120,
+                            ),
+                            boxShadow: editorSelectionOutlineBoxShadow(
+                              selectedCells,
+                              rowIndex,
+                              fixedColumnIndex,
                             ),
                           }}
                           aria-selected={isSelected}
@@ -530,20 +533,22 @@ export default function BatchPurchaseEditor({
                         showFixedColumns ? fixedColumns.length : 0
                       ) + financialColumnIndex;
                       const isSelected = isCellSelected(rowIndex, selectionColumnIndex);
-                      const isActive = isActiveCell(rowIndex, selectionColumnIndex);
                       return (
                         <td
                           key={`${row.order_line_id}-${column.excel_column}`}
                           className={`border-b border-r border-slate-200 p-0 ${
                             isSelected
-                              ? `relative z-10 ${EDITOR_SELECTED_CELL_VISUAL_CLASS} ${
-                                  isActive ? EDITOR_ACTIVE_CELL_VISUAL_CLASS : ''
-                                }`
+                              ? `relative z-10 ${EDITOR_SELECTED_CELL_VISUAL_CLASS}`
                               : column.editable ? 'bg-white' : 'bg-slate-50'
                           }`}
                           style={{
                             minWidth: widthFor(column.excel_column, getColumnWidth(column)),
                             width: widthFor(column.excel_column, getColumnWidth(column)),
+                            boxShadow: editorSelectionOutlineBoxShadow(
+                              selectedCells,
+                              rowIndex,
+                              selectionColumnIndex,
+                            ),
                           }}
                           aria-selected={isSelected}
                           data-editor-cell={`${rowIndex}:${selectionColumnIndex}`}
@@ -556,8 +561,10 @@ export default function BatchPurchaseEditor({
                               value={String(value)}
                               onChange={(event) => changeCell(rowIndex, columnIndex, event.target.value)}
                               onBlur={finishCellEdit}
-                              className={`h-10 w-full min-w-0 px-2 font-mono text-xs text-slate-800 outline-none focus:ring-2 focus:ring-inset focus:ring-blue-500 ${
-                                isSelected ? 'bg-blue-100' : 'bg-transparent focus:bg-blue-50'
+                              className={`h-10 w-full min-w-0 px-2 font-mono text-xs text-slate-800 outline-none ${
+                                isSelected
+                                  ? 'bg-blue-100'
+                                  : 'bg-transparent focus:bg-blue-50 focus:ring-2 focus:ring-inset focus:ring-blue-500'
                               }`}
                               aria-label={`${rowIndex + 1}行 ${column.excel_column}列 ${column.label}`}
                             />

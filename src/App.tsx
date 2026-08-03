@@ -198,6 +198,7 @@ export default function App() {
   const [logs, setLogs] = useState<OperationLog[]>([]);
   const [backups, setBackups] = useState<BackupInfo[]>([]);
   const [users, setUsers] = useState<BackendUserRecord[]>([]);
+  const [inactiveUsers, setInactiveUsers] = useState<BackendUserRecord[]>([]);
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [loginError, setLoginError] = useState('');
@@ -210,6 +211,7 @@ export default function App() {
     setCurrentUser(null);
     setCurrentScreen('dashboard');
     setUsers([]);
+    setInactiveUsers([]);
     setLedgers([]);
     setOrders([]);
     setPurchases([]);
@@ -236,12 +238,19 @@ export default function App() {
       setSales(salesData.items.map(mapSale));
       setLastUpdated(new Date().toLocaleTimeString('zh-CN', { hour12: false }));
       if (user && hasPermission(user, 'system_admin')) {
-        const [userData, logData, backupData] = await Promise.all([api.users(), api.logs(), api.backups()]);
+        const [userData, inactiveUserData, logData, backupData] = await Promise.all([
+          api.users(),
+          api.users('inactive'),
+          api.logs(),
+          api.backups(),
+        ]);
         setUsers(userData.items);
+        setInactiveUsers(inactiveUserData.items);
         setLogs(logData.items.map(mapLog));
         setBackups(backupData.items.map(mapBackup));
       } else {
         setUsers([]);
+        setInactiveUsers([]);
         setLogs([]);
         setBackups([]);
       }
@@ -315,9 +324,27 @@ export default function App() {
     setUsers(result.items);
   };
 
-  const handleDeleteUser = async (userId: number) => {
-    const result = await api.deleteUser(userId);
+  const handleDeactivateUser = async (userId: number) => {
+    const result = await api.deactivateUser(userId);
     setUsers(result.items);
+    const inactiveResult = await api.users('inactive');
+    setInactiveUsers(inactiveResult.items);
+  };
+
+  const handleRestoreUser = async (userId: number) => {
+    const result = await api.restoreUser(userId);
+    setUsers(result.items);
+    const inactiveResult = await api.users('inactive');
+    setInactiveUsers(inactiveResult.items);
+  };
+
+  const handleResetUserPassword = async (userId: number, password: string) => {
+    await api.resetUserPassword(userId, password);
+  };
+
+  const handlePermanentlyDeleteUser = async (userId: number) => {
+    const result = await api.permanentlyDeleteUser(userId);
+    setInactiveUsers(result.items);
   };
 
   const handleUpdateUserPermissions = async (userId: number, data: Omit<CreateUserPayload, 'username' | 'password' | 'display_name'>) => {
@@ -599,6 +626,7 @@ export default function App() {
               logs={logs}
               backups={backups}
               users={users}
+              inactiveUsers={inactiveUsers}
               canManageUsers={canManageSystem}
               departments={ledgers.map((item) => item.department).filter((department) => department && department !== fallbackText)}
               currentUserId={currentUser.id}
@@ -607,7 +635,10 @@ export default function App() {
               onRefresh={handleRefreshAll}
               onCreateUser={handleCreateUser}
               onUpdateUserPermissions={handleUpdateUserPermissions}
-              onDeleteUser={handleDeleteUser}
+              onDeactivateUser={handleDeactivateUser}
+              onRestoreUser={handleRestoreUser}
+              onResetUserPassword={handleResetUserPassword}
+              onPermanentlyDeleteUser={handlePermanentlyDeleteUser}
             />
           )}
         </main>

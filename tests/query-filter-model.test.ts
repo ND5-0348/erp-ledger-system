@@ -6,6 +6,7 @@ import {
   applyPurchaseFilters,
   applySalesFilters,
   getDepartmentOptions,
+  ledgerFiltersToQuery,
   emptyLedgerFilters,
   emptyOrderFilters,
   emptyPurchaseFilters,
@@ -154,7 +155,25 @@ let submittedLedgerFilters = emptyLedgerFilters;
 assert.equal(applyLedgerFilters(ledgers, submittedLedgerFilters).length, 2);
 submittedLedgerFilters = submitQueryFilters(draftLedgerFilters);
 assert.deepEqual(
-  applyLedgerFilters(ledgers, submittedLedgerFilters).map((item) => item.id),
+  applyLedgerFilters(ledgers, submittedLedgerFilters, { orders }).map((item) => item.id),
+  ['P-2'],
+);
+
+assert.deepEqual(
+  applyLedgerFilters(
+    ledgers,
+    { ...emptyLedgerFilters, orderId: 'SO-2' },
+    { orders, purchases, sales },
+  ).map((item) => item.id),
+  ['P-2'],
+);
+
+assert.deepEqual(
+  applyLedgerFilters(
+    ledgers,
+    { ...emptyLedgerFilters, startDate: '2026-06-02', endDate: '2026-06-02' },
+    { orders, purchases, sales },
+  ).map((item) => item.id),
   ['P-2'],
 );
 
@@ -170,6 +189,28 @@ assert.deepEqual(
     { purchases, sales },
   ).map((item) => item.id),
   ['P-2'],
+);
+
+assert.deepEqual(
+  ledgerFiltersToQuery({
+    ...emptyLedgerFilters,
+    projectId: 'P-2',
+    supplierName: '供应商B',
+    invoiceStartDate: '2026-07-01',
+  }),
+  {
+    project_id: 'P-2',
+    department: '',
+    manager: '',
+    client_unit: '',
+    order_id: '',
+    order_status: '',
+    supplier_name: '供应商B',
+    start_date: '',
+    end_date: '',
+    invoice_start_date: '2026-07-01',
+    invoice_end_date: '',
+  },
 );
 
 const draftOrderFilters = { ...emptyOrderFilters, businessType: '咨询' };

@@ -18,6 +18,8 @@ import {
   Pencil,
   Trash2,
   ChevronDown,
+  RotateCcw,
+  KeyRound,
 } from 'lucide-react';
 import { BackendUserRecord } from '../api';
 import { Permission, ROLE_LABELS, RoleCode, SYSTEM_PERMISSION_OPTIONS } from '../lib/permissions';
@@ -43,12 +45,16 @@ interface SystemScreenProps {
   onRestoreBackup: (backupId: number) => Promise<void>;
   onRefresh: () => void;
   users: BackendUserRecord[];
+  inactiveUsers: BackendUserRecord[];
   canManageUsers: boolean;
   departments: string[];
   currentUserId: number;
   onCreateUser: (data: CreateUserPayload) => Promise<void>;
   onUpdateUserPermissions: (userId: number, data: UpdateUserPermissionsPayload) => Promise<void>;
-  onDeleteUser: (userId: number) => Promise<void>;
+  onDeactivateUser: (userId: number) => Promise<void>;
+  onRestoreUser: (userId: number) => Promise<void>;
+  onResetUserPassword: (userId: number, password: string) => Promise<void>;
+  onPermanentlyDeleteUser: (userId: number) => Promise<void>;
 }
 
 const PERMISSION_OPTIONS = SYSTEM_PERMISSION_OPTIONS;
@@ -74,6 +80,10 @@ function parseList(value: string[] | string | null | undefined) {
   }
 }
 
+function formatDateTime(value: string | null | undefined) {
+  return value ? value.replace('T', ' ').slice(0, 19) : '-';
+}
+
 export default function SystemScreen({
   logs,
   backups,
@@ -81,12 +91,16 @@ export default function SystemScreen({
   onRestoreBackup,
   onRefresh,
   users,
+  inactiveUsers,
   canManageUsers,
   departments,
   currentUserId,
   onCreateUser,
   onUpdateUserPermissions,
-  onDeleteUser,
+  onDeactivateUser,
+  onRestoreUser,
+  onResetUserPassword,
+  onPermanentlyDeleteUser,
 }: SystemScreenProps) {
   // Pagination State for Logs
   const [logPage, setLogPage] = useState(1);
@@ -119,6 +133,11 @@ export default function SystemScreen({
     department_can_entry: false,
   });
   const [editDepartmentInput, setEditDepartmentInput] = useState('');
+  const [resettingUser, setResettingUser] = useState<BackendUserRecord | null>(null);
+  const [resetPasswordForm, setResetPasswordForm] = useState({ password: '', confirmPassword: '' });
+  const [showResetPassword, setShowResetPassword] = useState(false);
+  const [showResetConfirmPassword, setShowResetConfirmPassword] = useState(false);
+  const [resetPasswordBusy, setResetPasswordBusy] = useState(false);
   const [backupBusy, setBackupBusy] = useState(false);
 
   // Filter logs & backups to show only 5 items per page
@@ -280,6 +299,45 @@ export default function SystemScreen({
     setEditDepartmentInput('');
   };
 
+  const openPasswordReset = (user: BackendUserRecord) => {
+    setResettingUser(user);
+    setResetPasswordForm({ password: '', confirmPassword: '' });
+    setShowResetPassword(false);
+    setShowResetConfirmPassword(false);
+    setUserMessage('');
+  };
+
+  const closePasswordReset = () => {
+    if (resetPasswordBusy) return;
+    setResettingUser(null);
+    setResetPasswordForm({ password: '', confirmPassword: '' });
+    setShowResetPassword(false);
+    setShowResetConfirmPassword(false);
+    setUserMessage('');
+  };
+
+  const handlePasswordResetSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!resettingUser) return;
+    if (resetPasswordForm.password !== resetPasswordForm.confirmPassword) {
+      setUserMessage('两次输入的新密码不一致');
+      return;
+    }
+    setResetPasswordBusy(true);
+    setUserMessage('');
+    try {
+      await onResetUserPassword(resettingUser.id, resetPasswordForm.password);
+      const username = resettingUser.username;
+      setResettingUser(null);
+      setResetPasswordForm({ password: '', confirmPassword: '' });
+      setUserMessage(`账号 "${username}" 的密码已重置`);
+    } catch (error) {
+      setUserMessage(error instanceof Error ? error.message : '密码重置失败');
+    } finally {
+      setResetPasswordBusy(false);
+    }
+  };
+
   const handlePermissionSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!editingUser) return;
@@ -301,15 +359,45 @@ export default function SystemScreen({
     }
   };
 
-  const handleDeleteUser = async (user: BackendUserRecord) => {
-    const confirmed = window.confirm(`确定删除账号 "${user.username}" 吗？删除后该账号将不能登录。`);
+  const handleDeactivateUser = async (user: BackendUserRecord) => {
+    const confirmed = window.confirm(
+      `确定停用账号 "${user.username}" 吗？停用后该账号将不能登录，并会进入停用账号汇总。`,
+    );
     if (!confirmed) return;
     setUserMessage('');
     try {
-      await onDeleteUser(user.id);
-      setUserMessage('账号删除成功');
+      await onDeactivateUser(user.id);
+      setUserMessage('账号已停用，可在停用账号汇总中查看或永久删除');
     } catch (error) {
-      setUserMessage(error instanceof Error ? error.message : '账号删除失败');
+      setUserMessage(error instanceof Error ? error.message : '账号停用失败');
+    }
+  };
+
+  const handlePermanentlyDeleteUser = async (user: BackendUserRecord) => {
+    const confirmed = window.confirm(
+      `确定永久删除已停用账号 "${user.username}" 吗？该操作不可恢复，删除后可以重新创建同名登录账号。`,
+    );
+    if (!confirmed) return;
+    setUserMessage('');
+    try {
+      await onPermanentlyDeleteUser(user.id);
+      setUserMessage(`已永久删除停用账号 "${user.username}"`);
+    } catch (error) {
+      setUserMessage(error instanceof Error ? error.message : '账号永久删除失败');
+    }
+  };
+
+  const handleRestoreUser = async (user: BackendUserRecord) => {
+    const confirmed = window.confirm(
+      `确定恢复账号 "${user.username}" 吗？恢复后该账号可使用原密码登录，并保留原有角色和权限。`,
+    );
+    if (!confirmed) return;
+    setUserMessage('');
+    try {
+      await onRestoreUser(user.id);
+      setUserMessage(`已恢复账号 "${user.username}"`);
+    } catch (error) {
+      setUserMessage(error instanceof Error ? error.message : '账号恢复失败');
     }
   };
 
@@ -502,7 +590,7 @@ export default function SystemScreen({
                         </span>
                       </td>
                       <td className="px-4 py-2">{user.is_active ? '启用' : '停用'}</td>
-                      <td className="px-4 py-2 font-mono text-slate-400">{user.last_login_at || '-'}</td>
+                      <td className="px-4 py-2 font-mono text-slate-400">{formatDateTime(user.last_login_at)}</td>
                       <td className="px-4 py-2 text-center">
                         <div className="inline-flex items-center justify-center gap-1">
                           <button
@@ -516,10 +604,19 @@ export default function SystemScreen({
                           </button>
                           <button
                             type="button"
+                            disabled={!user.is_active}
+                            onClick={() => openPasswordReset(user)}
+                            title={`重置账号 ${user.username} 的密码`}
+                            className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-violet-100 bg-violet-50 text-violet-600 hover:bg-violet-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            <KeyRound className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
                             disabled={user.id === currentUserId || !user.is_active}
-                            onClick={() => handleDeleteUser(user)}
-                            title={user.id === currentUserId ? '不能删除当前登录账号' : '删除账号'}
-                            className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-rose-100 bg-rose-50 text-rose-600 hover:bg-rose-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                            onClick={() => handleDeactivateUser(user)}
+                            title={user.id === currentUserId ? '不能停用当前登录账号' : '停用账号'}
+                            className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-amber-100 bg-amber-50 text-amber-700 hover:bg-amber-100 disabled:opacity-40 disabled:cursor-not-allowed"
                           >
                             <Trash2 className="w-4 h-4" />
                           </button>
@@ -532,6 +629,161 @@ export default function SystemScreen({
             </div>
           </div>
         </section>
+      )}
+
+      {canManageUsers && (
+        <section className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="p-5 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+            <div>
+              <h3 className="font-semibold text-slate-900 text-sm flex items-center gap-1.5">
+                <Trash2 className="w-4 h-4 text-rose-600" />
+                <span>停用账号汇总</span>
+                <span className="inline-flex min-w-6 h-5 items-center justify-center rounded-full bg-slate-100 px-1.5 text-[10px] font-bold text-slate-600">
+                  {inactiveUsers.length}
+                </span>
+              </h3>
+              <p className="mt-1 text-xs text-slate-500">
+                停用账号可恢复并继续使用原密码和权限；永久删除后可重新使用原登录账号。
+              </p>
+            </div>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[920px] text-left">
+              <thead className="bg-slate-50 text-xs text-slate-500">
+                <tr>
+                  <th className="px-4 py-3 font-semibold">账号</th>
+                  <th className="px-4 py-3 font-semibold">姓名</th>
+                  <th className="px-4 py-3 font-semibold">原角色</th>
+                  <th className="px-4 py-3 font-semibold">原功能权限</th>
+                  <th className="px-4 py-3 font-semibold">停用时间</th>
+                  <th className="px-4 py-3 font-semibold">最后登录</th>
+                  <th className="px-4 py-3 font-semibold text-center">操作</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {inactiveUsers.map((user) => (
+                  <tr key={user.id} className="text-xs text-slate-700">
+                    <td className="px-4 py-3 font-mono text-slate-600">{user.username}</td>
+                    <td className="px-4 py-3 font-semibold">{user.display_name}</td>
+                    <td className="px-4 py-3">{ROLE_LABELS[user.role_code as RoleCode] || user.role_code}</td>
+                    <td className="px-4 py-3">
+                      {parseList(user.permissions_json)
+                        .map((permission) => PERMISSION_LABELS[permission as Permission] || permission)
+                        .join('、') || '无'}
+                    </td>
+                    <td className="px-4 py-3 font-mono text-slate-400">{formatDateTime(user.updated_at)}</td>
+                    <td className="px-4 py-3 font-mono text-slate-400">{formatDateTime(user.last_login_at)}</td>
+                    <td className="px-4 py-3 text-center">
+                      <div className="inline-flex items-center justify-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleRestoreUser(user)}
+                          title={`恢复停用账号 ${user.username}`}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 font-semibold text-emerald-700 hover:bg-emerald-100"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                          <span>恢复</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handlePermanentlyDeleteUser(user)}
+                          title={`永久删除停用账号 ${user.username}`}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 font-semibold text-rose-700 hover:bg-rose-100"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>永久删除</span>
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {inactiveUsers.length === 0 && (
+                  <tr>
+                    <td colSpan={7} className="px-4 py-8 text-center text-xs text-slate-400">
+                      暂无停用账号
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {resettingUser && (
+        <div className="fixed inset-0 z-[130] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+          <form
+            onSubmit={handlePasswordResetSubmit}
+            autoComplete="off"
+            className="w-full max-w-md overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl"
+          >
+            <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-5 py-4">
+              <h3 className="text-sm font-bold text-slate-900">重置密码：{resettingUser.username}</h3>
+              <button type="button" onClick={closePasswordReset} disabled={resetPasswordBusy} className="p-1 text-slate-400 hover:text-slate-700 disabled:opacity-40">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="space-y-4 p-5">
+              <p className="text-xs leading-5 text-slate-500">
+                重置后原密码立即失效，请将新密码安全地告知账号使用人。操作日志不会记录明文密码。
+              </p>
+              <label className="block space-y-1.5">
+                <span className="text-xs font-semibold text-slate-700">新密码</span>
+                <div className="relative">
+                  <input
+                    required
+                    minLength={6}
+                    maxLength={128}
+                    autoComplete="new-password"
+                    type={showResetPassword ? 'text' : 'password'}
+                    value={resetPasswordForm.password}
+                    onChange={(event) => setResetPasswordForm({ ...resetPasswordForm, password: event.target.value })}
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2.5 pr-10 text-sm outline-none focus:border-blue-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowResetPassword((value) => !value)}
+                    title={showResetPassword ? '隐藏新密码' : '显示新密码'}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-700"
+                  >
+                    {showResetPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </label>
+              <label className="block space-y-1.5">
+                <span className="text-xs font-semibold text-slate-700">确认新密码</span>
+                <div className="relative">
+                  <input
+                    required
+                    minLength={6}
+                    maxLength={128}
+                    autoComplete="new-password"
+                    type={showResetConfirmPassword ? 'text' : 'password'}
+                    value={resetPasswordForm.confirmPassword}
+                    onChange={(event) => setResetPasswordForm({ ...resetPasswordForm, confirmPassword: event.target.value })}
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2.5 pr-10 text-sm outline-none focus:border-blue-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowResetConfirmPassword((value) => !value)}
+                    title={showResetConfirmPassword ? '隐藏确认密码' : '显示确认密码'}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-700"
+                  >
+                    {showResetConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </label>
+              {userMessage && <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800">{userMessage}</div>}
+            </div>
+            <div className="flex justify-end gap-2 border-t border-slate-100 px-5 py-4">
+              <button type="button" onClick={closePasswordReset} disabled={resetPasswordBusy} className="rounded-lg border border-slate-200 px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40">取消</button>
+              <button type="submit" disabled={resetPasswordBusy} className="rounded-lg bg-violet-600 px-4 py-2 text-xs font-semibold text-white hover:bg-violet-700 disabled:cursor-wait disabled:opacity-60">
+                {resetPasswordBusy ? '正在重置…' : '确认重置'}
+              </button>
+            </div>
+          </form>
+        </div>
       )}
 
       {editingUser && (
