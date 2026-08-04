@@ -67,6 +67,7 @@ export interface BackendOrderRecord {
   account_manager?: string | null;
   order_no: string;
   order_date: string | null;
+  last_modified_at?: string | null;
   statistical_category?: string | null;
   team_name?: string | null;
   goods_name: string | null;
@@ -101,6 +102,12 @@ export interface BackendOrderRecord {
   pending_delivery_quantity?: number | null;
   pending_delivery_amount_no_tax?: number | null;
   pending_delivery_amount?: number | null;
+  total_received?: number | null;
+  total_paid?: number | null;
+  accounts_receivable?: number | null;
+  accounts_payable?: number | null;
+  gross_profit?: number | null;
+  close_status?: string | null;
 }
 
 export type BatchEditorValue = string | number | null;

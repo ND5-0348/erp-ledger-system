@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import {
   ArrowDownLeft,
   ArrowRight,
@@ -14,7 +14,13 @@ import {
   Wallet,
 } from 'lucide-react';
 import { OperationLog, OrderRecord, ProjectLedger, ScreenType } from '../types';
-import { getDashboardDepartments, getDashboardMetrics, getDashboardSalesRanking } from '../lib/dashboardMetrics';
+import {
+  getDashboardDepartments,
+  getDashboardLatestModifiedAt,
+  getDashboardMetrics,
+  getDashboardSalesRanking,
+  getDashboardTrendData,
+} from '../lib/dashboardMetrics';
 
 interface DashboardScreenProps {
   logs: OperationLog[];
@@ -43,20 +49,6 @@ function compactMoney(value: number) {
   return money(value);
 }
 
-function monthKey(date: Date) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  return `${year}-${month}`;
-}
-
-function recentMonths(count: number) {
-  const now = new Date();
-  return Array.from({ length: count }, (_, index) => {
-    const date = new Date(now.getFullYear(), now.getMonth() - (count - 1 - index), 1);
-    return monthKey(date);
-  });
-}
-
 function smoothPath(points: TrendPoint[]) {
   if (points.length === 0) return '';
   if (points.length === 1) return `M ${points[0].x} ${points[0].y}`;
@@ -69,46 +61,19 @@ function smoothPath(points: TrendPoint[]) {
 }
 
 export default function DashboardScreen({ logs, ledgers, orders, onNavigate }: DashboardScreenProps) {
-  const [timeStr, setTimeStr] = useState('');
   const [hoveredTrendIndex, setHoveredTrendIndex] = useState<number | null>(null);
   const [selectedDepartment, setSelectedDepartment] = useState('');
-
-  useEffect(() => {
-    const updateTime = () => {
-      const now = new Date();
-      const pad = (num: number) => String(num).padStart(2, '0');
-      setTimeStr(
-        `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(
-          now.getMinutes(),
-        )}:${pad(now.getSeconds())}`,
-      );
-    };
-    updateTime();
-    const interval = window.setInterval(updateTime, 1000);
-    return () => window.clearInterval(interval);
-  }, []);
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
 
   const departmentOptions = getDashboardDepartments(orders);
-  const dashboardMetrics = getDashboardMetrics({ ledgers, orders, department: selectedDepartment });
-  const salesRanking = getDashboardSalesRanking(orders, selectedDepartment);
+  const dashboardFilters = { department: selectedDepartment, startDate, endDate };
+  const dashboardMetrics = getDashboardMetrics({ ledgers, orders, ...dashboardFilters });
+  const salesRanking = getDashboardSalesRanking(orders, selectedDepartment, startDate, endDate);
   const salesRankingTitle = selectedDepartment ? '三级团队销售订单金额排行' : '部门销售订单金额排行';
   const recentLogs = logs.slice(0, 5);
-
-  const trendTotals = new Map<string, { orderAmount: number; profit: number }>();
-  ledgers.forEach((item) => {
-    const month = item.orderDate ? item.orderDate.slice(0, 7) : '';
-    if (!month) return;
-    const current = trendTotals.get(month) || { orderAmount: 0, profit: 0 };
-    current.orderAmount += item.orderAmount;
-    current.profit += item.orderAmount - item.purchaseAmount;
-    trendTotals.set(month, current);
-  });
-
-  const trendData = recentMonths(6).map((month) => ({
-    month,
-    orderAmount: trendTotals.get(month)?.orderAmount || 0,
-    profit: trendTotals.get(month)?.profit || 0,
-  }));
+  const trendData = getDashboardTrendData(orders, dashboardFilters);
+  const latestModifiedAt = getDashboardLatestModifiedAt(orders, dashboardFilters);
   const maxTrendValue = Math.max(...trendData.flatMap((item) => [item.orderAmount, item.profit]), 1);
   const toPoint = (value: number, index: number): TrendPoint => ({
     x: trendData.length === 1 ? 300 : (index / (trendData.length - 1)) * 600,
@@ -118,7 +83,9 @@ export default function DashboardScreen({ logs, ledgers, orders, onNavigate }: D
   const profitPoints = trendData.map((item, index) => toPoint(item.profit, index));
   const orderPath = smoothPath(orderPoints);
   const profitPath = smoothPath(profitPoints);
-  const orderAreaPath = `${orderPath} L ${orderPoints[orderPoints.length - 1].x} 200 L ${orderPoints[0].x} 200 Z`;
+  const orderAreaPath = orderPoints.length
+    ? `${orderPath} L ${orderPoints[orderPoints.length - 1].x} 200 L ${orderPoints[0].x} 200 Z`
+    : '';
   const hoveredTrend = hoveredTrendIndex === null ? null : trendData[hoveredTrendIndex];
   const hoveredPoint = hoveredTrendIndex === null ? null : orderPoints[hoveredTrendIndex];
   const tooltipX = hoveredPoint ? Math.min(Math.max(hoveredPoint.x, 88), 512) : 0;
@@ -160,10 +127,32 @@ export default function DashboardScreen({ logs, ledgers, orders, onNavigate }: D
               ))}
             </select>
           </label>
-          <button className="flex items-center gap-2 px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-lg shadow-sm transition-colors text-xs font-mono">
+          <div className="flex items-center gap-2 px-3 py-1.5 bg-white border border-slate-200 text-slate-700 rounded-lg shadow-sm text-xs">
             <Calendar className="w-4 h-4 text-slate-400" />
-            <span>{timeStr || '加载中...'}</span>
-          </button>
+            <span className="font-medium text-slate-500">订单日期</span>
+            <input
+              type="date"
+              value={startDate}
+              onChange={(event) => setStartDate(event.target.value)}
+              max={endDate || undefined}
+              className="w-[116px] bg-transparent outline-none text-slate-800 font-medium cursor-pointer"
+              aria-label="订单日期开始日期"
+            />
+            <span className="text-slate-400">至</span>
+            <input
+              type="date"
+              value={endDate}
+              onChange={(event) => setEndDate(event.target.value)}
+              min={startDate || undefined}
+              className="w-[116px] bg-transparent outline-none text-slate-800 font-medium cursor-pointer"
+              aria-label="订单日期结束日期"
+            />
+          </div>
+          <div className="flex items-center gap-2 px-3 py-1.5 bg-white border border-slate-200 text-slate-700 rounded-lg shadow-sm text-xs font-mono" title="当前筛选结果中的数据最新修改时间">
+            <Calendar className="w-4 h-4 text-slate-400" />
+            <span className="font-sans font-medium text-slate-500">数据最新修改</span>
+            <span>{latestModifiedAt || '--'}</span>
+          </div>
         </div>
       </div>
 
@@ -224,57 +213,59 @@ export default function DashboardScreen({ logs, ledgers, orders, onNavigate }: D
               <div className="border-b border-slate-200 w-full" />
               <div className="border-b border-slate-200 w-full" />
             </div>
-            <svg className="w-full h-full overflow-visible" preserveAspectRatio="none" viewBox="0 0 600 200">
-              <defs>
-                <linearGradient id="blueGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#1167c9" stopOpacity="0.12" />
-                  <stop offset="100%" stopColor="#1167c9" stopOpacity="0" />
-                </linearGradient>
-              </defs>
-              <path d={orderAreaPath} fill="url(#blueGrad)" />
-              <path d={orderPath} fill="none" stroke="#1167c9" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-              <path
-                d={profitPath}
-                fill="none"
-                stroke="#64748b"
-                strokeWidth="2"
-                strokeDasharray="5 5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-              {trendData.map((item, index) => {
-                const orderPoint = orderPoints[index];
-                const profitPoint = profitPoints[index];
-                return (
-                  <g key={item.month} onMouseEnter={() => setHoveredTrendIndex(index)} onMouseLeave={() => setHoveredTrendIndex(null)}>
-                    <circle cx={orderPoint.x} cy={orderPoint.y} r="11" fill="transparent" />
-                    <circle cx={profitPoint.x} cy={profitPoint.y} r="11" fill="transparent" />
-                    <circle cx={orderPoint.x} cy={orderPoint.y} r="3.8" fill="#1167c9" stroke="#ffffff" strokeWidth="1.5" />
-                    <circle cx={profitPoint.x} cy={profitPoint.y} r="3.4" fill="#64748b" stroke="#ffffff" strokeWidth="1.4" />
+            {trendData.length > 0 ? (
+              <svg className="w-full h-full overflow-visible" preserveAspectRatio="none" viewBox="0 0 600 200">
+                <defs>
+                  <linearGradient id="blueGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#1167c9" stopOpacity="0.12" />
+                    <stop offset="100%" stopColor="#1167c9" stopOpacity="0" />
+                  </linearGradient>
+                </defs>
+                <path d={orderAreaPath} fill="url(#blueGrad)" />
+                <path d={orderPath} fill="none" stroke="#1167c9" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+                <path
+                  d={profitPath}
+                  fill="none"
+                  stroke="#64748b"
+                  strokeWidth="2"
+                  strokeDasharray="5 5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+                {trendData.map((item, index) => {
+                  const orderPoint = orderPoints[index];
+                  const profitPoint = profitPoints[index];
+                  return (
+                    <g key={item.month} onMouseEnter={() => setHoveredTrendIndex(index)} onMouseLeave={() => setHoveredTrendIndex(null)}>
+                      <circle cx={orderPoint.x} cy={orderPoint.y} r="11" fill="transparent" />
+                      <circle cx={profitPoint.x} cy={profitPoint.y} r="11" fill="transparent" />
+                      <circle cx={orderPoint.x} cy={orderPoint.y} r="3.8" fill="#1167c9" stroke="#ffffff" strokeWidth="1.5" />
+                      <circle cx={profitPoint.x} cy={profitPoint.y} r="3.4" fill="#64748b" stroke="#ffffff" strokeWidth="1.4" />
+                    </g>
+                  );
+                })}
+                {hoveredTrend && (
+                  <g pointerEvents="none">
+                    <rect x={tooltipX - 86} y={tooltipY} width="172" height="48" rx="6" fill="#0f172a" opacity="0.92" />
+                    <text x={tooltipX - 74} y={tooltipY + 17} fill="#ffffff" fontSize="10" fontWeight="600">
+                      {hoveredTrend.month}
+                    </text>
+                    <text x={tooltipX - 74} y={tooltipY + 32} fill="#bfdbfe" fontSize="9">
+                      订单金额 {compactMoney(hoveredTrend.orderAmount)}
+                    </text>
+                    <text x={tooltipX + 8} y={tooltipY + 32} fill="#cbd5e1" fontSize="9">
+                      毛利润 {compactMoney(hoveredTrend.profit)}
+                    </text>
                   </g>
-                );
-              })}
-              {hoveredTrend && (
-                <g pointerEvents="none">
-                  <rect x={tooltipX - 86} y={tooltipY} width="172" height="48" rx="6" fill="#0f172a" opacity="0.92" />
-                  <text x={tooltipX - 74} y={tooltipY + 17} fill="#ffffff" fontSize="10" fontWeight="600">
-                    {hoveredTrend.month}
-                  </text>
-                  <text x={tooltipX - 74} y={tooltipY + 32} fill="#bfdbfe" fontSize="9">
-                    订单金额 {compactMoney(hoveredTrend.orderAmount)}
-                  </text>
-                  <text x={tooltipX + 8} y={tooltipY + 32} fill="#cbd5e1" fontSize="9">
-                    毛利润 {compactMoney(hoveredTrend.profit)}
-                  </text>
-                </g>
-              )}
-            </svg>
+                )}
+              </svg>
+            ) : (
+              <div className="absolute inset-0 flex items-center justify-center text-sm text-slate-400">暂无符合筛选条件的趋势数据</div>
+            )}
           </div>
 
           <div className="flex justify-between mt-4 text-xs font-mono text-slate-400">
-            {trendData.map((item) => (
-              <span key={item.month}>{item.month}</span>
-            ))}
+            {trendData.length > 0 && trendData.map((item) => <span key={item.month}>{item.month}</span>)}
           </div>
         </div>
 
@@ -298,7 +289,7 @@ export default function DashboardScreen({ logs, ledgers, orders, onNavigate }: D
               ))}
               {salesRanking.length === 0 && (
                 <div className="text-xs text-slate-400 py-4 text-center">
-                  {selectedDepartment ? '暂无三级团队排行数据' : '暂无部门排行数据'}
+                  {selectedDepartment ? '暂无符合筛选条件的三级团队排行数据' : '暂无符合筛选条件的部门排行数据'}
                 </div>
               )}
             </div>

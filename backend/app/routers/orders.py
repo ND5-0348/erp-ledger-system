@@ -214,7 +214,14 @@ def list_orders(
                        delivery_cost,
                        pending_delivery_quantity,
                        pending_delivery_amount_no_tax,
-                       pending_delivery_amount
+                       pending_delivery_amount,
+                       total_received,
+                       total_paid,
+                       accounts_receivable,
+                       accounts_payable,
+                       gross_profit,
+                       close_status,
+                       last_modified_at
                 FROM (
                     SELECT
                            p.project_code,
@@ -232,6 +239,13 @@ def list_orders(
                            so.statistic_category,
                            p.customer_unit_name,
                            COALESCE(ol.project_name, p.project_name) AS project_name,
+                           finance.total_received,
+                           finance.total_paid,
+                           finance.accounts_receivable,
+                           finance.accounts_payable,
+                           finance.gross_profit,
+                           finance.close_status,
+                           finance.last_modified_at,
                            ol.goods_name,
                            ol.specification_model,
                            ol.unit_name,
@@ -265,6 +279,7 @@ def list_orders(
                     JOIN order_line ol ON ol.sales_order_id = so.id AND ol.deleted_at IS NULL
                     LEFT JOIN purchase_info pi ON pi.order_line_id = ol.id AND pi.deleted_at IS NULL
                     LEFT JOIN delivery_record dr ON dr.order_line_id = ol.id AND dr.deleted_at IS NULL
+                    LEFT JOIN v_order_line_finance finance ON finance.order_line_id = ol.id
                     WHERE p.deleted_at IS NULL
                 ) order_detail
                 WHERE {where_sql}

@@ -269,6 +269,22 @@ def _sales_editor_payload(editor_response: dict, row: dict) -> dict:
     return payload
 
 
+def test_orders_list_includes_the_latest_data_modification_time(
+    client: TestClient,
+    headers: dict[str, str],
+) -> None:
+    _create_order(client, headers, "LATEST-MODIFIED")
+
+    response = client.get("/api/orders", params={"project_id": "QA-LATEST-MODIFIED"}, headers=headers)
+
+    assert response.status_code == 200, response.text
+    item = response.json()["items"][0]
+    assert item["last_modified_at"]
+    assert _d(item["gross_profit"]) == Decimal("339.00")
+    assert _d(item["accounts_receivable"]) == Decimal("1130.00")
+    assert _d(item["accounts_payable"]) == Decimal("791.00")
+
+
 def test_batch_basic_editor_schema_create_update_and_readonly_boundary(
     client: TestClient,
     headers: dict[str, str],

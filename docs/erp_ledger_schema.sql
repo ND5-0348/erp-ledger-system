@@ -417,6 +417,20 @@ SELECT
   p.end_user_name,
   p.regional_platform,
   COALESCE(ol.project_name, p.project_name) AS project_name,
+  GREATEST(
+    p.updated_at,
+    so.updated_at,
+    ol.updated_at,
+    COALESCE(pi.updated_at, '1000-01-01 00:00:00'),
+    COALESCE(dr.updated_at, '1000-01-01 00:00:00'),
+    COALESCE(pc.last_modified_at, '1000-01-01 00:00:00'),
+    COALESCE(sc.last_modified_at, '1000-01-01 00:00:00'),
+    COALESCE(si_total.last_modified_at, '1000-01-01 00:00:00'),
+    COALESCE(fic_total.last_modified_at, '1000-01-01 00:00:00'),
+    COALESCE(fpe_total.last_modified_at, '1000-01-01 00:00:00'),
+    COALESCE(sr_total.last_modified_at, '1000-01-01 00:00:00'),
+    COALESCE(pay_total.last_modified_at, '1000-01-01 00:00:00')
+  ) AS last_modified_at,
   so.close_status,
   ol.id AS order_line_id,
   ol.goods_name,
@@ -475,7 +489,8 @@ LEFT JOIN (
   SELECT
     order_line_id,
     GROUP_CONCAT(DISTINCT purchase_contract_no ORDER BY id SEPARATOR ', ') AS purchase_contract_no,
-    SUM(COALESCE(signed_amount, 0)) AS signed_amount
+    SUM(COALESCE(signed_amount, 0)) AS signed_amount,
+    MAX(updated_at) AS last_modified_at
   FROM purchase_contract
   WHERE deleted_at IS NULL
   GROUP BY order_line_id
@@ -485,37 +500,38 @@ LEFT JOIN (
     order_line_id,
     GROUP_CONCAT(DISTINCT sales_contract_no ORDER BY id SEPARATOR ', ') AS sales_contract_no,
     MAX(contract_signed_date) AS contract_signed_date,
-    SUM(COALESCE(contract_value, 0)) AS contract_value
+    SUM(COALESCE(contract_value, 0)) AS contract_value,
+    MAX(updated_at) AS last_modified_at
   FROM sales_contract
   WHERE deleted_at IS NULL
   GROUP BY order_line_id
 ) sc ON sc.order_line_id = ol.id
 LEFT JOIN (
-  SELECT order_line_id, SUM(COALESCE(invoice_amount, 0)) AS invoice_amount
+  SELECT order_line_id, SUM(COALESCE(invoice_amount, 0)) AS invoice_amount, MAX(updated_at) AS last_modified_at
   FROM sales_invoice
   WHERE deleted_at IS NULL
   GROUP BY order_line_id
 ) si_total ON si_total.order_line_id = ol.id
 LEFT JOIN (
-  SELECT order_line_id, SUM(COALESCE(received_invoice_amount, 0)) AS received_invoice_amount
+  SELECT order_line_id, SUM(COALESCE(received_invoice_amount, 0)) AS received_invoice_amount, MAX(updated_at) AS last_modified_at
   FROM finance_invoice_check
   WHERE deleted_at IS NULL
   GROUP BY order_line_id
 ) fic_total ON fic_total.order_line_id = ol.id
 LEFT JOIN (
-  SELECT order_line_id, SUM(COALESCE(booked_amount, 0)) AS booked_amount
+  SELECT order_line_id, SUM(COALESCE(booked_amount, 0)) AS booked_amount, MAX(updated_at) AS last_modified_at
   FROM finance_payment_entry
   WHERE deleted_at IS NULL
   GROUP BY order_line_id
 ) fpe_total ON fpe_total.order_line_id = ol.id
 LEFT JOIN (
-  SELECT order_line_id, SUM(COALESCE(receipt_amount, 0)) AS receipt_amount
+  SELECT order_line_id, SUM(COALESCE(receipt_amount, 0)) AS receipt_amount, MAX(updated_at) AS last_modified_at
   FROM sales_receipt
   WHERE deleted_at IS NULL
   GROUP BY order_line_id
 ) sr_total ON sr_total.order_line_id = ol.id
 LEFT JOIN (
-  SELECT order_line_id, SUM(COALESCE(payment_amount, 0)) AS payment_amount
+  SELECT order_line_id, SUM(COALESCE(payment_amount, 0)) AS payment_amount, MAX(updated_at) AS last_modified_at
   FROM purchase_payment
   WHERE deleted_at IS NULL
   GROUP BY order_line_id
