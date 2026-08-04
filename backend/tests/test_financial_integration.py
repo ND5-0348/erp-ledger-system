@@ -1036,6 +1036,117 @@ def test_excel_template_import_export_round_trip(client: TestClient, headers: di
     assert "开始日期不能晚于结束日期" in invalid_date_range_response.json()["detail"]
 
 
+def test_ledger_export_filters_apply_to_exported_order_lines(
+    client: TestClient,
+    headers: dict[str, str],
+) -> None:
+    shared_project = {
+        "project_code": "QA-EXPORT-FILTER-PROJECT",
+        "project_name": "Export Filter Project",
+        "department": "EXPORT-QA",
+        "branch_company": "Export Branch",
+        "account_manager": "Export Manager",
+        "customer_unit_name": "Export Customer",
+    }
+    first_line_id, _ = _create_order(
+        client,
+        headers,
+        "EXPORT-FILTER-A",
+        **shared_project,
+        order_no="SO-EXPORT-FILTER-A",
+        order_date="2026-08-01",
+        supplier_name="Export Supplier A",
+        goods_name="Export Goods A",
+    )
+    second_line_id, _ = _create_order(
+        client,
+        headers,
+        "EXPORT-FILTER-B",
+        **shared_project,
+        order_no="SO-EXPORT-FILTER-B",
+        order_date="2026-08-02",
+        supplier_name="Export Supplier B",
+        goods_name="Export Goods B",
+    )
+
+    for line_id, suffix, invoice_date in (
+        (first_line_id, "A", "2026-08-10"),
+        (second_line_id, "B", "2026-08-11"),
+    ):
+        response = client.post(
+            f"/api/sales/{line_id}/invoices",
+            json={
+                "invoice_doc_no": f"DOC-EXPORT-{suffix}",
+                "invoice_date": invoice_date,
+                "invoice_no": f"INV-EXPORT-{suffix}",
+                "invoice_amount": "1130.00",
+                "pending_invoice_amount": "0.00",
+                "delivered_not_invoiced_amount": "0.00",
+            },
+            headers=headers,
+        )
+        assert response.status_code == 200, response.text
+
+    def exported_order_nos(params: dict[str, str]) -> list[str]:
+        response = client.get("/api/orders/export", params=params, headers=headers)
+        assert response.status_code == 200, response.text
+        workbook = load_workbook(BytesIO(response.content), read_only=True, data_only=True)
+        worksheet = workbook["Sheet1"]
+        values = [
+            str(worksheet.cell(row, 13).value)
+            for row in range(3, worksheet.max_row + 1)
+            if worksheet.cell(row, 13).value is not None
+        ]
+        workbook.close()
+        return values
+
+    both_orders = ["SO-EXPORT-FILTER-B", "SO-EXPORT-FILTER-A"]
+    project_level_cases = (
+        {"project_id": "EXPORT-FILTER-PROJECT"},
+        {"department": "EXPORT-QA"},
+        {"manager": "Export Manager"},
+        {"client_unit": "Export Customer"},
+        {"order_status": "open"},
+    )
+    for params in project_level_cases:
+        assert exported_order_nos(params) == both_orders
+
+    row_level_cases = (
+        ({"order_id": "FILTER-A"}, ["SO-EXPORT-FILTER-A"]),
+        ({"start_date": "2026-08-01", "end_date": "2026-08-01"}, ["SO-EXPORT-FILTER-A"]),
+        ({"supplier_name": "Supplier A"}, ["SO-EXPORT-FILTER-A"]),
+        (
+            {"invoice_start_date": "2026-08-10", "invoice_end_date": "2026-08-10"},
+            ["SO-EXPORT-FILTER-A"],
+        ),
+        (
+            {
+                "project_id": "EXPORT-FILTER-PROJECT",
+                "order_id": "FILTER-A",
+                "supplier_name": "Supplier A",
+                "invoice_start_date": "2026-08-10",
+                "invoice_end_date": "2026-08-10",
+            },
+            ["SO-EXPORT-FILTER-A"],
+        ),
+        ({"order_id": "FILTER-A", "supplier_name": "Supplier B"}, []),
+        ({"client_unit": "Missing Customer"}, []),
+    )
+    for params, expected in row_level_cases:
+        assert exported_order_nos(params) == expected
+
+    page_response = client.get(
+        "/api/ledgers",
+        params={"project_id": "EXPORT-FILTER-PROJECT", "order_id": "FILTER-A"},
+        headers=headers,
+    )
+    assert page_response.status_code == 200, page_response.text
+    assert page_response.json()["total"] == 1
+    assert [item["project_code"] for item in page_response.json()["items"]] == [
+        "QA-EXPORT-FILTER-PROJECT"
+    ]
+
+
 def test_release_multi_project_excel_round_trip_and_contamination_guard(
     client: TestClient,
     headers: dict[str, str],
