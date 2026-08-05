@@ -200,32 +200,20 @@ def export_ledger_bytes(
         conditions.append(f"{column} {'LIKE' if use_like else '='} :{key}")
         params[key] = f"%{value}%" if use_like else value
 
-    order_conditions = [
-        "export_order.project_id = p.id",
-        "export_order.deleted_at IS NULL",
-    ]
+    # Detail-level filters must constrain the current exported row. Filtering only
+    # by project existence would leak sibling orders from the same project.
     order_id = active_filters.get("order_id")
     if order_id not in (None, ""):
-        order_conditions.append("export_order.order_no LIKE :order_id")
+        conditions.append("so.order_no LIKE :order_id")
         params["order_id"] = f"%{order_id}%"
     start_date = active_filters.get("start_date")
     if start_date not in (None, ""):
-        order_conditions.append("export_order.order_date >= :start_date")
+        conditions.append("so.order_date >= :start_date")
         params["start_date"] = start_date
     end_date = active_filters.get("end_date")
     if end_date not in (None, ""):
-        order_conditions.append("export_order.order_date <= :end_date")
+        conditions.append("so.order_date <= :end_date")
         params["end_date"] = end_date
-    if len(order_conditions) > 2:
-        conditions.append(
-            f"""
-            EXISTS (
-              SELECT 1
-              FROM sales_order export_order
-              WHERE {' AND '.join(order_conditions)}
-            )
-            """
-        )
 
     order_status = active_filters.get("order_status")
     if order_status not in (None, ""):
@@ -243,29 +231,11 @@ def export_ledger_bytes(
 
     supplier_name = active_filters.get("supplier_name")
     if supplier_name not in (None, ""):
-        conditions.append(
-            """
-            EXISTS (
-              SELECT 1
-              FROM sales_order export_supplier_order
-              JOIN order_line export_supplier_line
-                ON export_supplier_line.sales_order_id = export_supplier_order.id
-               AND export_supplier_line.deleted_at IS NULL
-              JOIN purchase_info export_purchase
-                ON export_purchase.order_line_id = export_supplier_line.id
-               AND export_purchase.deleted_at IS NULL
-              WHERE export_supplier_order.project_id = p.id
-                AND export_supplier_order.deleted_at IS NULL
-                AND export_purchase.supplier_name LIKE :supplier_name
-            )
-            """
-        )
+        conditions.append("pi.supplier_name LIKE :supplier_name")
         params["supplier_name"] = f"%{supplier_name}%"
 
     invoice_conditions = [
-        "export_invoice_order.project_id = p.id",
-        "export_invoice_order.deleted_at IS NULL",
-        "export_invoice_line.deleted_at IS NULL",
+        "export_invoice.order_line_id = ol.id",
         "export_invoice.deleted_at IS NULL",
     ]
     invoice_start_date = active_filters.get("invoice_start_date")
@@ -276,16 +246,12 @@ def export_ledger_bytes(
     if invoice_end_date not in (None, ""):
         invoice_conditions.append("export_invoice.invoice_date <= :invoice_end_date")
         params["invoice_end_date"] = invoice_end_date
-    if len(invoice_conditions) > 4:
+    if len(invoice_conditions) > 2:
         conditions.append(
             f"""
             EXISTS (
               SELECT 1
-              FROM sales_order export_invoice_order
-              JOIN order_line export_invoice_line
-                ON export_invoice_line.sales_order_id = export_invoice_order.id
-              JOIN sales_invoice export_invoice
-                ON export_invoice.order_line_id = export_invoice_line.id
+              FROM sales_invoice export_invoice
               WHERE {' AND '.join(invoice_conditions)}
             )
             """
