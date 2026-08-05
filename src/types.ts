@@ -30,6 +30,13 @@ export interface OrderRecord {
   manager?: string; // 客户经理
   orderId: string; // 销售订单号
   orderDate: string; // 订单日期
+  updatedAt?: string; // 订单关联数据最新修改时间
+  orderStatus?: string; // 订单状态
+  totalReceived?: number; // 回款合计
+  totalPaid?: number; // 付款合计
+  accountsReceivable?: number; // 应收账款
+  accountsPayable?: number; // 应付账款
+  grossProfit?: number; // 毛利润
   statisticalCategory?: string; // 统计类别
   teamName?: string; // 三级团队名称
   goodsName: string; // 物资/服务名称

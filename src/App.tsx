@@ -36,6 +36,7 @@ import {
   formatOperationLogChangeGroups,
   formatOperationLogDetails,
 } from './lib/operationLogDisplay';
+import { formatDatabaseUtcTime } from './lib/dateTime';
 
 import DashboardScreen from './components/DashboardScreen';
 import LedgerScreen from './components/LedgerScreen';
@@ -49,10 +50,6 @@ const ztfsIconLogo = new URL('./logo/中通服图标LOGO.png', import.meta.url).
 
 function dateOnly(value: string | null | undefined) {
   return value ? value.slice(0, 10) : '';
-}
-
-function dateTime(value: string | null | undefined) {
-  return value ? value.replace('T', ' ').slice(0, 19) : '';
 }
 
 function optionalNumber(value: number | null | undefined) {
@@ -91,6 +88,13 @@ function mapOrder(item: BackendOrderRecord): OrderRecord {
     manager: item.account_manager || '',
     orderId: item.order_no,
     orderDate: dateOnly(item.order_date),
+    updatedAt: formatDatabaseUtcTime(item.last_modified_at),
+    orderStatus: item.close_status || '',
+    totalReceived: optionalNumber(item.total_received),
+    totalPaid: optionalNumber(item.total_paid),
+    accountsReceivable: optionalNumber(item.accounts_receivable),
+    accountsPayable: optionalNumber(item.accounts_payable),
+    grossProfit: optionalNumber(item.gross_profit),
     statisticalCategory: item.statistical_category || '',
     teamName: item.team_name || '',
     goodsName: item.goods_name || fallbackText,
@@ -171,7 +175,7 @@ function mapLog(item: BackendOperationLog): OperationLog {
     details: formatOperationLogDetails(item),
     changeGroups: formatOperationLogChangeGroups(item),
     status: item.status === 'success' ? '成功' : item.status === 'failed' ? '失败' : '进行中',
-    time: dateTime(item.created_at),
+    time: formatDatabaseUtcTime(item.created_at),
   };
 }
 
