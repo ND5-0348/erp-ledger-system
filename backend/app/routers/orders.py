@@ -802,13 +802,19 @@ def _validate_create_payload(payload: OrderUpdate, user: CurrentUser) -> None:
         raise HTTPException(status_code=403, detail="Department permission denied")
 
 
+def _identity_number(value: object) -> Decimal:
+    """数量与单价参与明细判重：空值与 0 视为相同，精度不同（740 与 740.000000）不影响比较。"""
+    amount = _as_decimal(value)
+    return Decimal("0") if amount is None else _price(amount)
+
+
 def _validate_batch_update_targets(
     conn,
     prepared: list[tuple[dict, OrderUpdate, dict[str, object], dict[str, object]]],
 ) -> None:
     project_targets: dict[int, tuple[object, ...]] = {}
     order_targets: dict[int, tuple[object, ...]] = {}
-    line_targets: dict[int, tuple[str, str, str]] = {}
+    line_targets: dict[int, tuple[str, str, str, Decimal, Decimal, str]] = {}
     order_ids: set[int] = set()
 
     for ids, _, data, _ in prepared:
@@ -836,6 +842,9 @@ def _validate_batch_update_targets(
             str(data["project_name"] or "").strip(),
             str(data["goods_name"] or "").strip(),
             str(data["specification_model"] or "").strip(),
+            _identity_number(data["quantity"]),
+            _identity_number(data["unit_price"]),
+            str(data["supplier_name"] or "").strip(),
         )
         order_ids.add(sales_order_id)
 
@@ -843,14 +852,16 @@ def _validate_batch_update_targets(
         existing_lines = conn.execute(
             text(
                 """
-                SELECT id, project_name, goods_name, specification_model
-                FROM order_line
-                WHERE sales_order_id = :sales_order_id AND deleted_at IS NULL
+                SELECT ol.id, ol.project_name, ol.goods_name, ol.specification_model,
+                       ol.quantity, ol.sales_unit_price, pi.supplier_name
+                FROM order_line ol
+                LEFT JOIN purchase_info pi ON pi.order_line_id = ol.id AND pi.deleted_at IS NULL
+                WHERE ol.sales_order_id = :sales_order_id AND ol.deleted_at IS NULL
                 """
             ),
             {"sales_order_id": sales_order_id},
         ).mappings().all()
-        seen: set[tuple[str, str, str]] = set()
+        seen: set[tuple[str, str, str, Decimal, Decimal, str]] = set()
         for row in existing_lines:
             identity = line_targets.get(
                 int(row["id"]),
@@ -858,17 +869,24 @@ def _validate_batch_update_targets(
                     str(row["project_name"] or "").strip(),
                     str(row["goods_name"] or "").strip(),
                     str(row["specification_model"] or "").strip(),
+                    _identity_number(row["quantity"]),
+                    _identity_number(row["sales_unit_price"]),
+                    str(row["supplier_name"] or "").strip(),
                 ),
             )
             if identity in seen:
-                raise HTTPException(status_code=409, detail="同一销售订单、相同项目名称下不能存在同名同规格的重复明细")
+                raise HTTPException(
+                    status_code=409,
+                    detail="同一销售订单、相同项目名称下不能存在同名同规格同数量同单价同采购厂商的重复明细"
+                    "（数量、单价或采购厂商不同视为不同明细）",
+                )
             seen.add(identity)
 
 
 def _validate_batch_create_targets(order_payloads: list[OrderUpdate]) -> None:
     project_targets: dict[str, tuple[object, ...]] = {}
     order_targets: dict[tuple[str, str], tuple[object, ...]] = {}
-    line_targets: set[tuple[str, str, str, str, str]] = set()
+    line_targets: set[tuple[str, str, str, str, str, Decimal, Decimal, str]] = set()
 
     for payload in order_payloads:
         data = _calculated_payload_data(payload)
@@ -892,6 +910,9 @@ def _validate_batch_create_targets(order_payloads: list[OrderUpdate]) -> None:
             str(data["project_name"] or "").strip(),
             str(data["goods_name"] or "").strip(),
             str(data["specification_model"] or "").strip(),
+            _identity_number(data["quantity"]),
+            _identity_number(data["unit_price"]),
+            str(data["supplier_name"] or "").strip(),
         )
 
         if project_code in project_targets and project_targets[project_code] != project_target:
@@ -899,7 +920,11 @@ def _validate_batch_create_targets(order_payloads: list[OrderUpdate]) -> None:
         if order_identity in order_targets and order_targets[order_identity] != order_target:
             raise HTTPException(status_code=422, detail="同一销售订单的订单级字段必须保持一致，请统一修改后再提交")
         if line_identity in line_targets:
-            raise HTTPException(status_code=409, detail="同一销售订单、相同项目名称下不能存在同名同规格的重复明细")
+            raise HTTPException(
+                status_code=409,
+                detail="同一销售订单、相同项目名称下不能存在同名同规格同数量同单价同采购厂商的重复明细"
+                "（数量、单价或采购厂商不同视为不同明细）",
+            )
 
         project_targets[project_code] = project_target
         order_targets[order_identity] = order_target
@@ -1074,11 +1099,15 @@ def _create_order_line(conn, payload: OrderUpdate) -> int:
     duplicate = conn.execute(
         text(
             """
-            SELECT id FROM order_line
-            WHERE sales_order_id = :sales_order_id AND deleted_at IS NULL
-              AND TRIM(COALESCE(project_name, '')) = TRIM(COALESCE(:project_name, ''))
-              AND TRIM(COALESCE(goods_name, '')) = TRIM(COALESCE(:goods_name, ''))
-              AND TRIM(COALESCE(specification_model, '')) = TRIM(COALESCE(:specification_model, ''))
+            SELECT ol.id FROM order_line ol
+            LEFT JOIN purchase_info pi ON pi.order_line_id = ol.id AND pi.deleted_at IS NULL
+            WHERE ol.sales_order_id = :sales_order_id AND ol.deleted_at IS NULL
+              AND TRIM(COALESCE(ol.project_name, '')) = TRIM(COALESCE(:project_name, ''))
+              AND TRIM(COALESCE(ol.goods_name, '')) = TRIM(COALESCE(:goods_name, ''))
+              AND TRIM(COALESCE(ol.specification_model, '')) = TRIM(COALESCE(:specification_model, ''))
+              AND COALESCE(ol.quantity, 0) = COALESCE(:quantity, 0)
+              AND COALESCE(ol.sales_unit_price, 0) = COALESCE(:sales_unit_price, 0)
+              AND TRIM(COALESCE(pi.supplier_name, '')) = TRIM(COALESCE(:supplier_name, ''))
             LIMIT 1
             """
         ),
@@ -1087,10 +1116,17 @@ def _create_order_line(conn, payload: OrderUpdate) -> int:
             "goods_name": data["goods_name"],
             "project_name": data["project_name"],
             "specification_model": data["specification_model"],
+            "quantity": _as_decimal(data["quantity"]),
+            "sales_unit_price": _as_decimal(data["unit_price"]),
+            "supplier_name": data["supplier_name"],
         },
     ).scalar()
     if duplicate:
-        raise HTTPException(status_code=409, detail="相同订单、相同项目名称下已存在同名同规格的明细")
+        raise HTTPException(
+            status_code=409,
+            detail="相同订单、相同项目名称下已存在同名同规格同数量同单价同采购厂商的明细"
+            "（数量、单价或采购厂商不同视为不同明细）",
+        )
 
     result = conn.execute(
         text(

@@ -97,6 +97,16 @@ def _row_value(row: tuple[Any, ...], position: int) -> Any:
     return row[index] if 0 <= index < len(row) else None
 
 
+# 业务载荷列（模板布局下的绝对列号）：部门、订单日期、项目名称、货物名称、
+# 规格型号、数量、单价、订单价值、采购厂商。只填了项目编号或订单号、
+# 这些列全空的行不是业务数据。
+BUSINESS_PAYLOAD_POSITIONS = (3, 6, 14, 15, 16, 18, 21, 23, 24)
+
+
+def _has_business_payload(row: tuple[Any, ...]) -> bool:
+    return any(_as_text(_row_value(row, position)) for position in BUSINESS_PAYLOAD_POSITIONS)
+
+
 def _is_latest_layout(headers: list[Any] | tuple[Any, ...]) -> bool:
     header_names = {str(header or "").strip() for header in headers}
     return bool(LATEST_LAYOUT_HEADERS & header_names)
@@ -214,6 +224,7 @@ def import_excel(
 
     success_rows = 0
     failed_rows = 0
+    skipped_rows = 0
     error_messages: list[str] = []
 
     for excel_row_no, row in enumerate(
@@ -230,8 +241,12 @@ def import_excel(
             raise ValueError(f"第 {excel_row_no} 行仍包含示例占位内容，请完整替换项目编号和销售订单号")
         if not project_code or not order_no:
             message = f"第 {excel_row_no} 行缺少项目编号或订单号"
-            if strict_template:
+            # 生成式 AI 工具会在表格末尾追加 AIGC 标识行（浅色字体，只有前两列有
+            # 内容，没有订单号）。这类行没有任何业务载荷，按非业务行跳过并计数；
+            # 有业务载荷却缺编号的属于用户漏填，仍整批报错提示修改。
+            if strict_template and _has_business_payload(row):
                 raise ValueError(message)
+            skipped_rows += 1
             continue
 
         row_dict = {
@@ -245,15 +260,6 @@ def import_excel(
             department = _as_text(_row_value(row, position(3, 3)))
             if user and not can_access_department(user, department, require_entry=True):
                 raise PermissionError(f"无权向部门“{department or '空'}”导入数据")
-            if strict_template and _order_line_exists(
-                conn,
-                project_code,
-                order_no,
-                _as_text(_row_value(row, position(15, 15))),
-                _as_text(_row_value(row, position(16, 16))),
-                _as_text(_row_value(row, position(14, 14))),
-            ):
-                raise ValueError(f"项目 {project_code}、订单 {order_no} 下相同项目名称的同名同规格明细已存在")
 
             raw_row_id = _execute_scalar(
                 conn,
@@ -345,6 +351,22 @@ def import_excel(
             )
             revenue_no_tax = revenue_no_tax or _as_decimal(_row_value(row, position(22, 21)))
             order_value = order_value or _as_decimal(_row_value(row, position(23, 22)))
+
+            # 数量、单价或采购厂商不同的明细视为不同行（同货物分批次、不同单价、不同供应商可以共存）。
+            if strict_template and _order_line_exists(
+                conn,
+                project_code,
+                order_no,
+                _as_text(_row_value(row, position(15, 15))),
+                _as_text(_row_value(row, position(16, 16))),
+                _as_text(_row_value(row, position(14, 14))),
+                quantity,
+                sales_unit_price,
+                _as_text(_row_value(row, position(24, 23))),
+            ):
+                raise ValueError(
+                    f"项目 {project_code}、订单 {order_no} 下相同项目名称的同名同规格同数量同单价同采购厂商的明细已存在"
+                )
 
             order_line_id = _execute_scalar(
                 conn,
@@ -613,6 +635,8 @@ def import_excel(
         raise ValueError("导入文件中没有可导入的业务数据")
 
     detail = f"导入 {source_file_name}: 成功 {success_rows} 行，失败 {failed_rows} 行"
+    if skipped_rows:
+        detail = f"{detail}，跳过非业务行 {skipped_rows} 行"
     if user and failed_rows == 0:
         write_operation_log(
             conn,
@@ -638,6 +662,7 @@ def import_excel(
         "source_file": source_file_name,
         "success_rows": success_rows,
         "failed_rows": failed_rows,
+        "skipped_rows": skipped_rows,
         "errors": error_messages[:20],
     }
 
@@ -649,6 +674,9 @@ def _order_line_exists(
     goods_name: str | None,
     specification_model: str | None,
     project_name: str | None,
+    quantity: Decimal | None,
+    sales_unit_price: Decimal | None,
+    supplier_name: str | None,
 ) -> bool:
     return bool(
         conn.execute(
@@ -658,11 +686,15 @@ def _order_line_exists(
                 FROM project p
                 JOIN sales_order so ON so.project_id = p.id AND so.deleted_at IS NULL
                 JOIN order_line ol ON ol.sales_order_id = so.id AND ol.deleted_at IS NULL
+                LEFT JOIN purchase_info pi ON pi.order_line_id = ol.id AND pi.deleted_at IS NULL
                 WHERE p.project_code = :project_code
                   AND so.order_no = :order_no
                   AND TRIM(COALESCE(ol.project_name, '')) = TRIM(COALESCE(:project_name, ''))
                   AND TRIM(COALESCE(ol.goods_name, '')) = TRIM(COALESCE(:goods_name, ''))
                   AND TRIM(COALESCE(ol.specification_model, '')) = TRIM(COALESCE(:specification_model, ''))
+                  AND COALESCE(ol.quantity, 0) = COALESCE(:quantity, 0)
+                  AND COALESCE(ol.sales_unit_price, 0) = COALESCE(:sales_unit_price, 0)
+                  AND TRIM(COALESCE(pi.supplier_name, '')) = TRIM(COALESCE(:supplier_name, ''))
                   AND p.deleted_at IS NULL
                 """
             ),
@@ -672,6 +704,9 @@ def _order_line_exists(
                 "goods_name": goods_name,
                 "specification_model": specification_model,
                 "project_name": project_name,
+                "quantity": quantity,
+                "sales_unit_price": sales_unit_price,
+                "supplier_name": supplier_name,
             },
         ).scalar()
     )

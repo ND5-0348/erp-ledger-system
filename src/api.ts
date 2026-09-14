@@ -480,7 +480,13 @@ export const api = {
   exportOrdersExcel: (params: Record<string, string | number | undefined> = {}) =>
     requestBlob(`/orders/export${query(params)}`),
   importOrdersExcel: (file: File) =>
-    uploadExcel<{ batch_id: number; source_file: string; success_rows: number; failed_rows: number }>(
+    uploadExcel<{
+      batch_id: number;
+      source_file: string;
+      success_rows: number;
+      failed_rows: number;
+      skipped_rows: number;
+    }>(
       `/orders/import-excel${query({ filename: file.name })}`,
       file,
     ),

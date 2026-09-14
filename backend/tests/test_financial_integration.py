@@ -2096,15 +2096,19 @@ def test_invalid_input_cases(case: str, client: TestClient, headers: dict[str, s
         assert _count("project") == _count("sales_order") == _count("order_line") == 0
 
     elif case == "I-07":
+        # 判重键含数量与单价：完全一致的明细拒绝，数量或单价不同的视为不同明细。
         order_line_id, payload = _create_order(client, headers, case)
-        payload["quantity"] = "99.000000"
         response = client.post("/api/orders", json=payload, headers=headers)
         assert response.status_code == 409, response.text
         with db() as conn:
             quantity = conn.execute(text("SELECT quantity FROM order_line WHERE id = :id"), {"id": order_line_id}).scalar_one()
         assert _d(quantity) == Decimal("10.0000")
         assert _count("order_line") == 1
-        assert _action_count("create_order") == 1
+        for field, value in (("quantity", "99.000000"), ("unit_price", "120.000000")):
+            response = client.post("/api/orders", json={**payload, field: value}, headers=headers)
+            assert response.status_code == 200, response.text
+        assert _count("order_line") == 3
+        assert _action_count("create_order") == 3
 
     elif case == "I-08":
         valid = _payload("I08-valid")

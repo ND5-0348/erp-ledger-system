@@ -51,7 +51,7 @@ interface OrderDeliveryEntry {
 interface OrdersScreenProps {
   orders: OrderRecord[];
   onAddOrder: (order: OrderRecord) => Promise<void>;
-  onImportExcel: (file: File) => Promise<number>;
+  onImportExcel: (file: File) => Promise<{ success_rows: number; skipped_rows: number }>;
   onUpdateOrder: (target: OrderRecord, order: OrderRecord) => Promise<void>;
   onDeleteOrder: (target: OrderRecord) => Promise<void>;
   onBatchSaved: () => Promise<void>;
@@ -617,9 +617,12 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
     const file = event.target.files?.[0];
     if (!file) return;
     try {
-      const created = await onImportExcel(file);
+      const result = await onImportExcel(file);
       setCurrentPage(1);
-      alert(`批量导入完成：成功导入 ${created} 条业务台账明细。`);
+      const skipped = result.skipped_rows
+        ? `，跳过 ${result.skipped_rows} 行非业务数据（如表格末尾的 AIGC 标识行）`
+        : '';
+      alert(`批量导入完成：成功导入 ${result.success_rows} 条业务台账明细${skipped}。`);
     } catch (error) {
       alert(error instanceof Error ? error.message : '批量导入失败，未写入任何数据');
     } finally {

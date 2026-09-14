@@ -383,7 +383,7 @@ export default function App() {
   const handleImportExcel = async (file: File) => {
     const result = await api.importOrdersExcel(file);
     await loadBackendData();
-    return result.success_rows;
+    return result;
   };
 
   const handleUpdateOrder = async (target: OrderRecord, updatedItem: OrderRecord) => {
