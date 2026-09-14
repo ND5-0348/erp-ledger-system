@@ -44,9 +44,9 @@ function money(value: number) {
 
 function compactMoney(value: number) {
   if (Math.abs(value) >= 10000) {
-    return `${(value / 10000).toFixed(1)}万`;
+    return `${(value / 10000).toFixed(2)} 万元`;
   }
-  return money(value);
+  return `${value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} 元`;
 }
 
 function smoothPath(points: TrendPoint[]) {
@@ -96,10 +96,10 @@ export default function DashboardScreen({ logs, ledgers, orders, onNavigate }: D
   const metrics = [
     { label: '销售订单总金额', value: compactMoney(dashboardMetrics.totalOrderAmount), icon: Wallet, trend: '实时', trendType: 'up' },
     { label: '毛利润', value: compactMoney(dashboardMetrics.grossProfit), icon: TrendingUp, trend: '实时', trendType: 'up' },
-    { label: '订单总数', value: dashboardMetrics.orderCount.toLocaleString('zh-CN'), icon: ShoppingCart, trend: '实时', trendType: 'up' },
+    { label: '订单总数', value: `${dashboardMetrics.orderCount.toLocaleString('zh-CN')} 个`, icon: ShoppingCart, trend: '实时', trendType: 'up' },
     { label: '应收账款', value: compactMoney(dashboardMetrics.accountsReceivable), icon: ArrowDownLeft, trend: '实时', trendType: 'down' },
     { label: '应付账款', value: compactMoney(dashboardMetrics.accountsPayable), icon: ArrowUpRight, trend: '实时', trendType: 'flat' },
-    { label: '已关闭订单', value: dashboardMetrics.closedCount.toLocaleString('zh-CN'), icon: CheckCircle2, trend: '实时', trendType: 'up' },
+    { label: '已关闭订单', value: `${dashboardMetrics.closedCount.toLocaleString('zh-CN')} 个`, icon: CheckCircle2, trend: '实时', trendType: 'up' },
   ] as const;
 
   return (
@@ -150,7 +150,7 @@ export default function DashboardScreen({ logs, ledgers, orders, onNavigate }: D
           </div>
           <div className="flex items-center gap-2 px-3 py-1.5 bg-white border border-slate-200 text-slate-700 rounded-lg shadow-sm text-xs font-mono" title="当前筛选结果中的数据最新修改时间">
             <Calendar className="w-4 h-4 text-slate-400" />
-            <span className="font-sans font-medium text-slate-500">数据最新修改</span>
+            <span className="font-sans font-medium text-slate-500">数据最新修改（北京时间）</span>
             <span>{latestModifiedAt || '--'}</span>
           </div>
         </div>

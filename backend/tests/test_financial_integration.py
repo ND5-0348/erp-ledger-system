@@ -878,6 +878,30 @@ def _excel_import_file() -> bytes:
     return output.getvalue()
 
 
+@pytest.mark.parametrize('spec', [None, '型号A'])
+def test_import_same_goods_in_two_named_projects(client: TestClient, headers: dict[str, str], spec) -> None:
+    workbook = load_workbook(BytesIO(_excel_import_file()))
+    sheet = workbook.worksheets[0]
+    sheet.cell(3, 14, '项目甲')
+    sheet.cell(3, 16).value = spec
+    values = [sheet.cell(3, column).value for column in range(1, 92)]
+    values[13] = '项目乙'
+    sheet.append(values)
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    response = client.post('/api/orders/import-excel?filename=multi-project.xlsx',
+                           content=output.getvalue(), headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json()['success_rows'] == 2
+    assert _count('sales_order') == 1
+    assert _count('order_line') == 2
+    repeated = client.post('/api/orders/import-excel?filename=multi-project.xlsx',
+                           content=output.getvalue(), headers=headers)
+    assert repeated.status_code == 422, repeated.text
+    assert _count('order_line') == 2
+
+
 def test_excel_template_import_export_round_trip(client: TestClient, headers: dict[str, str]) -> None:
     template_response = client.get("/api/orders/template", headers=headers)
     assert template_response.status_code == 200, template_response.text

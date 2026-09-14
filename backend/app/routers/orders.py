@@ -283,7 +283,7 @@ def list_orders(
                     WHERE p.deleted_at IS NULL
                 ) order_detail
                 WHERE {where_sql}
-                ORDER BY order_date DESC, order_no
+                ORDER BY order_date DESC, order_no, order_line_id
                 LIMIT :limit OFFSET :offset
                 """
             ),
@@ -617,6 +617,7 @@ def update_order_line(
         "pending_delivery_amount": data["pending_delivery_amount"],
     }
     with db() as conn:
+        _validate_batch_update_targets(conn, [(ids, payload, data, {})])
         before = conn.execute(
             text("SELECT * FROM v_order_line_finance WHERE order_line_id = :order_line_id"),
             {"order_line_id": order_line_id},
@@ -807,7 +808,7 @@ def _validate_batch_update_targets(
 ) -> None:
     project_targets: dict[int, tuple[object, ...]] = {}
     order_targets: dict[int, tuple[object, ...]] = {}
-    line_targets: dict[int, tuple[str, str]] = {}
+    line_targets: dict[int, tuple[str, str, str]] = {}
     order_ids: set[int] = set()
 
     for ids, _, data, _ in prepared:
@@ -832,6 +833,7 @@ def _validate_batch_update_targets(
         project_targets[project_id] = project_target
         order_targets[sales_order_id] = order_target
         line_targets[order_line_id] = (
+            str(data["project_name"] or "").strip(),
             str(data["goods_name"] or "").strip(),
             str(data["specification_model"] or "").strip(),
         )
@@ -841,31 +843,32 @@ def _validate_batch_update_targets(
         existing_lines = conn.execute(
             text(
                 """
-                SELECT id, goods_name, specification_model
+                SELECT id, project_name, goods_name, specification_model
                 FROM order_line
                 WHERE sales_order_id = :sales_order_id AND deleted_at IS NULL
                 """
             ),
             {"sales_order_id": sales_order_id},
         ).mappings().all()
-        seen: set[tuple[str, str]] = set()
+        seen: set[tuple[str, str, str]] = set()
         for row in existing_lines:
             identity = line_targets.get(
                 int(row["id"]),
                 (
+                    str(row["project_name"] or "").strip(),
                     str(row["goods_name"] or "").strip(),
                     str(row["specification_model"] or "").strip(),
                 ),
             )
             if identity in seen:
-                raise HTTPException(status_code=409, detail="同一销售订单下不能存在同名同规格的重复明细")
+                raise HTTPException(status_code=409, detail="同一销售订单、相同项目名称下不能存在同名同规格的重复明细")
             seen.add(identity)
 
 
 def _validate_batch_create_targets(order_payloads: list[OrderUpdate]) -> None:
     project_targets: dict[str, tuple[object, ...]] = {}
     order_targets: dict[tuple[str, str], tuple[object, ...]] = {}
-    line_targets: set[tuple[str, str, str, str]] = set()
+    line_targets: set[tuple[str, str, str, str, str]] = set()
 
     for payload in order_payloads:
         data = _calculated_payload_data(payload)
@@ -886,6 +889,7 @@ def _validate_batch_create_targets(order_payloads: list[OrderUpdate]) -> None:
         line_identity = (
             project_code,
             order_no,
+            str(data["project_name"] or "").strip(),
             str(data["goods_name"] or "").strip(),
             str(data["specification_model"] or "").strip(),
         )
@@ -895,7 +899,7 @@ def _validate_batch_create_targets(order_payloads: list[OrderUpdate]) -> None:
         if order_identity in order_targets and order_targets[order_identity] != order_target:
             raise HTTPException(status_code=422, detail="同一销售订单的订单级字段必须保持一致，请统一修改后再提交")
         if line_identity in line_targets:
-            raise HTTPException(status_code=409, detail="同一销售订单下不能存在同名同规格的重复明细")
+            raise HTTPException(status_code=409, detail="同一销售订单、相同项目名称下不能存在同名同规格的重复明细")
 
         project_targets[project_code] = project_target
         order_targets[order_identity] = order_target
@@ -1072,19 +1076,21 @@ def _create_order_line(conn, payload: OrderUpdate) -> int:
             """
             SELECT id FROM order_line
             WHERE sales_order_id = :sales_order_id AND deleted_at IS NULL
-              AND COALESCE(goods_name, '') = COALESCE(:goods_name, '')
-              AND COALESCE(specification_model, '') = COALESCE(:specification_model, '')
+              AND TRIM(COALESCE(project_name, '')) = TRIM(COALESCE(:project_name, ''))
+              AND TRIM(COALESCE(goods_name, '')) = TRIM(COALESCE(:goods_name, ''))
+              AND TRIM(COALESCE(specification_model, '')) = TRIM(COALESCE(:specification_model, ''))
             LIMIT 1
             """
         ),
         {
             "sales_order_id": sales_order_id,
             "goods_name": data["goods_name"],
+            "project_name": data["project_name"],
             "specification_model": data["specification_model"],
         },
     ).scalar()
     if duplicate:
-        raise HTTPException(status_code=409, detail="相同订单下已存在同名同规格的明细")
+        raise HTTPException(status_code=409, detail="相同订单、相同项目名称下已存在同名同规格的明细")
 
     result = conn.execute(
         text(

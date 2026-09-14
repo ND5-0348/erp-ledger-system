@@ -37,6 +37,7 @@ import {
   formatOperationLogDetails,
 } from './lib/operationLogDisplay';
 import { formatDatabaseUtcTime } from './lib/dateTime';
+import { loadAllPages } from './lib/loadAllPages';
 
 import DashboardScreen from './components/DashboardScreen';
 import LedgerScreen from './components/LedgerScreen';
@@ -230,10 +231,10 @@ export default function App() {
     try {
       const [, ledgerData, orderData, purchaseData, salesData] = await Promise.all([
         api.health(),
-        api.ledgers({ limit: 500 }),
-        api.orders({ limit: 500 }),
-        api.purchases({ limit: 500 }),
-        api.sales({ limit: 500 }),
+        loadAllPages(api.ledgers),
+        loadAllPages(api.orders),
+        loadAllPages(api.purchases),
+        loadAllPages(api.sales),
       ]);
 
       setLedgers(ledgerData.items.map(mapLedger));

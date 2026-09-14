@@ -162,7 +162,7 @@ def list_sales(
                        total_received, accounts_receivable, latest_receipt_date, invoice_dates
                 FROM ({source_sql}) sales_detail
                 WHERE {where_sql}
-                ORDER BY order_date DESC, project_code
+                ORDER BY order_date DESC, project_code, order_line_id
                 LIMIT :limit OFFSET :offset
                 """
             ),

@@ -251,8 +251,9 @@ def import_excel(
                 order_no,
                 _as_text(_row_value(row, position(15, 15))),
                 _as_text(_row_value(row, position(16, 16))),
+                _as_text(_row_value(row, position(14, 14))),
             ):
-                raise ValueError(f"项目 {project_code}、订单 {order_no} 的同名同规格明细已存在")
+                raise ValueError(f"项目 {project_code}、订单 {order_no} 下相同项目名称的同名同规格明细已存在")
 
             raw_row_id = _execute_scalar(
                 conn,
@@ -647,6 +648,7 @@ def _order_line_exists(
     order_no: str,
     goods_name: str | None,
     specification_model: str | None,
+    project_name: str | None,
 ) -> bool:
     return bool(
         conn.execute(
@@ -658,8 +660,9 @@ def _order_line_exists(
                 JOIN order_line ol ON ol.sales_order_id = so.id AND ol.deleted_at IS NULL
                 WHERE p.project_code = :project_code
                   AND so.order_no = :order_no
-                  AND COALESCE(ol.goods_name, '') = COALESCE(:goods_name, '')
-                  AND COALESCE(ol.specification_model, '') = COALESCE(:specification_model, '')
+                  AND TRIM(COALESCE(ol.project_name, '')) = TRIM(COALESCE(:project_name, ''))
+                  AND TRIM(COALESCE(ol.goods_name, '')) = TRIM(COALESCE(:goods_name, ''))
+                  AND TRIM(COALESCE(ol.specification_model, '')) = TRIM(COALESCE(:specification_model, ''))
                   AND p.deleted_at IS NULL
                 """
             ),
@@ -668,6 +671,7 @@ def _order_line_exists(
                 "order_no": order_no,
                 "goods_name": goods_name,
                 "specification_model": specification_model,
+                "project_name": project_name,
             },
         ).scalar()
     )

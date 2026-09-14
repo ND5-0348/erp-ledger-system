@@ -1,3 +1,4 @@
+import { isClosedStatus } from './ledgerStats';
 type ReceiptLike = { phase_no?: number | null };
 
 type SalesDraftSource = {
@@ -97,7 +98,7 @@ export function aggregateSalesOrderRows(rows: SalesOrderRow[]) {
 }
 
 export function normalizeLedgerStatusLabel(status: string) {
-  if (status === 'closed' || status.includes('关') || status.includes('闭') || status.includes('完成')) {
+  if (isClosedStatus(status)) {
     return '已关闭';
   }
   return '进行中';

@@ -11,8 +11,11 @@ from sqlalchemy.engine import Connection
 from .config import DOCS_DIR, settings
 
 
-engine = create_engine(settings.database_url, pool_pre_ping=True, future=True)
-server_engine = create_engine(settings.server_url, pool_pre_ping=True, future=True)
+# Keep the deployed database's Beijing wall-time convention for DATETIME.
+# serializers attaches +08:00 so clients do not interpret these values as UTC.
+MYSQL_CONNECT_ARGS = {"init_command": "SET time_zone = '+08:00'"}
+engine = create_engine(settings.database_url, pool_pre_ping=True, future=True, connect_args=MYSQL_CONNECT_ARGS)
+server_engine = create_engine(settings.server_url, pool_pre_ping=True, future=True, connect_args=MYSQL_CONNECT_ARGS)
 
 
 @contextmanager
