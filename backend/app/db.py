@@ -108,7 +108,8 @@ def apply_runtime_migrations() -> None:
                 column = conn.execute(
                     text(
                         """
-                        SELECT numeric_precision, numeric_scale
+                        SELECT NUMERIC_PRECISION AS numeric_precision,
+                               NUMERIC_SCALE AS numeric_scale
                         FROM information_schema.columns
                         WHERE table_schema = DATABASE()
                           AND table_name = :table_name
