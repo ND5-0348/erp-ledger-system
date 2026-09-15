@@ -9,6 +9,7 @@ from sqlalchemy import text
 from ..audit import write_batch_operation_log, write_operation_log
 from ..auth import CurrentUser, apply_department_scope, can_access_department, get_current_user, require_permission
 from ..db import db
+from ..line_identity import DUPLICATE_LINE_DETAIL, find_duplicate_line, order_line_identity
 from ..ledger_excel import (
     editor_changed_keys,
     editor_columns,
@@ -399,6 +400,21 @@ def update_purchase_summary(
         ).scalar()
         if data["purchase_amount"] is not None and Decimal(paid_total or 0) > data["purchase_amount"]:
             raise HTTPException(status_code=422, detail="含税采购金额不能小于已付款合计，数据有错误，请检查后重新提交。")
+
+        # 采购厂商参与唯一性判定：改厂商可能让这条明细与同子项目的另一条完全相同。
+        # 采购入口也必须拒绝，不能绕过订单入口的判重规则。
+        identity = order_line_identity(conn, order_line_id)
+        if identity and find_duplicate_line(
+            conn,
+            identity["sub_project_id"],
+            identity["goods_name"],
+            identity["specification_model"],
+            identity["quantity"],
+            identity["sales_unit_price"],
+            data["supplier_name"],
+            exclude_order_line_id=order_line_id,
+        ):
+            raise HTTPException(status_code=409, detail=DUPLICATE_LINE_DETAIL)
 
         exists = conn.execute(
             text(

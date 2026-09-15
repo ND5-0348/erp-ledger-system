@@ -234,12 +234,12 @@ def list_orders(
                            p.branch_company,
                            p.account_manager,
                            p.team_level3_name,
-                           p.end_user_name,
-                           p.regional_platform,
+                           sp.end_user_name,
+                           sp.regional_platform,
                            so.order_date,
                            so.business_type,
                            so.statistic_category,
-                           p.customer_unit_name,
+                           sp.customer_unit_name,
                            COALESCE(ol.project_name, p.project_name) AS project_name,
                            finance.total_received,
                            finance.total_paid,
@@ -279,6 +279,7 @@ def list_orders(
                     FROM project p
                     JOIN sales_order so ON so.project_id = p.id AND so.deleted_at IS NULL
                     JOIN order_line ol ON ol.sales_order_id = so.id AND ol.deleted_at IS NULL
+                    LEFT JOIN sub_project sp ON sp.id = ol.sub_project_id AND sp.deleted_at IS NULL
                     LEFT JOIN purchase_info pi ON pi.order_line_id = ol.id AND pi.deleted_at IS NULL
                     LEFT JOIN delivery_record dr ON dr.order_line_id = ol.id AND dr.deleted_at IS NULL
                     LEFT JOIN v_order_line_finance finance ON finance.order_line_id = ol.id
@@ -583,6 +584,9 @@ def update_order_line(
         "branch_company": data["branch_company"],
         "account_manager": data["account_manager"],
         "team_level3_name": data["team_name"],
+    }
+    # 客户单位/最终用户/区域平台属于子项目，不属于框架项目。
+    sub_project_data = {
         "customer_unit_name": data["customer_unit_name"],
         "end_user_name": data["user_name"],
         "regional_platform": data["regional_platform"],
@@ -641,10 +645,7 @@ def update_order_line(
                     department = :department,
                     branch_company = :branch_company,
                     account_manager = :account_manager,
-                    team_level3_name = :team_level3_name,
-                    customer_unit_name = :customer_unit_name,
-                    end_user_name = :end_user_name,
-                    regional_platform = :regional_platform
+                    team_level3_name = :team_level3_name
                 WHERE id = :project_id
                 """
             ),
@@ -664,11 +665,17 @@ def update_order_line(
             ),
             {"sales_order_id": ids["sales_order_id"], **order_data},
         )
+        # 子项目名称可能被改：先定位/建立目标子项目并写入子项目字段，
+        # 再把明细挂到它下面（改子项目名等于把这条明细移到目标子项目）。
+        sub_project_id = _resolve_sub_project(
+            conn, ids["sales_order_id"], line_data["project_name"], sub_project_data
+        )
         conn.execute(
             text(
                 """
                 UPDATE order_line
-                SET project_name = :project_name,
+                SET sub_project_id = :sub_project_id,
+                    project_name = :project_name,
                     goods_name = :goods_name,
                     specification_model = :specification_model,
                     unit_name = :unit_name,
@@ -681,7 +688,7 @@ def update_order_line(
                 WHERE id = :order_line_id
                 """
             ),
-            {"order_line_id": order_line_id, **line_data},
+            {"order_line_id": order_line_id, "sub_project_id": sub_project_id, **line_data},
         )
         _upsert_line_record(conn, "purchase_info", order_line_id, purchase_data)
         _upsert_line_record(conn, "delivery_record", order_line_id, delivery_data)
@@ -956,10 +963,7 @@ def _update_basic_order_line_in_conn(
                 department = :department,
                 branch_company = :branch_company,
                 account_manager = :account_manager,
-                team_level3_name = :team_level3_name,
-                customer_unit_name = :customer_unit_name,
-                end_user_name = :end_user_name,
-                regional_platform = :regional_platform
+                team_level3_name = :team_level3_name
             WHERE id = :project_id
             """
         ),
@@ -970,9 +974,6 @@ def _update_basic_order_line_in_conn(
             "branch_company": data["branch_company"],
             "account_manager": data["account_manager"],
             "team_level3_name": data["team_name"],
-            "customer_unit_name": data["customer_unit_name"],
-            "end_user_name": data["user_name"],
-            "regional_platform": data["regional_platform"],
         },
     )
     conn.execute(
@@ -996,11 +997,22 @@ def _update_basic_order_line_in_conn(
             "statistic_category": data["statistical_category"],
         },
     )
+    sub_project_id = _resolve_sub_project(
+        conn,
+        ids["sales_order_id"],
+        data["project_name"],
+        {
+            "customer_unit_name": data["customer_unit_name"],
+            "end_user_name": data["user_name"],
+            "regional_platform": data["regional_platform"],
+        },
+    )
     conn.execute(
         text(
             """
             UPDATE order_line
-            SET project_name = :project_name,
+            SET sub_project_id = :sub_project_id,
+                project_name = :project_name,
                 goods_name = :goods_name,
                 specification_model = :specification_model,
                 unit_name = :unit_name,
@@ -1015,6 +1027,7 @@ def _update_basic_order_line_in_conn(
         ),
         {
             "order_line_id": order_line_id,
+            "sub_project_id": sub_project_id,
             "project_name": data["project_name"],
             "goods_name": data["goods_name"],
             "specification_model": data["specification_model"],
@@ -1033,15 +1046,13 @@ def _create_order_line(conn, payload: OrderUpdate) -> int:
         text("SELECT id FROM project WHERE project_code = :project_code LIMIT 1"),
         {"project_code": data["project_code"]},
     ).mappings().first()
+    # 框架项目只承载框架级字段：客户经理、分公司、部门、三级团队。
     project_values = {
         "project_code": data["project_code"],
         "department": data["department"],
         "branch_company": data["branch_company"],
         "account_manager": data["account_manager"],
         "team_level3_name": data["team_name"],
-        "customer_unit_name": data["customer_unit_name"],
-        "end_user_name": data["user_name"],
-        "regional_platform": data["regional_platform"],
     }
     if project:
         project_id = int(project["id"])
@@ -1056,11 +1067,11 @@ def _create_order_line(conn, payload: OrderUpdate) -> int:
             text(
                 """
                 INSERT INTO project
-                  (project_code, project_name, department, branch_company, account_manager,
-                   team_level3_name, customer_unit_name, end_user_name, regional_platform)
+                  (project_code, project_name, department, branch_company,
+                   account_manager, team_level3_name)
                 VALUES
-                  (:project_code, :project_name, :department, :branch_company, :account_manager,
-                   :team_level3_name, :customer_unit_name, :end_user_name, :regional_platform)
+                  (:project_code, :project_name, :department, :branch_company,
+                   :account_manager, :team_level3_name)
                 """
             ),
             project_values,
@@ -1107,13 +1118,25 @@ def _create_order_line(conn, payload: OrderUpdate) -> int:
         )
         sales_order_id = int(result.lastrowid or 0)
 
+    # 子项目是订单下的独立层级：客户单位/最终用户/区域平台存在这里，
+    # 同一订单下不同子项目可以有不同值。
+    sub_project_id = _resolve_sub_project(
+        conn,
+        sales_order_id,
+        data["project_name"],
+        {
+            "customer_unit_name": data["customer_unit_name"],
+            "end_user_name": data["user_name"],
+            "regional_platform": data["regional_platform"],
+        },
+    )
+
     duplicate = conn.execute(
         text(
             """
             SELECT ol.id FROM order_line ol
             LEFT JOIN purchase_info pi ON pi.order_line_id = ol.id AND pi.deleted_at IS NULL
-            WHERE ol.sales_order_id = :sales_order_id AND ol.deleted_at IS NULL
-              AND TRIM(COALESCE(ol.project_name, '')) = TRIM(COALESCE(:project_name, ''))
+            WHERE ol.sub_project_id = :sub_project_id AND ol.deleted_at IS NULL
               AND TRIM(COALESCE(ol.goods_name, '')) = TRIM(COALESCE(:goods_name, ''))
               AND TRIM(COALESCE(ol.specification_model, '')) = TRIM(COALESCE(:specification_model, ''))
               AND COALESCE(ol.quantity, 0) = COALESCE(:quantity, 0)
@@ -1123,9 +1146,8 @@ def _create_order_line(conn, payload: OrderUpdate) -> int:
             """
         ),
         {
-            "sales_order_id": sales_order_id,
+            "sub_project_id": sub_project_id,
             "goods_name": data["goods_name"],
-            "project_name": data["project_name"],
             "specification_model": data["specification_model"],
             "quantity": _as_decimal(data["quantity"]),
             "sales_unit_price": _as_decimal(data["unit_price"]),
@@ -1135,7 +1157,7 @@ def _create_order_line(conn, payload: OrderUpdate) -> int:
     if duplicate:
         raise HTTPException(
             status_code=409,
-            detail="相同订单、相同项目名称下已存在同名同规格同数量同单价同采购厂商的明细"
+            detail="相同订单、相同子项目下已存在同名同规格同数量同单价同采购厂商的明细"
             "（数量、单价或采购厂商不同视为不同明细）",
         )
 
@@ -1143,14 +1165,14 @@ def _create_order_line(conn, payload: OrderUpdate) -> int:
         text(
             """
             INSERT INTO order_line
-              (sales_order_id, project_name, goods_name, specification_model, unit_name, quantity,
+              (sales_order_id, sub_project_id, project_name, goods_name, specification_model, unit_name, quantity,
                sales_tax_rate, sales_unit_price_no_tax, sales_unit_price, revenue_no_tax, order_value)
             VALUES
-              (:sales_order_id, :project_name, :goods_name, :specification_model, :unit_name, :quantity,
+              (:sales_order_id, :sub_project_id, :project_name, :goods_name, :specification_model, :unit_name, :quantity,
                :sales_tax_rate, :net_unit_price, :unit_price, :net_revenue, :order_value)
             """
         ),
-        {"sales_order_id": sales_order_id, **data},
+        {"sales_order_id": sales_order_id, "sub_project_id": sub_project_id, **data},
     )
     order_line_id = int(result.lastrowid or 0)
     _upsert_line_record(
@@ -1245,6 +1267,58 @@ def _price(value: Decimal) -> Decimal:
 
 def _money(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def _resolve_sub_project(
+    conn,
+    sales_order_id: int,
+    name: object,
+    values: dict[str, object],
+) -> int:
+    """按（订单, 子项目名称）定位子项目；不存在则新建，并写入子项目级字段。
+
+    客户单位、最终用户、区域平台属于子项目层级：同一订单下不同子项目可以有
+    不同值，因此它们既不写在框架项目上，也不能用订单内的其他子项目的值代替。
+    """
+    normalized = str(name or "").strip()
+    existing = conn.execute(
+        text(
+            "SELECT id FROM sub_project WHERE sales_order_id = :sales_order_id "
+            "AND name = :name AND deleted_at IS NULL"
+        ),
+        {"sales_order_id": sales_order_id, "name": normalized},
+    ).scalar()
+    if existing:
+        conn.execute(
+            text(
+                """
+                UPDATE sub_project
+                SET customer_unit_name = :customer_unit_name,
+                    end_user_name = :end_user_name,
+                    regional_platform = :regional_platform
+                WHERE id = :sub_project_id
+                """
+            ),
+            {"sub_project_id": int(existing), **values},
+        )
+        return int(existing)
+    result = conn.execute(
+        text(
+            """
+            INSERT INTO sub_project
+              (sales_order_id, name, customer_unit_name, end_user_name, regional_platform)
+            VALUES
+              (:sales_order_id, :name, :customer_unit_name, :end_user_name, :regional_platform)
+            ON DUPLICATE KEY UPDATE
+              id = LAST_INSERT_ID(id),
+              customer_unit_name = VALUES(customer_unit_name),
+              end_user_name = VALUES(end_user_name),
+              regional_platform = VALUES(regional_platform)
+            """
+        ),
+        {"sales_order_id": sales_order_id, "name": normalized, **values},
+    )
+    return int(result.lastrowid or 0)
 
 
 def _upsert_line_record(conn, table_name: str, order_line_id: int, data: dict[str, object]) -> None:

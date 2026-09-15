@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from contextlib import contextmanager
 from pathlib import Path
@@ -174,6 +175,199 @@ def apply_runtime_migrations() -> None:
                         """
                     )
                 )
+
+        # 子项目实体的结构随启动生效；存量数据搬迁由 migrate_sub_projects()
+        # 显式执行，不在启动时自动改动业务数据。
+        _ensure_sub_project_storage(conn)
+
+
+SUB_PROJECT_DDL = """
+CREATE TABLE IF NOT EXISTS sub_project (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  sales_order_id BIGINT UNSIGNED NOT NULL,
+  name VARCHAR(255) NOT NULL DEFAULT '',
+  customer_unit_name VARCHAR(255) NULL,
+  end_user_name VARCHAR(255) NULL,
+  regional_platform VARCHAR(128) NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  deleted_at DATETIME NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_sub_project_order_name (sales_order_id, name),
+  KEY idx_sub_project_customer (customer_unit_name),
+  CONSTRAINT fk_sub_project_sales_order FOREIGN KEY (sales_order_id) REFERENCES sales_order(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+"""
+
+# 子项目三字段在原始行 JSON 里的列名候选。标准模板用第一个；
+# 旧布局的列名尚未诊断（用户暂无旧表样本），命中不了就留空并计入待确认。
+SUB_PROJECT_SOURCE_KEYS: dict[str, tuple[str, ...]] = {
+    "customer_unit_name": ("客户单位名称", "客户单位", "客户名称"),
+    "end_user_name": ("用户", "最终用户", "最终用户名称"),
+    "regional_platform": ("区域平台", "区域平台名称"),
+}
+
+
+def _column_exists(conn, table_name: str, column_name: str) -> bool:
+    return bool(
+        conn.execute(
+            text(
+                """
+                SELECT COUNT(*)
+                FROM information_schema.columns
+                WHERE table_schema = DATABASE()
+                  AND table_name = :table_name
+                  AND column_name = :column_name
+                """
+            ),
+            {"table_name": table_name, "column_name": column_name},
+        ).scalar()
+    )
+
+
+def _table_exists(conn, table_name: str) -> bool:
+    return bool(
+        conn.execute(
+            text(
+                """
+                SELECT COUNT(*)
+                FROM information_schema.tables
+                WHERE table_schema = DATABASE() AND table_name = :table_name
+                """
+            ),
+            {"table_name": table_name},
+        ).scalar()
+    )
+
+
+def _ensure_sub_project_storage(conn) -> None:
+    """建子项目表与 order_line.sub_project_id（可重复运行）。"""
+    if not _table_exists(conn, "sub_project"):
+        conn.execute(text(SUB_PROJECT_DDL))
+    if not _column_exists(conn, "order_line", "sub_project_id"):
+        conn.execute(text("ALTER TABLE order_line ADD COLUMN sub_project_id BIGINT UNSIGNED NULL AFTER sales_order_id"))
+        conn.execute(text("ALTER TABLE order_line ADD KEY idx_order_line_sub_project (sub_project_id)"))
+        conn.execute(
+            text(
+                "ALTER TABLE order_line ADD CONSTRAINT fk_order_line_sub_project "
+                "FOREIGN KEY (sub_project_id) REFERENCES sub_project(id)"
+            )
+        )
+
+
+def _raw_sub_project_values(raw_json: object) -> dict[str, str | None]:
+    """从原始行 JSON 取子项目三字段。取不到就返回 None，不猜。"""
+    if raw_json is None:
+        return {column: None for column in SUB_PROJECT_SOURCE_KEYS}
+    try:
+        payload = json.loads(raw_json) if isinstance(raw_json, str) else raw_json
+    except (TypeError, ValueError):
+        return {column: None for column in SUB_PROJECT_SOURCE_KEYS}
+    if not isinstance(payload, dict):
+        return {column: None for column in SUB_PROJECT_SOURCE_KEYS}
+    resolved: dict[str, str | None] = {}
+    for column, candidates in SUB_PROJECT_SOURCE_KEYS.items():
+        value = None
+        for candidate in candidates:
+            raw_value = payload.get(candidate)
+            text_value = str(raw_value).strip() if raw_value not in (None, "") else ""
+            if text_value:
+                value = text_value
+                break
+        resolved[column] = value
+    return resolved
+
+
+def migrate_sub_projects() -> dict[str, int]:
+    """把客户单位/最终用户/区域平台从框架项目迁到子项目实体。
+
+    值优先取每行自己的原始导入记录（ledger_raw_row.raw_json），不是框架表上的
+    现值——那只代表第一个出现的行。同一子项目内出现互相冲突的值时该字段留空，
+    计入 conflicts，等人工确认，不自动挑一个。
+    """
+    stats = {"sub_projects": 0, "linked_lines": 0, "conflicts": 0, "unresolved": 0}
+    with engine.begin() as conn:
+        _ensure_sub_project_storage(conn)
+        rows = conn.execute(
+            text(
+                """
+                SELECT ol.id AS order_line_id, ol.sales_order_id, ol.project_name, lrr.raw_json
+                FROM order_line ol
+                LEFT JOIN ledger_raw_row lrr ON lrr.id = ol.raw_row_id
+                WHERE ol.sub_project_id IS NULL AND ol.deleted_at IS NULL
+                ORDER BY ol.id
+                """
+            )
+        ).mappings().all()
+        if not rows:
+            return stats
+
+        grouped: dict[tuple[int, str], list[dict[str, str | None]]] = {}
+        line_keys: dict[int, tuple[int, str]] = {}
+        for row in rows:
+            name = str(row["project_name"] or "").strip()
+            key = (int(row["sales_order_id"]), name)
+            grouped.setdefault(key, []).append(_raw_sub_project_values(row["raw_json"]))
+            line_keys[int(row["order_line_id"])] = key
+
+        created: dict[tuple[int, str], int] = {}
+        for key, values in grouped.items():
+            resolved: dict[str, str | None] = {}
+            for column in SUB_PROJECT_SOURCE_KEYS:
+                distinct = {value[column] for value in values if value[column]}
+                if len(distinct) > 1:
+                    # 同一子项目内本就该一致；不一致时留空并计数，不替用户选一个。
+                    resolved[column] = None
+                    stats["conflicts"] += 1
+                else:
+                    resolved[column] = next(iter(distinct), None)
+                if resolved[column] is None:
+                    stats["unresolved"] += 1
+            sales_order_id, name = key
+            existing = conn.execute(
+                text("SELECT id FROM sub_project WHERE sales_order_id = :sales_order_id AND name = :name"),
+                {"sales_order_id": sales_order_id, "name": name},
+            ).scalar()
+            if existing:
+                created[key] = int(existing)
+                continue
+            created[key] = int(
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO sub_project
+                          (sales_order_id, name, customer_unit_name, end_user_name, regional_platform)
+                        VALUES
+                          (:sales_order_id, :name, :customer_unit_name, :end_user_name, :regional_platform)
+                        """
+                    ),
+                    {"sales_order_id": sales_order_id, "name": name, **resolved},
+                ).lastrowid
+                or 0
+            )
+            stats["sub_projects"] += 1
+
+        for order_line_id, key in line_keys.items():
+            conn.execute(
+                text("UPDATE order_line SET sub_project_id = :sub_project_id WHERE id = :order_line_id"),
+                {"sub_project_id": created[key], "order_line_id": order_line_id},
+            )
+            stats["linked_lines"] += 1
+
+        # 全部明细都有子项目归属后，清空框架项目上的这三列：它们保存的是
+        # “该框架下第一个出现的值”，留作框架统一值就是串值。
+        remaining = conn.execute(
+            text("SELECT COUNT(*) FROM order_line WHERE sub_project_id IS NULL AND deleted_at IS NULL")
+        ).scalar()
+        if not remaining:
+            conn.execute(
+                text(
+                    "UPDATE project SET customer_unit_name = NULL, end_user_name = NULL, "
+                    "regional_platform = NULL WHERE customer_unit_name IS NOT NULL "
+                    "OR end_user_name IS NOT NULL OR regional_platform IS NOT NULL"
+                )
+            )
+    return stats
 
 
 def table_count(table: str) -> int:

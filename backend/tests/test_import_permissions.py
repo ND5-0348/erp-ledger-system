@@ -263,15 +263,35 @@ def test_same_batch_inconsistent_shared_fields_are_rejected(
     assert _count("project") == 0
 
 
-@pytest.mark.parametrize("position,value", [(5, "李四"), (10, "客户单位B"), (11, "最终用户B"), (14, "项目乙")])
-def test_line_level_differences_are_still_allowed(
+@pytest.mark.parametrize("position,value", [(10, "客户单位B"), (11, "最终用户B"), (14, "项目乙")])
+def test_sub_project_fields_may_differ_between_sub_projects(
     client: TestClient, headers: dict[str, str], position: int, value: str
 ) -> None:
-    """客户经理、客户单位、最终用户、项目名称是明细级差异，真实台账里同项目下本就会不同。"""
+    """客户单位、最终用户、区域平台属于子项目：不同子项目（这里换了订单）可以不同。"""
     assert _import(client, headers, [_row()], "first.xlsx").status_code == 200
-    response = _import(client, headers, [_row({13: "SO-IMP-002", position: value})], "line-level.xlsx")
+    response = _import(client, headers, [_row({13: "SO-IMP-002", position: value})], "sub-project.xlsx")
     assert response.status_code == 200, response.text
     assert _count("order_line") == 2
+
+
+def test_sub_project_field_conflict_inside_one_sub_project_is_rejected(
+    client: TestClient, headers: dict[str, str]
+) -> None:
+    """同一个订单、同一个子项目内，客户单位不同必须拒绝，不能用最后一行覆盖。"""
+    assert _import(client, headers, [_row()], "first.xlsx").status_code == 200
+    response = _import(client, headers, [_row({13: "SO-IMP-001", 10: "客户单位B", 15: "交换机"})], "conflict.xlsx")
+    assert response.status_code == 422, response.text
+    assert "客户单位" in response.json()["detail"]
+    assert _count("order_line") == 1
+
+
+def test_account_manager_is_a_framework_field(client: TestClient, headers: dict[str, str]) -> None:
+    """客户经理属于框架项目：同一框架下换订单也不能改成别人。"""
+    assert _import(client, headers, [_row()], "first.xlsx").status_code == 200
+    response = _import(client, headers, [_row({13: "SO-IMP-002", 5: "李四"})], "manager.xlsx")
+    assert response.status_code == 422, response.text
+    assert "客户经理" in response.json()["detail"]
+    assert _count("order_line") == 1
 
 
 def test_legal_addition_to_existing_project_succeeds(client: TestClient, headers: dict[str, str]) -> None:

@@ -6,7 +6,7 @@ from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from openpyxl import load_workbook
 from sqlalchemy import text
@@ -15,6 +15,7 @@ from sqlalchemy.engine import Connection
 from .audit import write_operation_log
 from .auth import CurrentUser, can_access_department
 from .config import DOCS_DIR
+from .line_identity import find_duplicate_line
 from .ledger_excel import SAMPLE_ORDER_NO, SAMPLE_PROJECT_CODE, TEMPLATE_HEADERS, is_template_sample_row
 from .validation import validate_business_date
 
@@ -107,17 +108,21 @@ def _has_business_payload(row: tuple[Any, ...]) -> bool:
     return any(_as_text(_row_value(row, position)) for position in BUSINESS_PAYLOAD_POSITIONS)
 
 
-# 项目级共享字段：命中已有项目时必须与台账一致，普通导入只能追加明细。
-#
-# 范围依据 2026-09-15 对真实业务台账（25 个项目、19 个多明细项目）的实测：
-# 部门、分公司、三级团队、区域平台在同一项目编号下 0% 出现多值；
-# 而**客户单位（31.6%）、最终用户（10.5%）、客户经理（5.3%）、项目名称（36.8%）
-# 在同一项目编号下本来就会不同**——它们描述的是明细对应的终端客户与代理，
-# 属于合法的明细级差异，纳入校验会把真实数据整批拦下。因此这四个字段不参与校验。
+# 框架项目级共享字段：同一框架下全部订单、子项目和明细必须一致。
+# 客户经理属于框架项目（旧单元格里的“甲/乙/丙”是历次交接，最后值为现任）。
 SHARED_PROJECT_FIELDS: tuple[tuple[str, int, int, str], ...] = (
     ("department", 3, 3, "部门"),
     ("branch_company", 4, 4, "分公司"),
+    ("account_manager", 5, 5, "客户经理"),
     ("team_level3_name", 9, 9, "三级团队"),
+)
+
+# 子项目级共享字段：同一订单的同一子项目内必须一致；不同子项目可以不同，
+# 包括同一订单下的不同子项目。这些字段不能校验在框架项目上，否则同框架下
+# 不同子项目的合法差异会被整批拦下。
+SUB_PROJECT_FIELDS: tuple[tuple[str, int, int, str], ...] = (
+    ("customer_unit_name", 10, 10, "客户单位"),
+    ("end_user_name", 11, 11, "最终用户"),
     ("regional_platform", 12, 12, "区域平台"),
 )
 
@@ -163,6 +168,7 @@ def _reset_business_data(conn: Connection) -> None:
         "delivery_record",
         "purchase_info",
         "order_line",
+        "sub_project",
         "sales_order",
         "project",
         "ledger_raw_row",
@@ -174,6 +180,23 @@ def _reset_business_data(conn: Connection) -> None:
     conn.execute(text("SET FOREIGN_KEY_CHECKS=1"))
 
 
+def _diff_row_against_stored(
+    row: tuple[Any, ...],
+    position,
+    stored: Mapping[str, Any],
+    fields: tuple[tuple[str, int, int, str], ...],
+) -> list[str]:
+    """比较 Excel 行与库中记录在这些字段上的取值，返回中文冲突描述。"""
+    conflicts: list[str] = []
+    for column, latest, legacy, label in fields:
+        excel_value = _as_text(_row_value(row, position(latest, legacy)))
+        stored_value = _as_text(stored[column])
+        # 只在两边都有值且不同时报冲突：Excel 留空表示不改动，台账为空表示可补充。
+        if excel_value and stored_value and excel_value != stored_value:
+            conflicts.append(f"{label}（台账为“{stored_value}”，Excel 为“{excel_value}”）")
+    return conflicts
+
+
 def _find_shared_field_conflicts(
     conn: Connection,
     project_code: str,
@@ -181,17 +204,16 @@ def _find_shared_field_conflicts(
     position,
     user: CurrentUser | None,
 ) -> tuple[int | None, list[str]]:
-    """校验导入行与台账中已有项目的兼容性。
+    """校验导入行与台账中已有框架项目的兼容性（客户经理、分公司、部门、三级团队）。
 
-    返回（已有项目 id, 冲突字段描述）。若项目不存在则返回 (None, [])。
+    返回（已有框架项目 id, 冲突字段描述）。若项目不存在则返回 (None, [])。
     数据库原部门对当前账号不可录入时直接抛 PermissionError——这挡住“拿别的
     部门的项目编号、把部门填成自己能访问的部门”来绕过部门边界。
     """
     existing = conn.execute(
         text(
             """
-            SELECT id, department, branch_company, account_manager, team_level3_name,
-                   customer_unit_name, end_user_name, regional_platform
+            SELECT id, department, branch_company, account_manager, team_level3_name
             FROM project
             WHERE project_code = :project_code AND deleted_at IS NULL
             """
@@ -207,14 +229,55 @@ def _find_shared_field_conflicts(
             "无权向该部门的项目导入数据"
         )
 
-    conflicts: list[str] = []
-    for column, latest, legacy, label in SHARED_PROJECT_FIELDS:
-        excel_value = _as_text(_row_value(row, position(latest, legacy)))
-        stored_value = _as_text(existing[column])
-        # 只在两边都有值且不同时报冲突：Excel 留空表示不改动，台账为空表示可补充。
-        if excel_value and stored_value and excel_value != stored_value:
-            conflicts.append(f"{label}（台账为“{stored_value}”，Excel 为“{excel_value}”）")
-    return int(existing["id"]), conflicts
+    return int(existing["id"]), _diff_row_against_stored(row, position, existing, SHARED_PROJECT_FIELDS)
+
+
+def _find_or_create_sub_project(
+    conn: Connection,
+    sales_order_id: int,
+    row: tuple[Any, ...],
+    position,
+    project_name: str | None,
+    excel_row_no: int,
+) -> tuple[int, list[str]]:
+    """按（订单, 子项目名称）定位子项目，必要时新建。
+
+    返回（子项目 id, 冲突描述）。客户单位/最终用户/区域平台存在子项目上：
+    同一订单下不同子项目可以有不同值，这与框架共享字段是两回事。
+    """
+    name = project_name or ""
+    existing = conn.execute(
+        text(
+            """
+            SELECT id, customer_unit_name, end_user_name, regional_platform
+            FROM sub_project
+            WHERE sales_order_id = :sales_order_id AND name = :name AND deleted_at IS NULL
+            """
+        ),
+        {"sales_order_id": sales_order_id, "name": name},
+    ).mappings().first()
+
+    if existing is not None:
+        return int(existing["id"]), _diff_row_against_stored(row, position, existing, SUB_PROJECT_FIELDS)
+
+    values = {
+        column: _as_text(_row_value(row, position(latest, legacy)))
+        for column, latest, legacy, _label in SUB_PROJECT_FIELDS
+    }
+    sub_project_id = _execute_scalar(
+        conn,
+        """
+        INSERT INTO sub_project
+          (sales_order_id, name, customer_unit_name, end_user_name, regional_platform)
+        VALUES
+          (:sales_order_id, :name, :customer_unit_name, :end_user_name, :regional_platform)
+        ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)
+        """,
+        {"sales_order_id": sales_order_id, "name": name, **values},
+    )
+    if not sub_project_id:
+        raise ValueError(f"第 {excel_row_no} 行无法为子项目“{name or '（空名称）'}”建立档案")
+    return sub_project_id, []
 
 
 def import_excel(
@@ -351,15 +414,17 @@ def import_excel(
             if existing_project_id is not None:
                 project_id = existing_project_id
             else:
+                # 框架项目只承载框架级字段：客户经理、分公司、部门、三级团队。
+                # 客户单位/最终用户/区域平台属于子项目，写在下面的 sub_project 上。
                 project_id = _execute_scalar(
                     conn,
                     """
                     INSERT INTO project
-                      (project_code, project_name, department, branch_company, account_manager,
-                       team_level3_name, customer_unit_name, end_user_name, regional_platform)
+                      (project_code, project_name, department, branch_company,
+                       account_manager, team_level3_name)
                     VALUES
-                      (:project_code, :project_name, :department, :branch_company, :account_manager,
-                       :team_level3_name, :customer_unit_name, :end_user_name, :regional_platform)
+                      (:project_code, :project_name, :department, :branch_company,
+                       :account_manager, :team_level3_name)
                     ON DUPLICATE KEY UPDATE
                       id = LAST_INSERT_ID(id),
                       project_name = COALESCE(project_name, VALUES(project_name))
@@ -371,9 +436,6 @@ def import_excel(
                         "branch_company": _as_text(_row_value(row, position(4, 4))),
                         "account_manager": _as_text(_row_value(row, position(5, 5))),
                         "team_level3_name": _as_text(_row_value(row, position(9, 9))),
-                        "customer_unit_name": _as_text(_row_value(row, position(10, 10))),
-                        "end_user_name": _as_text(_row_value(row, position(11, 11))),
-                        "regional_platform": _as_text(_row_value(row, position(12, 12))),
                     },
                 )
 
@@ -406,6 +468,19 @@ def import_excel(
                 },
             )
 
+            # 子项目是订单下的独立层级：同一订单可以有多个子项目，
+            # 每个子项目各自保存客户单位、最终用户、区域平台。
+            project_name = _as_text(_row_value(row, position(14, 14)))
+            sub_project_id, sub_project_conflicts = _find_or_create_sub_project(
+                conn, sales_order_id, row, position, project_name, excel_row_no
+            )
+            if sub_project_conflicts:
+                raise ValueError(
+                    f"第 {excel_row_no} 行订单 {order_no} 的子项目“{project_name or '（空名称）'}”已在台账中，"
+                    "以下子项目字段与台账不一致，普通导入只能追加明细、不能修改它们："
+                    + "、".join(sub_project_conflicts)
+                )
+
             quantity = _as_decimal(_row_value(row, position(18, 18)))
             sales_tax_rate = _as_tax_rate(_row_value(row, position(19))) if latest_layout else None
             sales_unit_price_no_tax = _as_decimal(_row_value(row, position(20, 19)))
@@ -416,39 +491,40 @@ def import_excel(
             revenue_no_tax = revenue_no_tax or _as_decimal(_row_value(row, position(22, 21)))
             order_value = order_value or _as_decimal(_row_value(row, position(23, 22)))
 
-            # 数量、单价或采购厂商不同的明细视为不同行（同货物分批次、不同单价、不同供应商可以共存）。
+            # 判重限定在同一子项目内：物资名称、规格、销售单价、数量、采购厂商五项组合唯一。
+            # 跨子项目、跨订单、跨框架允许五项完全相同。
             if strict_template and _order_line_exists(
                 conn,
-                project_code,
-                order_no,
+                sub_project_id,
                 _as_text(_row_value(row, position(15, 15))),
                 _as_text(_row_value(row, position(16, 16))),
-                _as_text(_row_value(row, position(14, 14))),
                 quantity,
                 sales_unit_price,
                 _as_text(_row_value(row, position(24, 23))),
             ):
                 raise ValueError(
-                    f"项目 {project_code}、订单 {order_no} 下相同项目名称的同名同规格同数量同单价同采购厂商的明细已存在"
+                    f"订单 {order_no} 的子项目“{project_name or '（空名称）'}”下，"
+                    "同名同规格同数量同单价同采购厂商的明细已存在"
                 )
 
             order_line_id = _execute_scalar(
                 conn,
                 """
                 INSERT INTO order_line
-                  (sales_order_id, raw_row_id, source_excel_row_no, project_name, goods_name, specification_model,
-                   unit_name, quantity, sales_tax_rate, sales_unit_price_no_tax, sales_unit_price,
-                   revenue_no_tax, order_value)
+                  (sales_order_id, sub_project_id, raw_row_id, source_excel_row_no, project_name,
+                   goods_name, specification_model, unit_name, quantity, sales_tax_rate,
+                   sales_unit_price_no_tax, sales_unit_price, revenue_no_tax, order_value)
                 VALUES
-                  (:sales_order_id, :raw_row_id, :excel_row_no, :project_name, :goods_name, :specification_model,
-                   :unit_name, :quantity, :sales_tax_rate, :sales_unit_price_no_tax, :sales_unit_price,
-                   :revenue_no_tax, :order_value)
+                  (:sales_order_id, :sub_project_id, :raw_row_id, :excel_row_no, :project_name,
+                   :goods_name, :specification_model, :unit_name, :quantity, :sales_tax_rate,
+                   :sales_unit_price_no_tax, :sales_unit_price, :revenue_no_tax, :order_value)
                 """,
                 {
                     "sales_order_id": sales_order_id,
+                    "sub_project_id": sub_project_id,
                     "raw_row_id": raw_row_id,
                     "excel_row_no": excel_row_no,
-                    "project_name": _as_text(_row_value(row, position(14, 14))),
+                    "project_name": project_name,
                     "goods_name": _as_text(_row_value(row, position(15, 15))),
                     "specification_model": _as_text(_row_value(row, position(16, 16))),
                     "unit_name": _as_text(_row_value(row, position(17, 17))),
@@ -733,46 +809,29 @@ def import_excel(
 
 def _order_line_exists(
     conn: Connection,
-    project_code: str,
-    order_no: str,
+    sub_project_id: int,
     goods_name: str | None,
     specification_model: str | None,
-    project_name: str | None,
     quantity: Decimal | None,
     sales_unit_price: Decimal | None,
     supplier_name: str | None,
 ) -> bool:
-    return bool(
-        conn.execute(
-            text(
-                """
-                SELECT COUNT(*)
-                FROM project p
-                JOIN sales_order so ON so.project_id = p.id AND so.deleted_at IS NULL
-                JOIN order_line ol ON ol.sales_order_id = so.id AND ol.deleted_at IS NULL
-                LEFT JOIN purchase_info pi ON pi.order_line_id = ol.id AND pi.deleted_at IS NULL
-                WHERE p.project_code = :project_code
-                  AND so.order_no = :order_no
-                  AND TRIM(COALESCE(ol.project_name, '')) = TRIM(COALESCE(:project_name, ''))
-                  AND TRIM(COALESCE(ol.goods_name, '')) = TRIM(COALESCE(:goods_name, ''))
-                  AND TRIM(COALESCE(ol.specification_model, '')) = TRIM(COALESCE(:specification_model, ''))
-                  AND COALESCE(ol.quantity, 0) = COALESCE(:quantity, 0)
-                  AND COALESCE(ol.sales_unit_price, 0) = COALESCE(:sales_unit_price, 0)
-                  AND TRIM(COALESCE(pi.supplier_name, '')) = TRIM(COALESCE(:supplier_name, ''))
-                  AND p.deleted_at IS NULL
-                """
-            ),
-            {
-                "project_code": project_code,
-                "order_no": order_no,
-                "goods_name": goods_name,
-                "specification_model": specification_model,
-                "project_name": project_name,
-                "quantity": quantity,
-                "sales_unit_price": sales_unit_price,
-                "supplier_name": supplier_name,
-            },
-        ).scalar()
+    """同一子项目内，物资名称、规格、销售单价、数量、采购厂商五项组合是否已存在。
+
+    sub_project_id 已经隐含了框架项目与订单，所以判重限定在同一子项目内；
+    跨子项目允许五项完全相同。
+    """
+    return (
+        find_duplicate_line(
+            conn,
+            sub_project_id,
+            goods_name,
+            specification_model,
+            quantity,
+            sales_unit_price,
+            supplier_name,
+        )
+        is not None
     )
 
 
