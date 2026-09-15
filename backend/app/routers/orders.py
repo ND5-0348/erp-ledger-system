@@ -494,10 +494,24 @@ def _create_import_preview(content: bytes, file_name: str, user: CurrentUser) ->
 
 
 def _commit_import_preview(session_id: str, content: bytes, user: CurrentUser, is_admin: bool) -> dict:
-    with business_write() as conn:
-        return commit_preview_session(
-            conn, session_id=session_id, user=user, content=content, is_admin=is_admin
-        )
+    """预检提交：与普通导入同样先做导入前备份，备份失败就不写任何业务数据。"""
+    try:
+        with business_write() as conn:
+            create_backup(conn, user, "pre_legacy_commit")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="导入前自动备份失败，已取消提交") from exc
+
+    try:
+        with business_write() as conn:
+            return commit_preview_session(
+                conn, session_id=session_id, user=user, content=content, is_admin=is_admin
+            )
+    except HTTPException:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 @router.post("/import-preview")
@@ -554,7 +568,7 @@ def update_import_preview(
         return apply_preview_resolutions(
             conn,
             session_id,
-            user_id=user.id,
+            user=user,
             resolutions=[item.model_dump() for item in payload.items],
         )
 

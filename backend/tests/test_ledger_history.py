@@ -207,12 +207,32 @@ def test_partial_registration_never_prunes_confirmed_history(
     assert managers == ["甲", "乙", "丙"]
 
 
-def test_prune_removes_only_shorter_tail(client: TestClient, headers: dict[str, str]) -> None:
+def test_register_rejects_shortening_confirmed_history(
+    client: TestClient, headers: dict[str, str]
+) -> None:
+    """只补不删：不允许用更短的链把已确认的别名历史截短。
+
+    （原 `test_prune_removes_only_shorter_tail` 断言的是"默认就会删掉尾部"，
+    那正是 Codex 判定的缺陷——截短后搜索再也命中不到被删掉的历史别名。）
+    """
     assert _import(client, headers, [_row("P-H11", "SO-001", manager="丙")], "a.xlsx").status_code == 200
     ids = _ids("P-H11", "SO-001")
     with db() as conn:
         register_order_numbers(conn, ids["sales_order_id"], ["SO-A", "SO-B", "SO-C"])
-        register_order_numbers(conn, ids["sales_order_id"], ["SO-A", "SO-C"])
+        with pytest.raises(ValueError):
+            register_order_numbers(conn, ids["sales_order_id"], ["SO-A", "SO-C"])
+        assert load_order_numbers(conn, ids["sales_order_id"]) == ["SO-A", "SO-B", "SO-C"]
+
+
+def test_explicit_prune_replaces_the_whole_chain(
+    client: TestClient, headers: dict[str, str]
+) -> None:
+    """只有显式 prune=True（整份文件全量替换的维护场景）才允许整体替换成更短的链。"""
+    assert _import(client, headers, [_row("P-H11", "SO-001", manager="丙")], "a.xlsx").status_code == 200
+    ids = _ids("P-H11", "SO-001")
+    with db() as conn:
+        register_order_numbers(conn, ids["sales_order_id"], ["SO-A", "SO-B", "SO-C"])
+        register_order_numbers(conn, ids["sales_order_id"], ["SO-A", "SO-C"], prune=True)
         assert load_order_numbers(conn, ids["sales_order_id"]) == ["SO-A", "SO-C"]
 
 

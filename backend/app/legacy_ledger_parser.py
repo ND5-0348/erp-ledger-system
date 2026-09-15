@@ -28,6 +28,8 @@ CURRENT_MANAGER_CONFLICT = "CURRENT_MANAGER_CONFLICT"
 ORDER_ALIAS_CONFLICT = "ORDER_ALIAS_CONFLICT"
 ORDER_HISTORY_CONFLICT = "ORDER_HISTORY_CONFLICT"
 UNPARSABLE_VALUE = "UNPARSABLE_VALUE"
+# 同一笔可能被填进了模板的多个列组：不阻断，但必须让人看见，不能静默去重或双计。
+DUPLICATE_PHASE_SUSPECTED = "DUPLICATE_PHASE_SUSPECTED"
 
 # 单元格内的分隔符。名称类字段与金额/票据类字段共用；日期不走这里，
 # 日期必须按完整日期语法切分，否则 2026/09/01 会被拆成三段。
@@ -454,6 +456,60 @@ class ManagerHistoryOutcome:
         return any(issue.blocking for issue in self.issues)
 
 
+def merge_chain_sequences(
+    chains: list[list[str]],
+    *,
+    what: str,
+    key: str = "",
+    entity: str = "",
+    current_conflict_code: str = CURRENT_MANAGER_CONFLICT,
+    history_conflict_code: str = ORDER_HISTORY_CONFLICT,
+) -> tuple[list[str] | None, list[Issue]]:
+    """把同一实体（一个框架的负责人 / 一个订单的别名）的多条链归一。
+
+    规则（服务层与解析层共用，保证预检与写库判断一致）：
+
+    - 各行完全相同 → 归一，最后一个是当前值；
+    - 当前值不同 → 阻断，**不按最后一行或第一行覆盖**；
+    - 当前值相同但历史链条不同 → 阻断，要求人工确认（不按人名集合重排）。
+
+    返回（归一后的链 或 None、问题列表）。
+    """
+    normalized = [tuple(str(item).strip() for item in chain) for chain in chains if chain]
+    normalized = [chain for chain in normalized if any(chain)]
+    if not normalized:
+        return [], []
+
+    distinct = list(dict.fromkeys(normalized))
+    if len(distinct) == 1:
+        return list(distinct[0]), []
+
+    prefix = f"{entity} {key}".strip() if key else entity
+    current_values = {chain[-1] for chain in distinct}
+    if len(current_values) > 1:
+        return None, [
+            Issue(
+                code=current_conflict_code,
+                message=(
+                    f"{prefix}的{what}在不同行填了不同的当前值"
+                    f"（{ '、'.join(sorted(current_values)) }），"
+                    "请核实是否为交接记录或填写错误，系统不会自动取某一行"
+                ),
+            )
+        ]
+
+    return None, [
+        Issue(
+            code=history_conflict_code,
+            message=(
+                f"{prefix}的{what}历史链条不一致"
+                f"（{ ' | '.join('/'.join(chain) for chain in distinct) }），"
+                "无法证明先后顺序，请人工确认后填写"
+            ),
+        )
+    ]
+
+
 def merge_manager_history(cells: list[object], *, project_code: str = "") -> ManagerHistoryOutcome:
     """把同一框架项目多行的负责人单元格合并成一条历史链。
 
@@ -462,51 +518,23 @@ def merge_manager_history(cells: list[object], *, project_code: str = "") -> Man
     - 现任不同 → `CURRENT_MANAGER_CONFLICT`，阻断（不按最后一行覆盖）；
     - 现任相同但历史链条不同且无法证明顺序 → `ORDER_HISTORY_CONFLICT`，要求确认。
     """
-    sequences: list[tuple[str, ...]] = []
+    sequences: list[list[str]] = []
+    issues: list[Issue] = []
     for cell in cells:
         parsed = parse_name_sequence(cell)
+        issues.extend(parsed.issues)
         if parsed.values:
-            sequences.append(tuple(str(item) for item in parsed.values))
+            sequences.append([str(item) for item in parsed.values])
 
     if not sequences:
-        return ManagerHistoryOutcome(current=None, history=[])
+        return ManagerHistoryOutcome(current=None, history=[], issues=issues)
 
-    distinct = list(dict.fromkeys(sequences))
-    if len(distinct) == 1:
-        chain = list(distinct[0])
-        return ManagerHistoryOutcome(current=chain[-1], history=chain)
-
-    current_values = {chain[-1] for chain in distinct}
-    if len(current_values) > 1:
-        return ManagerHistoryOutcome(
-            current=None,
-            history=[],
-            issues=[
-                Issue(
-                    code=CURRENT_MANAGER_CONFLICT,
-                    message=(
-                        f"项目 {project_code} 的客户经理在不同行填了不同的现任"
-                        f"（{ '、'.join(sorted(current_values)) }），"
-                        "请核实是否为交接记录或填写错误，系统不会自动取最后一行"
-                    ),
-                )
-            ],
-        )
-
-    return ManagerHistoryOutcome(
-        current=None,
-        history=[],
-        issues=[
-            Issue(
-                code=ORDER_HISTORY_CONFLICT,
-                message=(
-                    f"项目 {project_code} 的客户经理历史链条不一致"
-                    f"（{ ' | '.join('/'.join(chain) for chain in distinct) }），"
-                    "无法证明先后顺序，请人工确认后填写"
-                ),
-            )
-        ],
+    chain, merge_issues = merge_chain_sequences(
+        sequences, what="客户经理", key=project_code, entity="项目"
     )
+    if chain is None:
+        return ManagerHistoryOutcome(current=None, history=[], issues=issues + merge_issues)
+    return ManagerHistoryOutcome(current=chain[-1], history=chain, issues=issues)
 
 
 def merge_order_number_history(cells: list[object], *, order_key: str = "") -> SequenceParse:
@@ -515,7 +543,9 @@ def merge_order_number_history(cells: list[object], *, order_key: str = "") -> S
     现任（最后一个）不同 → 阻断；历史链条不同但现任相同 → 需要人工确认。
     """
     parsed_cells = [parse_name_sequence(cell) for cell in cells]
-    sequences = [tuple(str(item) for item in parsed.cell.tokens) for parsed in parsed_cells if parsed.cell.tokens]
+    sequences = [
+        [str(item) for item in parsed.cell.tokens] for parsed in parsed_cells if parsed.cell.tokens
+    ]
     issues: list[Issue] = []
     for parsed in parsed_cells:
         issues.extend(parsed.issues)
@@ -523,36 +553,19 @@ def merge_order_number_history(cells: list[object], *, order_key: str = "") -> S
     if not sequences:
         return SequenceParse(cell=ParsedCell(raw_value="", tokens=()), values=[], issues=issues)
 
-    distinct = list(dict.fromkeys(sequences))
-    if len(distinct) == 1:
-        chain = list(distinct[0])
-        return SequenceParse(
-            cell=ParsedCell(raw_value=" / ".join(chain), tokens=tuple(chain), issues=tuple(issues)),
-            values=chain,
-            issues=issues,
-        )
-
-    current_values = {chain[-1] for chain in distinct}
-    if len(current_values) > 1:
-        issues.append(
-            Issue(
-                code=ORDER_ALIAS_CONFLICT,
-                message=(
-                    f"订单 {order_key} 在不同行填了不同的当前订单号"
-                    f"（{ '、'.join(sorted(current_values)) }），请确认哪一个是现行订单号"
-                ),
-            )
-        )
-        return SequenceParse(cell=ParsedCell(raw_value="", tokens=()), values=[], issues=issues)
-
-    issues.append(
-        Issue(
-            code=ORDER_HISTORY_CONFLICT,
-            message=(
-                f"订单 {order_key} 的历史订单号链条不一致"
-                f"（{ ' | '.join('/'.join(chain) for chain in distinct) }），"
-                "请人工确认改号顺序"
-            ),
-        )
+    chain, merge_issues = merge_chain_sequences(
+        sequences,
+        what="订单号",
+        key=order_key,
+        entity="订单",
+        current_conflict_code=ORDER_ALIAS_CONFLICT,
     )
-    return SequenceParse(cell=ParsedCell(raw_value="", tokens=()), values=[], issues=issues)
+    if chain is None:
+        return SequenceParse(
+            cell=ParsedCell(raw_value="", tokens=()), values=[], issues=issues + merge_issues
+        )
+    return SequenceParse(
+        cell=ParsedCell(raw_value=" / ".join(chain), tokens=tuple(chain), issues=tuple(issues)),
+        values=chain,
+        issues=issues,
+    )

@@ -15,7 +15,12 @@ from sqlalchemy.engine import Connection
 from .audit import write_operation_log
 from .auth import CurrentUser, can_access_department
 from .config import DOCS_DIR
-from .ledger_history import register_current_manager, register_current_number
+from .ledger_history import (
+    conflicts_in_project,
+    register_current_manager,
+    register_current_number,
+)
+from .legacy_ledger_parser import parse_name_sequence
 from .line_identity import find_duplicate_line
 from .ledger_excel import SAMPLE_ORDER_NO, SAMPLE_PROJECT_CODE, TEMPLATE_HEADERS, is_template_sample_row
 from .validation import validate_business_date
@@ -107,6 +112,27 @@ BUSINESS_PAYLOAD_POSITIONS = (3, 6, 14, 15, 16, 18, 21, 23, 24)
 
 def _has_business_payload(row: tuple[Any, ...]) -> bool:
     return any(_as_text(_row_value(row, position)) for position in BUSINESS_PAYLOAD_POSITIONS)
+
+
+def _reject_multi_value_chain(
+    value: str | None, excel_row_no: int, *, label: str, column: str
+) -> None:
+    """普通导入不接受多值编号/姓名。
+
+    订单号的 `A/B/C` 与负责人的 `甲/乙` 分别代表改号历史和交接历史，必须由人工在
+    预检会话里逐项确认后才能落库；普通追加导入既不解析、也不允许把拼接字符串当成
+    一个正常编号存进主记录。
+    """
+    if not value:
+        return
+    parsed = parse_name_sequence(value)
+    tokens = [str(token) for token in parsed.cell.tokens]
+    if len(tokens) > 1 or any(not token.strip() for token in tokens):
+        raise ValueError(
+            f"第 {excel_row_no} 行的{column}“{value}”包含多个值或空位；"
+            f"历次改号/交接必须通过“导入预检”逐项人工确认，"
+            f"普通导入不会自动改号或改写{label}"
+        )
 
 
 # 框架项目级共享字段：同一框架下全部订单、子项目和明细必须一致。
@@ -377,6 +403,18 @@ def import_excel(
             skipped_rows += 1
             continue
 
+        # 多值（甲/乙 或 A/B/C）属于改号与交接历史，普通追加导入不解析、也不
+        # 允许把拼接字符串当成一个正常编号存库：必须走预检会话人工确认。
+        _reject_multi_value_chain(
+            order_no, excel_row_no, label="订单号", column="订单号"
+        )
+        _reject_multi_value_chain(
+            _as_text(_row_value(row, position(5, 5))),
+            excel_row_no,
+            label="客户经理",
+            column="客户经理",
+        )
+
         row_dict = {
             str(headers[i] or f"column_{i + 1}"): _json_default(value)
             for i, value in enumerate(row)
@@ -445,6 +483,25 @@ def import_excel(
                         "team_level3_name": _as_text(_row_value(row, position(9, 9))),
                     },
                 )
+
+            # 订单号在同一框架内必须唯一指向一个稳定订单：该编号若已被同一框架下的
+            # **另一个**订单占用（当前号或历史别名），整批阻断，绝不自动合并两个订单
+            # 的财务记录，也不靠新建订单绕开冲突。
+            exact_order_id = conn.execute(
+                text(
+                    "SELECT id FROM sales_order WHERE project_id = :project_id "
+                    "AND order_no = :order_no AND deleted_at IS NULL"
+                ),
+                {"project_id": project_id, "order_no": order_no},
+            ).scalar()
+            if exact_order_id is None:
+                conflicts = conflicts_in_project(conn, project_id, [order_no])
+                if conflicts:
+                    raise ValueError(
+                        f"第 {excel_row_no} 行的订单号 {order_no} 已属于同一框架下的另一个订单"
+                        "（当前号或历史别名）。系统不会自动合并两个订单或替它改号；"
+                        "若确属改号，请通过“导入预检”人工确认后提交"
+                    )
 
             sales_order_id = _execute_scalar(
                 conn,

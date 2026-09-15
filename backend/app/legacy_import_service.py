@@ -16,41 +16,69 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 from fastapi import HTTPException
 from openpyxl import load_workbook
+from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
-from .ledger_history import register_manager_history, register_order_numbers
+from .audit import write_operation_log
+from .ledger_history import (
+    conflicts_in_project,
+    find_order_by_number,
+    merge_manager_chain,
+    merge_order_chain,
+    register_manager_history,
+    register_order_numbers,
+)
 from .legacy_ledger_parser import (
-    AMOUNT_SPLIT_REQUIRED,
+    CURRENT_MANAGER_CONFLICT,
+    DUPLICATE_PHASE_SUSPECTED,
+    ORDER_ALIAS_CONFLICT,
+    ORDER_HISTORY_CONFLICT,
+    UNPARSABLE_VALUE,
     Issue,
     build_phases,
+    merge_chain_sequences,
     merge_manager_history,
     merge_order_number_history,
     parse_amount_sequence,
-    parse_document_sequence,
+    parse_date_sequence,
     parse_name_sequence,
 )
+from .legacy_resolution import (
+    RevisionError,
+    RowResolution,
+    chain_revision_values,
+    merge_finance,
+    parse_row_resolution,
+    phase_business_issues,
+    validate_finance_revision,
+)
 
-PARSER_VERSION = "legacy-parser-1"
+PARSER_VERSION = "legacy-parser-2"
 SESSION_TTL_HOURS = 24
 MAX_PREVIEW_ROWS = 20000
 
-# 财务列组：名称 → (日期列, 金额列, 票据列)，列号为 91 列标准模板的绝对列号。
-# 期次按“模板列组顺序、组内位置顺序”展开。
-FINANCE_GROUPS: tuple[tuple[str, int, int, int | None], ...] = (
-    ("sales_invoice", 74, 76, 73),
-    ("sales_receipt", 79, 81, 80),
-    ("purchase_payment", 55, 57, 56),
-    ("purchase_invoice", 44, 46, 45),
-    ("finance_invoice_check", 50, 52, 51),
-    ("warehouse_entry", 47, 49, 48),
-)
+# 财务列组：业务组 → 该组在 91 列模板里占用的列组列表，每组为
+# (日期列, 金额列, 票据列)。列号是模板绝对列号。
+#
+# 一个业务组可能有**多个模板列组**：标准模板里付款与回款各有两组列
+# （付款 55–57 与 58–60、回款 79–82 与 83–86）。期次按“组内列组顺序、
+# 列组内位置顺序”展开，两组的来源都保留，不去重也不双计。
+FINANCE_SOURCES: dict[str, tuple[tuple[int, int, int | None], ...]] = {
+    "sales_invoice": ((74, 76, 73),),
+    "sales_receipt": ((79, 81, 80), (83, 85, 84)),
+    "purchase_payment": ((55, 57, 56), (58, 60, 59)),
+    "purchase_invoice": ((44, 46, 45),),
+    "finance_invoice_check": ((50, 52, 51),),
+    "warehouse_entry": ((47, 49, 48),),
+}
 
 FINANCE_LABELS = {
     "sales_invoice": "销售开票",
@@ -60,6 +88,8 @@ FINANCE_LABELS = {
     "finance_invoice_check": "采购入账",
     "warehouse_entry": "采购入库",
 }
+
+LABEL_TO_GROUP = {label: name for name, label in FINANCE_LABELS.items()}
 
 ORDER_NO_COLUMN = 13
 MANAGER_COLUMN = 5
@@ -114,6 +144,40 @@ def _restore_value(value: Any) -> Any:
     return value
 
 
+def _duplicate_phase_issues(
+    entry: dict[str, Any], *, label: str, sheet: str, row: int
+) -> list[Issue]:
+    """同一笔出现在模板的多个列组里时给出提示（不阻断、也不自动去重）。
+
+    标准模板的付款与回款各有两组列，历史文件还可能在单元格内写多期；
+    同一组内不同列组出现"同日期同金额"时无法判断是两笔真实业务还是重复填写，
+    所以既不去重也不双计，只标记出来交人工确认。
+    """
+    issues: list[Issue] = []
+    seen: dict[tuple[Any, Any], Any] = {}
+    for phase in entry.get("phases") or []:
+        key = (phase.get("date"), phase.get("amount"))
+        group = phase.get("source_group")
+        if key in seen and seen[key] != group:
+            issues.append(
+                Issue(
+                    code=DUPLICATE_PHASE_SUSPECTED,
+                    message=(
+                        f"{label}在模板的不同列组里都填了同一笔"
+                        f"（{phase.get('date')} / {phase.get('amount')}）；"
+                        "系统没有自动去重、也没有重复计入，请人工确认是否为两笔业务"
+                    ),
+                    blocking=False,
+                    sheet=sheet,
+                    row=row,
+                    columns=(label,),
+                )
+            )
+        else:
+            seen.setdefault(key, group)
+    return issues
+
+
 def parse_row(
     row: tuple[Any, ...],
     *,
@@ -132,88 +196,77 @@ def parse_row(
     issues.extend(issue.with_location(sheet=sheet_name, row=excel_row_no) for issue in manager_parse.issues)
 
     finance: dict[str, Any] = {}
-    for name, date_column, amount_column, document_column in FINANCE_GROUPS:
-        date_cell = _cell(row, date_column)
-        amount_cell = _cell(row, amount_column)
-        document_cell = _cell(row, document_column) if document_column else None
-        if date_cell in (None, "") and amount_cell in (None, "") and document_cell in (None, ""):
-            continue
-        phases, group_issues = build_phases(
-            date_cell=date_cell,
-            amount_cell=amount_cell,
-            document_cell=document_cell,
-            columns=(FINANCE_LABELS[name],),
-            sheet=sheet_name,
-            row=excel_row_no,
-        )
-        issues.extend(group_issues)
-        finance[name] = {
-            "label": FINANCE_LABELS[name],
-            "date_raw": _text(date_cell),
-            "amount_raw": _text(amount_cell),
-            "document_raw": _text(document_cell),
-            "phases": [
+    for name, sources in FINANCE_SOURCES.items():
+        label = FINANCE_LABELS[name]
+        entry: dict[str, Any] = {
+            "label": label,
+            "date_raw": None,
+            "amount_raw": None,
+            "document_raw": None,
+            # 每个模板列组一条来源记录：两组付款/回款列并存时都保留来源，
+            # 便于前端逐组展示，也便于人工确认时按组修正。
+            "raw_sources": [],
+            "phases": [],
+        }
+        for date_column, amount_column, document_column in sources:
+            date_cell = _cell(row, date_column)
+            amount_cell = _cell(row, amount_column)
+            document_cell = _cell(row, document_column) if document_column else None
+            if date_cell in (None, "") and amount_cell in (None, "") and document_cell in (None, ""):
+                continue
+            entry["raw_sources"].append(
                 {
-                    "position": phase.source_position,
+                    "date_column": date_column,
+                    "amount_column": amount_column,
+                    "document_column": document_column,
+                    "date_raw": _text(date_cell),
+                    "amount_raw": _text(amount_cell),
+                    "document_raw": _text(document_cell),
+                }
+            )
+            phases, group_issues = build_phases(
+                date_cell=date_cell,
+                amount_cell=amount_cell,
+                document_cell=document_cell,
+                columns=(label,),
+                sheet=sheet_name,
+                row=excel_row_no,
+            )
+            issues.extend(group_issues)
+            entry["phases"].extend(
+                {
+                    "position": len(entry["phases"]) + index + 1,
                     "date": phase.date.isoformat() if phase.date else None,
                     "amount": format(phase.amount, "f") if phase.amount is not None else None,
                     "document_no": phase.document_no,
+                    "source_column": date_column,
+                    "source_group": len(entry["raw_sources"]),
                 }
-                for phase in phases
-            ],
-        }
-
-    # 标准模板的第二组（付款 58–60 / 回款 83–86）也按同一规则展开
-    for name, date_column, amount_column, document_column in (
-        ("purchase_payment", 58, 60, 59),
-        ("sales_receipt", 83, 85, 84),
-    ):
-        date_cell = _cell(row, date_column)
-        amount_cell = _cell(row, amount_column)
-        document_cell = _cell(row, document_column)
-        if date_cell in (None, "") and amount_cell in (None, "") and document_cell in (None, ""):
+                for index, phase in enumerate(phases)
+            )
+        if not entry["raw_sources"]:
             continue
-        phases, group_issues = build_phases(
-            date_cell=date_cell,
-            amount_cell=amount_cell,
-            document_cell=document_cell,
-            columns=(FINANCE_LABELS[name],),
-            sheet=sheet_name,
-            row=excel_row_no,
-        )
-        issues.extend(group_issues)
-        entry = finance.setdefault(
-            name,
-            {
-                "label": FINANCE_LABELS[name],
-                "date_raw": None,
-                "amount_raw": None,
-                "document_raw": None,
-                "phases": [],
-            },
-        )
-        entry["phases"].extend(
-            {
-                "position": len(entry["phases"]) + index + 1,
-                "date": phase.date.isoformat() if phase.date else None,
-                "amount": format(phase.amount, "f") if phase.amount is not None else None,
-                "document_no": phase.document_no,
-            }
-            for index, phase in enumerate(phases)
-        )
+        first = entry["raw_sources"][0]
+        entry["date_raw"] = first["date_raw"]
+        entry["amount_raw"] = first["amount_raw"]
+        entry["document_raw"] = first["document_raw"]
+        issues.extend(_duplicate_phase_issues(entry, label=label, sheet=sheet_name, row=excel_row_no))
+        finance[name] = entry
 
+    order_tokens = [str(item) for item in order_parse.values]
+    manager_chain = [str(item) for item in manager_parse.history]
     return {
         "excel_row_no": excel_row_no,
         "project_code": _text(_cell(row, PROJECT_CODE_COLUMN)),
         "order_no": {
             "raw": _text(order_cell),
-            "current": order_parse.values[-1] if order_parse.values else None,
-            "history": [_jsonable(item) for item in order_parse.values],
+            "current": order_tokens[-1] if order_tokens else None,
+            "history": [_jsonable(item) for item in order_tokens],
         },
         "manager": {
             "raw": _text(manager_cell),
-            "current": manager_parse.current,
-            "history": manager_parse.history,
+            "current": manager_chain[-1] if manager_chain else None,
+            "history": manager_chain,
         },
         "project_name": _text(_cell(row, PROJECT_NAME_COLUMN)),
         "goods_name": _text(_cell(row, GOODS_COLUMN)),
@@ -222,20 +275,149 @@ def parse_row(
     }
 
 
-def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    blocking = sum(
-        1 for row in rows if any(issue["blocking"] for issue in row["issues"])
+CHAIN_LABEL_ORDER = "订单号"
+CHAIN_LABEL_MANAGER = "客户经理"
+CHAIN_CODES = frozenset(
+    {
+        CURRENT_MANAGER_CONFLICT,
+        ORDER_ALIAS_CONFLICT,
+        ORDER_HISTORY_CONFLICT,
+        UNPARSABLE_VALUE,
+    }
+)
+
+
+@dataclass
+class RowState:
+    """一行在"解析 + 人工确认"之后的完整状态。"""
+
+    excel_row_no: int
+    parsed: dict[str, Any]
+    revision: RowResolution | None
+    stored_resolution: dict[str, Any]
+    finance: dict[str, Any]
+    order_chain: list[str]
+    manager_chain: list[str]
+    raw_values: list[Any]
+    issues: list[Issue]
+
+    @property
+    def blocking(self) -> bool:
+        return any(issue.blocking for issue in self.issues)
+
+
+def _issue_from_payload(payload: dict[str, Any]) -> Issue:
+    return Issue(
+        code=str(payload.get("code") or ""),
+        message=str(payload.get("message") or ""),
+        blocking=bool(payload.get("blocking", True)),
+        sheet=payload.get("sheet"),
+        row=payload.get("row"),
+        columns=tuple(str(item) for item in (payload.get("columns") or ())),
     )
+
+
+def _issue_group(issue: Issue) -> str | None:
+    """财务问题的归属组（按标签反查）；链问题返回 None。"""
+    for column in issue.columns:
+        group = LABEL_TO_GROUP.get(column)
+        if group:
+            return group
+    return None
+
+
+def _parse_stored_resolution(stored: Any) -> RowResolution | None:
+    """读取库里保存的人工确认；`audit` 明细不参与结构校验。"""
+    if not isinstance(stored, dict):
+        return None
+    payload = {key: stored[key] for key in ("order_no", "manager", "finance") if key in stored}
+    if not payload:
+        return None
+    try:
+        return RowResolution.model_validate(payload)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="该预检会话里保存的人工确认格式已失效，请重新上传文件建立新会话",
+        ) from exc
+
+
+def build_row_state(
+    excel_row_no: int,
+    parsed: dict[str, Any],
+    stored_resolution: Any,
+    raw_values: list[Any] | None = None,
+) -> RowState:
+    """由"解析结果 + 人工确认"得出该行的最终值与全部问题。
+
+    人工确认过的财务组会用确认值**重新执行**期次数、合计、日期、金额校验；
+    未确认的组继续沿用解析阶段的问题——不存在"确认了错误码就放行"的路径。
+    """
+    revision = _parse_stored_resolution(stored_resolution)
+    revised_groups = set(revision.finance) if revision else set()
+    revised_order = bool(revision and revision.order_no)
+    revised_manager = bool(revision and revision.manager)
+
+    issues: list[Issue] = []
+    for payload in parsed.get("issues") or []:
+        issue = _issue_from_payload(payload)
+        group = _issue_group(issue)
+        if group is not None:
+            if group in revised_groups:
+                continue
+        elif issue.code in CHAIN_CODES:
+            is_order = CHAIN_LABEL_ORDER in issue.columns
+            is_manager = CHAIN_LABEL_MANAGER in issue.columns
+            if is_order and revised_order:
+                continue
+            if is_manager and revised_manager:
+                continue
+        issues.append(issue)
+
+    parsed_finance = parsed.get("finance") or {}
+    if revision:
+        for name, entry_revision in revision.finance.items():
+            label = FINANCE_LABELS.get(name, name)
+            _, group_issues, _ = validate_finance_revision(
+                parsed_finance.get(name) or {}, entry_revision, label=label
+            )
+            issues.extend(
+                issue.with_location(
+                    sheet=parsed.get("sheet"), row=excel_row_no, columns=(label,)
+                )
+                for issue in group_issues
+            )
+
+    order_chain = (chain_revision_values(revision.order_no) if revision else None) or [
+        str(item) for item in (parsed.get("order_no", {}).get("history") or [])
+    ]
+    manager_chain = (chain_revision_values(revision.manager) if revision else None) or [
+        str(item) for item in (parsed.get("manager", {}).get("history") or [])
+    ]
+
+    return RowState(
+        excel_row_no=excel_row_no,
+        parsed=parsed,
+        revision=revision,
+        stored_resolution=dict(stored_resolution) if isinstance(stored_resolution, dict) else {},
+        finance=merge_finance(parsed_finance, revision.finance if revision else None),
+        order_chain=[str(item) for item in order_chain],
+        manager_chain=[str(item) for item in manager_chain],
+        raw_values=list(raw_values or []),
+        issues=issues,
+    )
+
+
+def summarize_states(states: list[RowState]) -> dict[str, Any]:
+    blocking = sum(1 for state in states if state.blocking)
     warning = sum(
-        1 for row in rows if any(not issue["blocking"] for issue in row["issues"])
+        1 for state in states if any(not issue.blocking for issue in state.issues)
     )
     multi_value = sum(
-        1
-        for row in rows
-        if len(row["order_no"]["history"] or []) > 1 or len(row["manager"]["history"] or []) > 1
+        1 for state in states if len(state.order_chain) > 1 or len(state.manager_chain) > 1
     )
     return {
-        "total_rows": len(rows),
+        "total_rows": len(states),
         "blocking_rows": blocking,
         "warning_rows": warning,
         "multi_value_rows": multi_value,
@@ -273,7 +455,11 @@ def create_session(
     if len(rows) > MAX_PREVIEW_ROWS:
         raise HTTPException(status_code=413, detail=f"预检单次最多 {MAX_PREVIEW_ROWS} 行，请拆分文件")
 
-    summary = summarize(rows)
+    states = [
+        build_row_state(parsed["excel_row_no"], parsed, {}, list(values))
+        for values, parsed in parsed_rows
+    ]
+    summary = _summary_with_cross(states, cross_row_issues(conn, states))
     session_id = secrets.token_urlsafe(24)
     expires_at = datetime.now() + timedelta(hours=SESSION_TTL_HOURS)
     conn.execute(
@@ -389,27 +575,69 @@ def apply_resolutions(
     conn: Connection,
     session_id: str,
     *,
-    user_id: int,
+    user: Any,
     resolutions: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """写入逐项人工确认，并对相关行重新执行全部校验。"""
+    """写入逐项人工确认，并对相关行重新执行全部解析与业务校验。
+
+    人工确认是**结构化数据**（每期日期/金额/票据各自是独立字段），不是
+    "确认某个错误码"。确认值本身不合法（期次数、合计、日期、金额）时整次请求
+    被拒绝，不会写入半成品；其他尚未处理的组保持阻断状态。
+    """
+    user_id = user.id
     session = load_session(conn, session_id, user_id=user_id)
     if session["status"] != "pending":
         raise HTTPException(status_code=409, detail=f"会话状态为 {session['status']}，不能修改")
 
     updated = 0
+    collected_audits: list[dict[str, Any]] = []
     for item in resolutions:
         excel_row_no = int(item.get("excel_row_no") or 0)
         if not excel_row_no:
             continue
-        exists = conn.execute(
+        stored = conn.execute(
             text(
-                "SELECT id FROM legacy_import_source WHERE session_id = :id AND excel_row_no = :row"
+                "SELECT parsed_json, resolution_json FROM legacy_import_source "
+                "WHERE session_id = :id AND excel_row_no = :row"
             ),
             {"id": session_id, "row": excel_row_no},
-        ).scalar()
-        if not exists:
+        ).mappings().first()
+        if stored is None:
             raise HTTPException(status_code=404, detail=f"会话中没有第 {excel_row_no} 行")
+
+        try:
+            revision = parse_row_resolution(
+                item.get("resolution"), known_finance_groups=FINANCE_SOURCES
+            )
+        except RevisionError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if revision is None:
+            continue
+
+        parsed = _json_load(stored["parsed_json"]) or {}
+        existing = _json_load(stored["resolution_json"]) or {}
+        audits: list[dict[str, Any]] = []
+        for name, entry_revision in revision.finance.items():
+            label = FINANCE_LABELS.get(name, name)
+            _, group_issues, audit = validate_finance_revision(
+                (parsed.get("finance") or {}).get(name) or {}, entry_revision, label=label
+            )
+            blocking = [issue for issue in group_issues if issue.blocking]
+            if blocking:
+                raise HTTPException(
+                    status_code=422,
+                    detail="；".join(issue.message for issue in blocking),
+                )
+            if audit:
+                audits.append(audit)
+                collected_audits.append({**audit, "excel_row_no": excel_row_no})
+
+        payload = _merge_resolution_payload(existing, revision)
+        payload["audit"] = {
+            "finance": audits,
+            "recorded_by": user_id,
+            "recorded_at": datetime.now().isoformat(timespec="seconds"),
+        }
         conn.execute(
             text(
                 """
@@ -421,7 +649,7 @@ def apply_resolutions(
                 """
             ),
             {
-                "resolution": json.dumps(item.get("resolution") or {}, ensure_ascii=False),
+                "resolution": json.dumps(payload, ensure_ascii=False, default=_jsonable),
                 "user_id": user_id,
                 "id": session_id,
                 "row": excel_row_no,
@@ -436,41 +664,232 @@ def apply_resolutions(
         ),
         {"summary": json.dumps(summary, ensure_ascii=False), "id": session_id},
     )
+    if updated:
+        # 审计只留元数据：会话、行号、涉及哪些财务组与合计修正。不含原始业务内容。
+        write_operation_log(
+            conn,
+            user,
+            "订单管理",
+            "resolve_legacy_import",
+            f"人工确认旧台账预检会话 {session_id} 的 {updated} 行；仍有 {summary['blocking_rows']} 行阻断",
+            after={
+                "session_id": session_id,
+                "rows": [int(item.get("excel_row_no") or 0) for item in resolutions][:200],
+                "audit": collected_audits[:200],
+            },
+        )
     return {"updated": updated, "summary": summary}
 
 
-def recompute_summary(conn: Connection, session_id: str) -> dict[str, Any]:
-    """按“解析结果 + 人工确认”重算阻断情况。"""
+def _merge_resolution_payload(existing: dict[str, Any], revision: RowResolution) -> dict[str, Any]:
+    """本次修正与前几次已确认的内容合并：没提到的字段保持原确认。"""
+    payload: dict[str, Any] = {
+        key: existing[key] for key in ("order_no", "manager", "finance") if existing.get(key)
+    }
+    if revision.order_no is not None:
+        payload["order_no"] = {"history": list(revision.order_no.history)}
+    if revision.manager is not None:
+        payload["manager"] = {"history": list(revision.manager.history)}
+    finance = dict(payload.get("finance") or {})
+    for name, entry in revision.finance.items():
+        finance[name] = entry.model_dump(mode="json")
+    if finance:
+        payload["finance"] = finance
+    return payload
+
+
+def _json_load(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    return value
+
+
+def evaluate_session(conn: Connection, session_id: str) -> tuple[list[RowState], list[Issue]]:
+    """读取会话的全部行，按"解析 + 人工确认"重算状态与跨行问题。"""
     rows = conn.execute(
-        text("SELECT parsed_json, resolution_json FROM legacy_import_source WHERE session_id = :id"),
+        text(
+            "SELECT excel_row_no, raw_json, parsed_json, resolution_json "
+            "FROM legacy_import_source WHERE session_id = :id ORDER BY excel_row_no"
+        ),
         {"id": session_id},
     ).mappings().all()
-    blocking = 0
-    resolved = 0
-    for row in rows:
-        parsed = json.loads(row["parsed_json"]) if isinstance(row["parsed_json"], str) else row["parsed_json"]
-        resolution = (
-            json.loads(row["resolution_json"])
-            if isinstance(row["resolution_json"], str)
-            else row["resolution_json"]
+    states = [
+        build_row_state(
+            int(row["excel_row_no"]),
+            _json_load(row["parsed_json"]) or {},
+            _json_load(row["resolution_json"]),
+            list((_json_load(row["raw_json"]) or {}).get("values") or []),
         )
-        blocking_codes = {
-            issue["code"] for issue in parsed.get("issues", []) if issue.get("blocking")
-        }
-        if resolution:
-            resolved += 1
-            # 人工确认过的错误码视为已处理
-            for key in ("acknowledged_codes", "acknowledged", "codes"):
-                for code in resolution.get(key, []) if isinstance(resolution.get(key), list) else []:
-                    blocking_codes.discard(code)
-        if blocking_codes:
-            blocking += 1
-    return {
-        "total_rows": len(rows),
-        "blocking_rows": blocking,
-        "resolved_rows": resolved,
-        "comparable": blocking == 0,
+        for row in rows
+    ]
+    return states, cross_row_issues(conn, states)
+
+
+def load_states(conn: Connection, session_id: str) -> list[RowState]:
+    states, _ = evaluate_session(conn, session_id)
+    return states
+
+
+def _project_id_by_code(conn: Connection, project_code: str) -> int | None:
+    value = conn.execute(
+        text("SELECT id FROM project WHERE project_code = :code AND deleted_at IS NULL"),
+        {"code": project_code},
+    ).scalar()
+    return int(value) if value else None
+
+
+def _order_components(states: list[RowState]) -> list[list[RowState]]:
+    """按"共享任一订单号"把行聚成同一订单的连通分量。
+
+    同一订单的多行必须给出可归一的链；只有一个号的行各自独立（新订单）。
+    """
+    rows = [state for state in states if state.order_chain]
+    if not rows:
+        return []
+    parent = list(range(len(rows)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        root_left, root_right = find(left), find(right)
+        if root_left != root_right:
+            parent[root_right] = root_left
+
+    by_number: dict[str, int] = {}
+    for position, state in enumerate(rows):
+        for number in state.order_chain:
+            if number in by_number:
+                union(by_number[number], position)
+            else:
+                by_number[number] = position
+
+    groups: dict[int, list[RowState]] = {}
+    for position, state in enumerate(rows):
+        groups.setdefault(find(position), []).append(state)
+    return list(groups.values())
+
+
+def cross_row_issues(conn: Connection, states: list[RowState]) -> list[Issue]:
+    """跨行与库内现状的一致性校验（预检与提交前各执行一次）。
+
+    - 同一框架的负责人链必须能归一，且与库内现任/历史一致或不冲突；
+    - 同一订单的别名链必须能归一，且不与同框架另一个订单的当前号或历史号冲突。
+    """
+    issues: list[Issue] = []
+    issues.extend(_manager_chain_issues(conn, states))
+    issues.extend(_order_chain_issues(conn, states))
+    return issues
+
+
+def _manager_chain_issues(conn: Connection, states: list[RowState]) -> list[Issue]:
+    issues: list[Issue] = []
+    groups: dict[str, list[RowState]] = {}
+    for state in states:
+        code = str(state.parsed.get("project_code") or "").strip()
+        if code and state.manager_chain:
+            groups.setdefault(code, []).append(state)
+
+    for code, group in sorted(groups.items()):
+        first = group[0]
+        outcome = merge_manager_history(
+            ["/".join(state.manager_chain) for state in group], project_code=code
+        )
+        if outcome.blocking:
+            issues.extend(
+                issue.with_location(row=first.excel_row_no) for issue in outcome.issues
+            )
+            continue
+        project_id = _project_id_by_code(conn, code)
+        if project_id is None:
+            continue
+        merged = merge_manager_chain(conn, project_id, outcome.history)
+        if merged.blocked:
+            issues.append(
+                Issue(
+                    code=CURRENT_MANAGER_CONFLICT,
+                    message=f"项目 {code}：{merged.reason}",
+                    row=first.excel_row_no,
+                )
+            )
+    return issues
+
+
+def _order_chain_issues(conn: Connection, states: list[RowState]) -> list[Issue]:
+    issues: list[Issue] = []
+    for group in _order_components(states):
+        first = group[0]
+        chain, merge_issues = merge_chain_sequences(
+            [state.order_chain for state in group],
+            what="订单号",
+            entity="订单",
+            current_conflict_code=ORDER_ALIAS_CONFLICT,
+        )
+        if chain is None:
+            issues.extend(
+                issue.with_location(row=first.excel_row_no) for issue in merge_issues
+            )
+            continue
+
+        code = str(first.parsed.get("project_code") or "").strip()
+        project_id = _project_id_by_code(conn, code) if code else None
+        if project_id is None:
+            continue
+
+        owner = find_order_by_number(conn, project_id, chain[-1])
+        conflicts = conflicts_in_project(
+            conn, project_id, chain, exclude_sales_order_id=owner
+        )
+        if conflicts:
+            numbers = "、".join(sorted(conflicts))
+            issues.append(
+                Issue(
+                    code=ORDER_ALIAS_CONFLICT,
+                    message=(
+                        f"订单号 {numbers} 在同一框架内已属于另一个订单（当前号或历史别名），"
+                        "整批不能提交；系统不会自动合并两个订单的财务记录，"
+                        "若确属改号请走专门的改号流程"
+                    ),
+                    row=first.excel_row_no,
+                )
+            )
+            continue
+        if owner is None:
+            continue
+        merged = merge_order_chain(conn, owner, chain)
+        if merged.blocked:
+            issues.append(
+                Issue(
+                    code=ORDER_HISTORY_CONFLICT,
+                    message=merged.reason,
+                    row=first.excel_row_no,
+                )
+            )
+    return issues
+
+
+def _summary_with_cross(states: list[RowState], cross_issues: list[Issue]) -> dict[str, Any]:
+    summary = summarize_states(states)
+    blocking_rows = {state.excel_row_no for state in states if state.blocking}
+    blocking_rows |= {
+        int(issue.row) for issue in cross_issues if issue.blocking and issue.row
     }
+    summary["blocking_rows"] = len(blocking_rows)
+    summary["cross_row_issues"] = [_issue_payload(issue) for issue in cross_issues]
+    summary["comparable"] = len(blocking_rows) == 0
+    return summary
+
+
+def recompute_summary(conn: Connection, session_id: str) -> dict[str, Any]:
+    """按"解析结果 + 人工确认"重算阻断情况；确认值本身要重新通过全部校验。"""
+    states, cross_issues = evaluate_session(conn, session_id)
+    return _summary_with_cross(states, cross_issues)
 
 
 def finish_session(conn: Connection, session_id: str, *, result: dict[str, Any]) -> None:
@@ -487,7 +906,11 @@ def finish_session(conn: Connection, session_id: str, *, result: dict[str, Any])
 
 
 def check_commit_ready(conn: Connection, session: dict[str, Any], *, content: bytes) -> dict[str, Any]:
-    """提交前复核：状态、文件摘要、阻断问题。"""
+    """提交前复核：状态、文件摘要、阻断问题。
+
+    阻断判定与预检阶段**同一套逻辑**：人工确认过的内容要重新通过期次数、合计、
+    日期、金额校验，还要通过与库内现状的别名/负责人一致性检查。
+    """
     if session["status"] == "committed":
         stored = session.get("result_json")
         return {"already_committed": True, "result": json.loads(stored) if isinstance(stored, str) else stored}
@@ -520,7 +943,8 @@ def commit_session(
 ) -> dict[str, Any]:
     """提交已通过预检的会话：写锁内复核 → 规范化 → 复用导入服务写入 → 追加期次与历史。
 
-    重复提交同一会话只返回原结果，不会新增业务记录。
+    整个过程在调用方的写锁事务内完成：任一期财务、任何历史修改或会话状态出错，
+    业务写入与历史记录一起回滚。重复提交同一会话只返回原结果，不再新增业务记录。
     """
     from .importer import import_excel  # 延迟导入，避免模块级循环依赖
 
@@ -529,8 +953,8 @@ def commit_session(
     if ready.get("already_committed"):
         return {"already_committed": True, **(ready.get("result") or {})}
 
-    rows = load_all_rows(conn, session_id)
-    workbook_bytes = build_normalized_workbook(rows)
+    states = load_states(conn, session_id)
+    workbook_bytes, row_map = build_normalized_workbook(states)
     line_ids: dict[int, int] = {}
     result = import_excel(
         conn,
@@ -547,8 +971,9 @@ def commit_session(
             detail=f"提交失败，已整批回滚：{'；'.join(result.get('errors') or [])}",
         )
 
-    phases = append_phases(conn, rows, line_ids)
-    history_records = register_histories(conn, rows, line_ids)
+    phases = append_phases(conn, states, line_ids, row_map)
+    history_records = register_histories(conn, states, line_ids, row_map)
+
     payload = {
         "session_id": session_id,
         "success_rows": result["success_rows"],
@@ -558,6 +983,24 @@ def commit_session(
         "file_sha256": session["source_sha256"],
     }
     finish_session(conn, session_id, result=payload)
+    # 审计只记录可核对的元数据：会话、文件摘要、条数、期次数。不含原始业务内容。
+    write_operation_log(
+        conn,
+        user,
+        "订单管理",
+        "commit_legacy_import",
+        (
+            f"提交旧台账预检会话：成功 {result['success_rows']} 行，"
+            f"写入期次 {sum(phases.values())} 条，历史记录 {history_records} 条"
+        ),
+        after={
+            "session_id": session_id,
+            "file_sha256": session["source_sha256"],
+            "success_rows": result["success_rows"],
+            "skipped_rows": result["skipped_rows"],
+            "phases": phases,
+        },
+    )
     return {"already_committed": False, **payload}
 
 
@@ -572,18 +1015,18 @@ PHASE_TABLE_COLUMNS: dict[str, tuple[str, str, str]] = {
 }
 
 # 每组财务在模板里占用的**全部**列。规范化工件要把这些列整体清空：
-# 只要漏掉一列（例如开票组的发票号列），importer 的固定列逻辑就会先写一期，
-# 追加逻辑再写三期，结果变成四期。
+# 只要漏掉一列（例如开票组的发票号列、或付款组的到期付款日），importer 的固定列
+# 逻辑就会先写一期（哪怕只有到期付款日），追加逻辑再写 N 期，期次号与条数都错。
 FINANCE_GROUP_COLUMNS: dict[str, tuple[int, ...]] = {
     "sales_invoice": (73, 74, 75, 76, 77),
     "sales_receipt": (79, 80, 81, 82, 83, 84, 85, 86),
-    "purchase_payment": (55, 56, 57, 58, 59, 60, 61),
+    "purchase_payment": (54, 55, 56, 57, 58, 59, 60, 61),
     "purchase_invoice": (44, 45, 46),
     "finance_invoice_check": (50, 51, 52, 53),
     "warehouse_entry": (47, 48, 49),
 }
 
-# 到期付款日不参与多值解析，作为采购付款各期共用的行级值保留。
+# 到期付款日不参与多值解析，作为采购付款各期共用的行级值保留（原始行里读）。
 DUE_PAYMENT_DATE_COLUMN = 54
 
 PHASE_SOURCE_COLUMNS: tuple[int, ...] = tuple(
@@ -591,115 +1034,82 @@ PHASE_SOURCE_COLUMNS: tuple[int, ...] = tuple(
 )
 
 
-def load_all_rows(conn: Connection, session_id: str) -> list[dict[str, Any]]:
-    rows = conn.execute(
-        text(
-            """
-            SELECT excel_row_no, raw_json, parsed_json, resolution_json
-            FROM legacy_import_source WHERE session_id = :id ORDER BY excel_row_no
-            """
-        ),
-        {"id": session_id},
-    ).mappings().all()
-    result: list[dict[str, Any]] = []
-    for row in rows:
-        raw = row["raw_json"]
-        raw = json.loads(raw) if isinstance(raw, str) else raw
-        parsed = row["parsed_json"]
-        parsed = json.loads(parsed) if isinstance(parsed, str) else parsed
-        resolution = row["resolution_json"]
-        resolution = json.loads(resolution) if isinstance(resolution, str) else resolution
-        result.append(
-            {
-                "excel_row_no": int(row["excel_row_no"]),
-                "values": list((raw or {}).get("values") or []),
-                "parsed": parsed or {},
-                "resolution": resolution or {},
-            }
-        )
-    return result
-
-
-def effective_order_chain(row: dict[str, Any]) -> list[str]:
-    order = row["resolution"].get("order_no") or row["parsed"].get("order_no") or {}
-    chain = order.get("history") or []
-    if not chain and order.get("current"):
-        chain = [order["current"]]
-    return [str(item) for item in chain if str(item).strip()]
-
-
-def effective_manager_chain(row: dict[str, Any]) -> list[str]:
-    manager = row["resolution"].get("manager") or row["parsed"].get("manager") or {}
-    chain = manager.get("history") or []
-    if not chain and manager.get("current"):
-        chain = [manager["current"]]
-    return [str(item) for item in chain if str(item).strip()]
-
-
-def build_normalized_workbook(rows: list[dict[str, Any]]) -> bytes:
-    """按“原始行 + 人工确认”重建一份规范化工件。
+def build_normalized_workbook(states: list[RowState]) -> tuple[bytes, dict[int, int]]:
+    """按"原始行 + 人工确认"重建一份规范化工件。
 
     订单号写当前号（链尾），客户经理写现任；财务源列全部清空，改由
     append_phases 按确认后的期次写入，因此支持任意期数而不是模板的固定两期。
+
+    返回（工作簿字节、原始 Excel 行号 → 规范化行号）。原始文件中间可能有空行，
+    规范化后是紧凑排列的；调用方必须用这张映射把明细 id 对回原始行，
+    否则空行之后的财务与历史会整体错位。
     """
     from .ledger_excel import TEMPLATE_HEADERS, template_bytes
 
     workbook = load_workbook(_BytesReader(template_bytes()))
     worksheet = workbook.worksheets[0]
     total_columns = len(TEMPLATE_HEADERS)
-    for excel_row in range(3, 3 + len(rows) + 1):
+    for excel_row in range(3, 3 + len(states) + 1):
         for column in range(1, total_columns + 1):
             worksheet.cell(excel_row, column).value = None
 
-    for offset, row in enumerate(rows):
-        values = list(row["values"])
+    row_map: dict[int, int] = {}
+    for offset, state in enumerate(states):
+        normalized_row = 3 + offset
+        row_map[state.excel_row_no] = normalized_row
+        values = list(state.raw_values)
         values += [None] * (total_columns - len(values))
         for column in PHASE_SOURCE_COLUMNS:
             if 1 <= column <= total_columns:
                 values[column - 1] = None
-        order_chain = effective_order_chain(row)
-        if order_chain:
-            values[ORDER_NO_COLUMN - 1] = order_chain[-1]
-        manager_chain = effective_manager_chain(row)
-        if manager_chain:
-            values[MANAGER_COLUMN - 1] = manager_chain[-1]
+        if state.order_chain:
+            values[ORDER_NO_COLUMN - 1] = state.order_chain[-1]
+        if state.manager_chain:
+            values[MANAGER_COLUMN - 1] = state.manager_chain[-1]
         for column, value in enumerate(values[:total_columns], start=1):
-            worksheet.cell(3 + offset, column, _restore_value(value))
+            worksheet.cell(normalized_row, column, _restore_value(value))
 
     buffer = _BytesWriter()
     workbook.save(buffer)
     workbook.close()
-    return buffer.getvalue()
-
-
-def _next_phase_no(conn: Connection, table: str, order_line_id: int) -> int:
-    value = conn.execute(
-        text(
-            f"SELECT COALESCE(MAX(phase_no), 0) FROM {table} "
-            "WHERE order_line_id = :order_line_id AND deleted_at IS NULL"
-        ),
-        {"order_line_id": order_line_id},
-    ).scalar()
-    return int(value or 0) + 1
+    return buffer.getvalue(), row_map
 
 
 def append_phases(
-    conn: Connection, rows: list[dict[str, Any]], line_ids: dict[int, int]
+    conn: Connection,
+    states: list[RowState],
+    line_ids: dict[int, int],
+    row_map: dict[int, int],
 ) -> dict[str, int]:
-    """把确认后的每一期财务按顺序写入对应期次表，期号连续分配、不设上限。"""
+    """把确认后的每一期财务按顺序写入对应期次表，期号连续分配、不设上限。
+
+    写入前对每一期重新执行与单条录入一致的业务校验（金额非负且最多两位小数、
+    日期真实存在且年份不超过 2099、票据号长度），任一期不合法就整批回滚。
+    """
     written: dict[str, int] = {}
-    for row in rows:
-        order_line_id = line_ids.get(row["excel_row_no"])
+    for state in states:
+        order_line_id = line_ids.get(row_map.get(state.excel_row_no, -1))
         if not order_line_id:
             continue
-        finance = row["resolution"].get("finance") or row["parsed"].get("finance") or {}
-        for business, entry in finance.items():
+        line_groups: set[str] = set()
+        for business, entry in state.finance.items():
             columns = PHASE_TABLE_COLUMNS.get(business)
             if not columns:
                 continue
+            label = FINANCE_LABELS.get(business, business)
             date_column, document_column, amount_column = columns
-            for phase in entry.get("phases") or []:
-                phase_no = _next_phase_no(conn, business, order_line_id)
+            phases = entry.get("phases") or []
+            phase_issues: list[Issue] = []
+            for position, phase in enumerate(phases, start=1):
+                phase_issues.extend(
+                    phase_business_issues(phase, label=label, position=position)
+                )
+            if phase_issues:
+                raise HTTPException(
+                    status_code=422,
+                    detail="；".join(issue.message for issue in phase_issues),
+                )
+            for phase_no, phase in enumerate(phases, start=1):
                 conn.execute(
                     text(
                         f"""
@@ -721,20 +1131,38 @@ def append_phases(
                     },
                 )
                 if business == "purchase_payment":
-                    _set_due_payment_date(conn, order_line_id, phase_no, row)
+                    _set_due_payment_date(conn, order_line_id, phase_no, state)
                 written[business] = written.get(business, 0) + 1
+            if phases:
+                line_groups.add(business)
+
+        # 到期付款日是行级单值。整行只填了它、没有付款日期与金额时，也要保留下来，
+        # 否则规范化清空源列之后这个字段会被静默丢掉。
+        due = _due_payment_date(state)
+        if due not in (None, "") and "purchase_payment" not in line_groups:
+            conn.execute(
+                text(
+                    "INSERT INTO purchase_payment (order_line_id, phase_no, due_payment_date) "
+                    "VALUES (:order_line_id, 1, :due)"
+                ),
+                {"order_line_id": order_line_id, "due": due},
+            )
+            written["purchase_payment"] = written.get("purchase_payment", 0) + 1
     return written
 
 
+def _due_payment_date(state: RowState) -> Any:
+    index = DUE_PAYMENT_DATE_COLUMN - 1
+    if index >= len(state.raw_values):
+        return None
+    return _restore_value(state.raw_values[index])
+
+
 def _set_due_payment_date(
-    conn: Connection, order_line_id: int, phase_no: int, row: dict[str, Any]
+    conn: Connection, order_line_id: int, phase_no: int, state: RowState
 ) -> None:
     """到期付款日在模板里是行级单值，写入该期时一并带上。"""
-    values = row.get("values") or []
-    index = DUE_PAYMENT_DATE_COLUMN - 1
-    if index >= len(values):
-        return
-    due = _restore_value(values[index])
+    due = _due_payment_date(state)
     if due in (None, ""):
         return
     conn.execute(
@@ -746,14 +1174,36 @@ def _set_due_payment_date(
     )
 
 
+def _remember_chain(
+    chains: dict[int, list[str]], entity_id: int, chain: list[str], *, what: str
+) -> None:
+    """同一实体多行的链必须一致；不一致说明预检校验被绕过，整批回滚。"""
+    existing = chains.get(entity_id)
+    if existing is None:
+        chains[entity_id] = list(chain)
+        return
+    if existing != chain:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{what}在同一实体下出现多条不同的历史链，已整批回滚，请重新预检",
+        )
+
+
 def register_histories(
-    conn: Connection, rows: list[dict[str, Any]], line_ids: dict[int, int]
+    conn: Connection,
+    states: list[RowState],
+    line_ids: dict[int, int],
+    row_map: dict[int, int],
 ) -> int:
-    """登记订单号别名链与负责人交接链（链尾为当前值），并同步主记录的当前值。"""
-    seen_orders: set[int] = set()
-    seen_projects: set[int] = set()
-    for row in rows:
-        order_line_id = line_ids.get(row["excel_row_no"])
+    """登记订单号别名链与负责人交接链（链尾为当前值），并同步主记录的当前值。
+
+    写法是"与库内已确认的链合并"：文件只填当前值时不截短已有历史，文件补充了
+    缺失历史时按顺序补上；现任不同或链条冲突则整批回滚（改号/交接走另行授权的流程）。
+    """
+    order_chains: dict[int, list[str]] = {}
+    project_chains: dict[int, list[str]] = {}
+    for state in states:
+        order_line_id = line_ids.get(row_map.get(state.excel_row_no, -1))
         if not order_line_id:
             continue
         ids = conn.execute(
@@ -773,24 +1223,35 @@ def register_histories(
         sales_order_id = int(ids["sales_order_id"])
         project_id = int(ids["project_id"])
 
-        order_chain = effective_order_chain(row)
-        if order_chain and sales_order_id not in seen_orders:
-            register_order_numbers(conn, sales_order_id, order_chain)
-            conn.execute(
-                text("UPDATE sales_order SET order_no = :order_no WHERE id = :id"),
-                {"order_no": order_chain[-1], "id": sales_order_id},
-            )
-            seen_orders.add(sales_order_id)
+        if state.order_chain:
+            _remember_chain(order_chains, sales_order_id, state.order_chain, what="订单号")
+        if state.manager_chain:
+            _remember_chain(project_chains, project_id, state.manager_chain, what="客户经理")
 
-        manager_chain = effective_manager_chain(row)
-        if manager_chain and project_id not in seen_projects:
-            register_manager_history(conn, project_id, manager_chain)
-            conn.execute(
-                text("UPDATE project SET account_manager = :name WHERE id = :project_id"),
-                {"name": manager_chain[-1], "project_id": project_id},
-            )
-            seen_projects.add(project_id)
-    return len(seen_orders) + len(seen_projects)
+    written = 0
+    for sales_order_id, chain in order_chains.items():
+        # 只补不删，且现任必须与库内一致；改号或历史冲突在这里整批回滚。
+        merged = merge_order_chain(conn, sales_order_id, chain)
+        if merged.blocked:
+            raise HTTPException(status_code=422, detail=merged.reason)
+        register_order_numbers(conn, sales_order_id, merged.chain)
+        conn.execute(
+            text("UPDATE sales_order SET order_no = :order_no WHERE id = :id"),
+            {"order_no": merged.chain[-1], "id": sales_order_id},
+        )
+        written += 1
+
+    for project_id, chain in project_chains.items():
+        merged = merge_manager_chain(conn, project_id, chain)
+        if merged.blocked:
+            raise HTTPException(status_code=422, detail=merged.reason)
+        register_manager_history(conn, project_id, merged.chain)
+        conn.execute(
+            text("UPDATE project SET account_manager = :name WHERE id = :project_id"),
+            {"name": merged.chain[-1], "project_id": project_id},
+        )
+        written += 1
+    return written
 
 
 class _BytesWriter:
