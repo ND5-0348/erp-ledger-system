@@ -383,13 +383,24 @@ async function ensureSuccessfulResponse(response: Response) {
   throw new ApiError(response.status, message);
 }
 
-function parseErrorMessage(body: string) {
+export function parseErrorMessage(body: string) {
   if (!body) {
     return '';
   }
   try {
     const parsed = JSON.parse(body) as { detail?: unknown };
-    return typeof parsed.detail === 'string' ? parsed.detail : body;
+    if (typeof parsed.detail === 'string') {
+      return parsed.detail;
+    }
+    // 结构化错误：写入忙（409 BUSINESS_WRITE_BUSY）等返回 {code, message}，
+    // 直接展示 message，不要把整个 JSON 丢给用户。
+    if (parsed.detail && typeof parsed.detail === 'object') {
+      const detail = parsed.detail as { message?: unknown };
+      if (typeof detail.message === 'string' && detail.message) {
+        return detail.message;
+      }
+    }
+    return body;
   } catch {
     return body;
   }

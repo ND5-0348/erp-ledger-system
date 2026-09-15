@@ -9,6 +9,7 @@ from openpyxl.utils.exceptions import InvalidFileException
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import text
+from starlette.concurrency import run_in_threadpool
 
 from ..audit import write_batch_operation_log, write_operation_log
 from ..auth import CurrentUser, apply_department_scope, can_access_department, get_current_user, require_permission
@@ -29,6 +30,7 @@ from ..ledger_excel import (
 )
 from ..serializers import clean_row, clean_rows
 from ..validation import BusinessDate, Money, PreciseNumber, Ratio
+from ..write_guard import business_write
 
 router = APIRouter(prefix="/api/orders", tags=["orders"])
 
@@ -299,7 +301,7 @@ def create_order_line(
 ) -> dict:
     _validate_create_payload(payload, user)
     try:
-        with db() as conn:
+        with business_write() as conn:
             order_line_id = _create_order_line(conn, payload)
             write_operation_log(
                 conn,
@@ -323,7 +325,7 @@ def create_order_lines_batch(
         _validate_create_payload(item, user)
     created_ids: list[int] = []
     try:
-        with db() as conn:
+        with business_write() as conn:
             for item in payload.items:
                 created_ids.append(_create_order_line(conn, item))
             write_operation_log(
@@ -404,33 +406,23 @@ def export_orders(
     )
 
 
-@router.post("/import-excel")
-async def import_orders_excel(
-    request: Request,
-    filename: str = Query("市场部业务台账.xlsx", max_length=255),
-    user: CurrentUser = Depends(require_permission("ledger_import")),
-) -> dict:
-    if Path(filename).suffix.lower() != ".xlsx":
-        raise HTTPException(status_code=400, detail="仅支持 .xlsx 格式的业务台账文件")
-    content = await request.body()
-    if not content:
-        raise HTTPException(status_code=400, detail="上传文件为空")
-    if len(content) > MAX_IMPORT_BYTES:
-        raise HTTPException(status_code=413, detail="上传文件不能超过 20 MB")
-
+def _run_order_import(content: bytes, file_name: str, user: CurrentUser) -> dict:
+    """同步导入流程：解析工作簿、写库、导入前备份，全部在写入互斥内完成。"""
     try:
-        with db() as conn:
+        with business_write() as conn:
             create_backup(conn, user, "pre_import")
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail="导入前自动备份失败，已取消导入") from exc
 
     try:
-        with db() as conn:
+        with business_write() as conn:
             result = import_excel(
                 conn,
                 reset=False,
                 workbook_bytes=content,
-                source_file_name=Path(filename).name,
+                source_file_name=file_name,
                 user=user,
                 strict_template=True,
             )
@@ -449,6 +441,25 @@ async def import_orders_excel(
         raise HTTPException(status_code=422, detail=f"Excel 导入失败：{exc}") from exc
     except IntegrityError as exc:
         raise HTTPException(status_code=409, detail="导入数据与现有项目、订单或业务明细重复") from exc
+
+
+@router.post("/import-excel")
+async def import_orders_excel(
+    request: Request,
+    filename: str = Query("市场部业务台账.xlsx", max_length=255),
+    user: CurrentUser = Depends(require_permission("ledger_import")),
+) -> dict:
+    if Path(filename).suffix.lower() != ".xlsx":
+        raise HTTPException(status_code=400, detail="仅支持 .xlsx 格式的业务台账文件")
+    content = await request.body()
+    if not content:
+        raise HTTPException(status_code=400, detail="上传文件为空")
+    if len(content) > MAX_IMPORT_BYTES:
+        raise HTTPException(status_code=413, detail="上传文件不能超过 20 MB")
+
+    # 工作簿解析、数据库导入与导入前备份都是同步阻塞工作。放进线程池执行，
+    # 否则单 worker 的事件循环会被整份导入卡住，连健康检查都无法响应。
+    return await run_in_threadpool(_run_order_import, content, Path(filename).name, user)
 
 
 @router.get("/batch-editor/schema")
@@ -491,7 +502,7 @@ def create_basic_order_lines_batch(
     _validate_batch_create_targets(order_payloads)
     created_ids: list[int] = []
     try:
-        with db() as conn:
+        with business_write() as conn:
             for item in order_payloads:
                 created_ids.append(_create_order_line(conn, item))
             write_operation_log(
@@ -518,7 +529,7 @@ def update_basic_order_lines_batch(
 
     prepared: list[tuple[dict, OrderUpdate, dict[str, object], dict[str, object]]] = []
     try:
-        with db() as conn:
+        with business_write() as conn:
             for item in payload.items:
                 ids = _ensure_order_line_in_conn(conn, item.order_line_id, user, require_entry=True, lock=True)
                 order_payload = _basic_order_update(item)
@@ -616,7 +627,7 @@ def update_order_line(
         "pending_delivery_amount_no_tax": data["pending_delivery_amount_no_tax"],
         "pending_delivery_amount": data["pending_delivery_amount"],
     }
-    with db() as conn:
+    with business_write() as conn:
         _validate_batch_update_targets(conn, [(ids, payload, data, {})])
         before = conn.execute(
             text("SELECT * FROM v_order_line_finance WHERE order_line_id = :order_line_id"),
@@ -696,7 +707,7 @@ def delete_order_line(
     user: CurrentUser = Depends(require_permission("order_delete")),
 ) -> dict:
     ids = _ensure_order_line(order_line_id, user, require_entry=True)
-    with db() as conn:
+    with business_write() as conn:
         before = conn.execute(
             text("SELECT * FROM v_order_line_finance WHERE order_line_id = :order_line_id"),
             {"order_line_id": order_line_id},

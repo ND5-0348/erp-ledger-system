@@ -17,6 +17,7 @@ from ..ledger_excel import (
 )
 from ..serializers import clean_row, clean_rows
 from ..validation import BusinessDate, Money, PreciseNumber, Ratio
+from ..write_guard import business_write
 
 router = APIRouter(prefix="/api/purchases", tags=["purchases"])
 
@@ -227,7 +228,7 @@ def update_purchases_batch(
         raise HTTPException(status_code=422, detail="批量修改中不能重复提交同一条订单明细")
 
     prepared: list[tuple[int, dict[str, object], dict[str, object], dict[str, object]]] = []
-    with db() as conn:
+    with business_write() as conn:
         for item in payload.items:
             order_line = _ensure_order_line_in_conn(conn, item.order_line_id, user, lock=True)
             data = _payload_dict(item)
@@ -384,7 +385,7 @@ def update_purchase_summary(
 ) -> dict:
     _ensure_order_line(order_line_id, user, require_entry=True)
     data = _payload_dict(payload)
-    with db() as conn:
+    with business_write() as conn:
         before = _purchase_summary_snapshot(conn, order_line_id)
         paid_total = conn.execute(
             text(
@@ -462,7 +463,7 @@ def add_purchase_contract(
     user: CurrentUser = Depends(require_permission("purchase_entry")),
 ) -> dict:
     _ensure_order_line(order_line_id, user, require_entry=True)
-    with db() as conn:
+    with business_write() as conn:
         result = conn.execute(
             text(
                 """
@@ -491,7 +492,7 @@ def update_purchase_contract(
     user: CurrentUser = Depends(require_permission("purchase_edit")),
 ) -> dict:
     order_line_id = _ensure_detail_record("purchase_contract", contract_id, user, require_entry=True)
-    with db() as conn:
+    with business_write() as conn:
         before = _record_snapshot(conn, "purchase_contract", contract_id)
         conn.execute(
             text(
@@ -531,7 +532,7 @@ def add_purchase_invoice(
     user: CurrentUser = Depends(require_permission("purchase_entry")),
 ) -> dict:
     _ensure_order_line(order_line_id, user, require_entry=True)
-    with db() as conn:
+    with business_write() as conn:
         phase_no = _next_phase(conn, "purchase_invoice", order_line_id)
         result = conn.execute(
             text(
@@ -561,7 +562,7 @@ def update_purchase_invoice(
     user: CurrentUser = Depends(require_permission("purchase_edit")),
 ) -> dict:
     order_line_id = _ensure_detail_record("purchase_invoice", invoice_id, user, require_entry=True)
-    with db() as conn:
+    with business_write() as conn:
         before = _record_snapshot(conn, "purchase_invoice", invoice_id)
         data = _payload_dict(payload)
         conn.execute(
@@ -601,7 +602,7 @@ def add_warehouse_entry(
     user: CurrentUser = Depends(require_permission("purchase_entry")),
 ) -> dict:
     _ensure_order_line(order_line_id, user, require_entry=True)
-    with db() as conn:
+    with business_write() as conn:
         phase_no = _next_phase(conn, "warehouse_entry", order_line_id)
         result = conn.execute(
             text(
@@ -628,7 +629,7 @@ def update_warehouse_entry(
     user: CurrentUser = Depends(require_permission("purchase_edit")),
 ) -> dict:
     order_line_id = _ensure_detail_record("warehouse_entry", entry_id, user, require_entry=True)
-    with db() as conn:
+    with business_write() as conn:
         before = _record_snapshot(conn, "warehouse_entry", entry_id)
         conn.execute(
             text(
@@ -662,7 +663,7 @@ def add_finance_invoice_check(
     user: CurrentUser = Depends(require_permission("purchase_entry")),
 ) -> dict:
     _ensure_order_line(order_line_id, user, require_entry=True)
-    with db() as conn:
+    with business_write() as conn:
         phase_no = _next_phase(conn, "finance_invoice_check", order_line_id)
         _validate_finance_invoice_check_total(conn, order_line_id, payload.received_invoice_amount)
         result = conn.execute(
@@ -690,7 +691,7 @@ def update_finance_invoice_check(
     user: CurrentUser = Depends(require_permission("purchase_edit")),
 ) -> dict:
     order_line_id = _ensure_detail_record("finance_invoice_check", check_id, user, require_entry=True)
-    with db() as conn:
+    with business_write() as conn:
         before = _record_snapshot(conn, "finance_invoice_check", check_id)
         _validate_finance_invoice_check_total(conn, order_line_id, payload.received_invoice_amount, check_id)
         conn.execute(
@@ -724,7 +725,7 @@ def add_finance_payment(
     user: CurrentUser = Depends(require_permission("purchase_entry")),
 ) -> dict:
     _ensure_order_line(order_line_id, user, require_entry=True)
-    with db() as conn:
+    with business_write() as conn:
         phase_no = _next_phase(conn, "finance_payment_entry", order_line_id)
         _validate_finance_payment_total(conn, order_line_id, payload.booked_amount)
         result = conn.execute(
@@ -750,7 +751,7 @@ def update_finance_payment(
     user: CurrentUser = Depends(require_permission("purchase_edit")),
 ) -> dict:
     order_line_id = _ensure_detail_record("finance_payment_entry", payment_id, user, require_entry=True)
-    with db() as conn:
+    with business_write() as conn:
         before = _record_snapshot(conn, "finance_payment_entry", payment_id)
         _validate_finance_payment_total(conn, order_line_id, payload.booked_amount, payment_id)
         conn.execute(
@@ -784,7 +785,7 @@ def add_purchase_payment(
     user: CurrentUser = Depends(require_permission("purchase_entry")),
 ) -> dict:
     _ensure_order_line(order_line_id, user, require_entry=True)
-    with db() as conn:
+    with business_write() as conn:
         phase_no = _next_phase(conn, "purchase_payment", order_line_id)
         data = _payload_dict(payload)
         _validate_payment_total(conn, order_line_id, payload.payment_amount)
@@ -816,7 +817,7 @@ def update_purchase_payment(
     user: CurrentUser = Depends(require_permission("purchase_edit")),
 ) -> dict:
     order_line_id = _ensure_detail_record("purchase_payment", payment_id, user, require_entry=True)
-    with db() as conn:
+    with business_write() as conn:
         before = _record_snapshot(conn, "purchase_payment", payment_id)
         data = _payload_dict(payload)
         _validate_payment_total(conn, order_line_id, payload.payment_amount, payment_id)
@@ -1201,7 +1202,7 @@ def _ensure_detail_record(table_name: str, record_id: int, user: CurrentUser, re
 
 
 def _soft_delete_detail(table_name: str, record_id: int, user: CurrentUser, action_name: str, label: str) -> None:
-    with db() as conn:
+    with business_write() as conn:
         before = _record_snapshot(conn, table_name, record_id)
         conn.execute(text(f"UPDATE {table_name} SET deleted_at = CURRENT_TIMESTAMP WHERE id = :record_id"), {"record_id": record_id})
         write_operation_log(conn, user, "采购管理", action_name, f"删除{label} {record_id}", before=before)
