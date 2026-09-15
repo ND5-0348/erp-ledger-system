@@ -17,7 +17,7 @@ import hashlib
 import json
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -103,6 +103,12 @@ def _cell(row: tuple[Any, ...], column: int) -> Any:
 def _text(value: Any) -> str | None:
     if value in (None, ""):
         return None
+    # 日期类值统一写成 ISO 日期：Excel 读出来是 datetime，str() 会带上 " 00:00:00"，
+    # 既不利于人工确认时要核对的原值展示，也会让再次解析多出一段无用尾巴。
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
     return str(value).strip() or None
 
 
@@ -616,7 +622,7 @@ def apply_resolutions(
         audits: list[dict[str, Any]] = []
         for name, entry_revision in revision.finance.items():
             label = FINANCE_LABELS.get(name, name)
-            _, group_issues, audit = validate_finance_revision(
+            _, group_issues, group_audits = validate_finance_revision(
                 (parsed.get("finance") or {}).get(name) or {}, entry_revision, label=label
             )
             blocking = [issue for issue in group_issues if issue.blocking]
@@ -625,7 +631,7 @@ def apply_resolutions(
                     status_code=422,
                     detail="；".join(issue.message for issue in blocking),
                 )
-            if audit:
+            for audit in group_audits:
                 audits.append(audit)
                 collected_audits.append({**audit, "excel_row_no": excel_row_no})
 
@@ -738,12 +744,36 @@ def _project_id_by_code(conn: Connection, project_code: str) -> int | None:
     return int(value) if value else None
 
 
-def _order_components(states: list[RowState]) -> list[list[RowState]]:
-    """按"共享任一订单号"把行聚成同一订单的连通分量。
+def order_components(states: list[RowState]) -> list[list[RowState]]:
+    """按框架隔离后，把"共享任一订单号"的行聚成同一订单的连通分量。
+
+    **必须先按框架分组**：不同框架允许使用相同编号，如果直接在全部行上做连通
+    分量，P1 的 `A/C` 与 P2 的 `A/D` 会因为共享 `A` 被并成一条链，进而误报
+    "当前值不一致"。没有项目编号的行无法判定归属，各自成组。
+    """
+    by_project: dict[str, list[RowState]] = {}
+    orphans: list[list[RowState]] = []
+    for state in states:
+        if not state.order_chain:
+            continue
+        code = str(state.parsed.get("project_code") or "").strip()
+        if code:
+            by_project.setdefault(code, []).append(state)
+        else:
+            orphans.append([state])
+
+    groups: list[list[RowState]] = []
+    for _code, rows in sorted(by_project.items()):
+        groups.extend(_components_within_project(rows))
+    groups.extend(orphans)
+    return groups
+
+
+def _components_within_project(rows: list[RowState]) -> list[list[RowState]]:
+    """同一框架内按共享订单号做连通分量。
 
     同一订单的多行必须给出可归一的链；只有一个号的行各自独立（新订单）。
     """
-    rows = [state for state in states if state.order_chain]
     if not rows:
         return []
     parent = list(range(len(rows)))
@@ -820,7 +850,7 @@ def _manager_chain_issues(conn: Connection, states: list[RowState]) -> list[Issu
 
 def _order_chain_issues(conn: Connection, states: list[RowState]) -> list[Issue]:
     issues: list[Issue] = []
-    for group in _order_components(states):
+    for group in order_components(states):
         first = group[0]
         chain, merge_issues = merge_chain_sequences(
             [state.order_chain for state in group],

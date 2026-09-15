@@ -33,6 +33,8 @@ from .validation import BusinessDate, Money
 MAX_CHAIN_LENGTH = 50
 MAX_PHASES_PER_GROUP = 50
 MAX_REASON_LENGTH = 500
+# 一个业务组最多可能占几个模板列组（当前模板付款/回款各 2 组，留余量）。
+MAX_SOURCE_GROUPS = 8
 
 
 class RevisionError(ValueError):
@@ -40,10 +42,16 @@ class RevisionError(ValueError):
 
 
 class PhaseRevision(BaseModel):
-    """一期财务的人工确认值。"""
+    """一期财务的人工确认值。
+
+    `source_group` 必填：标准模板的一组财务可能占**多个列组**（付款 55–57 与
+    58–60、回款 79–82 与 83–86），金额必须能回到它所属的来源列组分别核对，
+    所以每一期都要说明自己来自第几个列组（1 起，按模板列组顺序）。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
+    source_group: int = Field(ge=1, le=MAX_SOURCE_GROUPS)
     date: BusinessDate
     amount: Money
     document_no: str | None = Field(default=None, max_length=128)
@@ -151,30 +159,34 @@ def raw_sources(parsed_entry: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def expected_phase_count(parsed_entry: dict[str, Any]) -> int | None:
-    """该组原始单元格里可确定的期次数。
+def source_expected_count(source: dict[str, Any]) -> int | None:
+    """一个来源列组原始单元格里可确定的期次数。
 
-    日期能唯一解析出几期就是几期；完全解析不出日期时返回 None（无法判定，
-    此时只要求修正给出至少一期，由业务校验决定是否可提交）。
+    日期能唯一解析出几期就是几期；该组日期无法解析时返回 None（不能自动核对，
+    此时要求人工逐期填写）。
     """
-    total = 0
-    for source in raw_sources(parsed_entry):
-        parsed = parse_date_sequence(source.get("date_raw"))
-        if parsed.issues:
-            continue
-        total += len(parsed.values)
-    return total or None
+    parsed = parse_date_sequence(source.get("date_raw"))
+    if parsed.issues:
+        return None
+    return len(parsed.values)
 
 
-def original_single_total(parsed_entry: dict[str, Any]) -> Decimal | None:
-    """原始单元格里"多日期配单一金额"的那个合计值；不是这种情况返回 None。"""
-    for source in raw_sources(parsed_entry):
-        dates = parse_date_sequence(source.get("date_raw"))
-        amounts = parse_amount_sequence(source.get("amount_raw"))
-        if dates.issues or amounts.issues:
-            continue
-        if len(dates.values) > 1 and len(amounts.values) == 1:
-            return amounts.values[0]
+def source_amount_total(source: dict[str, Any]) -> Decimal | None:
+    """一个来源列组原始金额的合计；该组金额无法解析时返回 None。
+
+    **只在本来源列组内部求和**，绝不跨列组取第一个合计与所有期次的总和比较：
+    否则"第一组 300 + 第二组 50"会被错误地按 300 放行或按 350 拒绝。
+    多日期配单一金额时这里就是那个待分摊的合计。
+    """
+    amounts = parse_amount_sequence(source.get("amount_raw"))
+    if amounts.issues or not amounts.values:
+        return None
+    return sum(amounts.values, Decimal(0))
+
+
+def _source_date_column(sources: list[dict[str, Any]], group: int) -> Any:
+    if 1 <= group <= len(sources):
+        return sources[group - 1].get("date_column")
     return None
 
 
@@ -183,69 +195,125 @@ def validate_finance_revision(
     revision: FinanceRevision,
     *,
     label: str,
-) -> tuple[list[dict[str, Any]], list[Issue], dict[str, Any] | None]:
-    """校验一个财务组的人工修正。
+) -> tuple[list[dict[str, Any]], list[Issue], list[dict[str, Any]]]:
+    """校验一个财务组的人工修正，**按来源列组分别核对**。
 
-    返回（规范化后的期次列表、问题列表、合计修正审计）。
-    期次数与原日期数不符、各期之和不等于原合计且未给理由时，都返回阻断问题。
+    返回（规范化后的期次列表、问题列表、合计审计列表）。逐组核对：
+    每个来源列组的期次数要与该组日期数一致，该组若是"多日期配单一金额"，
+    组内各期之和要与**该组自己的**原合计一致——不同来源组的金额不合并比较，
+    否则第一组 300 + 第二组 50 会被错误地按 300 放行或被按 350 拒绝。
     """
     issues: list[Issue] = []
+    sources = raw_sources(parsed_entry)
+
+    for phase in revision.phases:
+        if phase.source_group > len(sources):
+            issues.append(
+                Issue(
+                    code=PHASE_COUNT_MISMATCH,
+                    message=(
+                        f"{label}的修正里出现第 {phase.source_group} 个来源列组，"
+                        f"但该行的{label}原表只有 {len(sources)} 个来源列组"
+                    ),
+                    columns=(label,),
+                )
+            )
+
+    order = [phase.source_group for phase in revision.phases]
+    if order != sorted(order):
+        issues.append(
+            Issue(
+                code=PHASE_COUNT_MISMATCH,
+                message=(
+                    f"{label}的期次必须按来源列组的先后顺序排列"
+                    "（先第一组的各期，再第二组的各期）"
+                ),
+                columns=(label,),
+            )
+        )
+
+    if issues:
+        return [], issues, []
+
     phases = [
         {
             "position": index + 1,
             "date": phase.date.isoformat(),
             "amount": format(phase.amount, "f"),
             "document_no": phase.document_no,
+            "source_group": phase.source_group,
+            "source_column": _source_date_column(sources, phase.source_group),
         }
         for index, phase in enumerate(revision.phases)
     ]
 
-    expected = expected_phase_count(parsed_entry)
-    if expected is not None and len(phases) != expected:
-        issues.append(
-            Issue(
-                code=PHASE_COUNT_MISMATCH,
-                message=(
-                    f"{label}原表有 {expected} 个日期，人工确认填了 {len(phases)} 期，"
-                    "请按期补齐（不足的位置也要写清日期与金额）"
-                ),
-                columns=(label,),
-            )
-        )
+    by_group: dict[int, list[PhaseRevision]] = {}
+    for phase in revision.phases:
+        by_group.setdefault(phase.source_group, []).append(phase)
 
-    audit: dict[str, Any] | None = None
-    original_total = original_single_total(parsed_entry)
-    if original_total is not None:
-        corrected_total = sum((phase.amount for phase in revision.phases), Decimal(0))
-        reason = revision.total_correction_reason.strip()
-        if corrected_total != original_total and not reason:
+    audits: list[dict[str, Any]] = []
+    reason = revision.total_correction_reason.strip()
+    for index, source in enumerate(sources, start=1):
+        actual = by_group.get(index, [])
+        expected = source_expected_count(source)
+        position = f"第 {index} 个来源列组" if len(sources) > 1 else ""
+        if expected is None:
+            # 日期无法解析只影响"期次数"能不能自动核对，不影响金额核对：
+            # 该组只要填了期次，就必须继续比对本组的原始金额。
+            if not actual:
+                issues.append(
+                    Issue(
+                        code=PHASE_COUNT_MISMATCH,
+                        message=(
+                            f"{label}{position}的原始日期无法解析，不能自动核对期次，"
+                            "请逐期填写日期与金额"
+                        ),
+                        columns=(label,),
+                    )
+                )
+                continue
+        elif len(actual) != expected:
             issues.append(
                 Issue(
                     code=PHASE_COUNT_MISMATCH,
                     message=(
-                        f"{label}各期金额之和 {corrected_total} 与原合计 {original_total} 不一致；"
+                        f"{label}{position}原表有 {expected} 个日期，"
+                        f"人工确认填了 {len(actual)} 期，请按期补齐"
+                    ),
+                    columns=(label,),
+                )
+            )
+            continue
+
+        total = source_amount_total(source)
+        if total is None:
+            continue
+        corrected = sum((phase.amount for phase in actual), Decimal(0))
+        if corrected != total and not reason:
+            issues.append(
+                Issue(
+                    code=PHASE_COUNT_MISMATCH,
+                    message=(
+                        f"{label}{position}各期金额之和 {corrected} 与原合计 {total} 不一致；"
                         "请核对分摊结果，若原合计本身有误请填写修正理由"
                     ),
                     columns=(label,),
                 )
             )
-        elif corrected_total != original_total:
-            # 合计被修正：记录原值、修正值、理由；操作者与时间由会话行记录。
-            audit = {
+            continue
+        audits.append(
+            {
                 "group": label,
-                "original_total": format(original_total, "f"),
-                "corrected_total": format(corrected_total, "f"),
-                "reason": reason,
+                "source_group": index,
+                "original_total": format(total, "f"),
+                "corrected_total": format(corrected, "f"),
+                "reason": reason or "各期之和与原合计一致，按原合计分摊",
             }
-        else:
-            audit = {
-                "group": label,
-                "original_total": format(original_total, "f"),
-                "corrected_total": format(corrected_total, "f"),
-                "reason": "各期之和与原合计一致，按原合计分摊",
-            }
+        )
 
-    return phases, issues, audit
+    if issues:
+        return [], issues, []
+    return phases, [], audits
 
 
 def merge_finance(
@@ -275,12 +343,15 @@ def merge_finance(
                 "phases": [],
             },
         )
+        sources = raw_sources(entry)
         entry["phases"] = [
             {
                 "position": index + 1,
                 "date": phase.date.isoformat(),
                 "amount": format(phase.amount, "f"),
                 "document_no": phase.document_no,
+                "source_group": phase.source_group,
+                "source_column": _source_date_column(sources, phase.source_group),
             }
             for index, phase in enumerate(revision.phases)
         ]

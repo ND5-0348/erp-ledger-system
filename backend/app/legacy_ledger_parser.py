@@ -36,7 +36,15 @@ DUPLICATE_PHASE_SUSPECTED = "DUPLICATE_PHASE_SUSPECTED"
 NAME_SEPARATORS = "/／;；\n\r、,，"
 VALUE_SEPARATORS = "/／;；\n\r"
 
-_DATE_TOKEN = re.compile(r"(\d{4})\s*[-/年]\s*(\d{1,2})\s*[-/月]\s*(\d{1,2})\s*日?")
+# 日与时间之间用可选组而不是 \s*，否则贪婪的 \s* 会把空格吃掉、
+# 让后面的时间部分匹配不上，日期尾部就会剩下一段 "00:00:00" 被判为无法解析。
+_DATE_TOKEN = re.compile(
+    r"(\d{4})\s*[-/年]\s*(\d{1,2})\s*[-/月]\s*(\d{1,2})"
+    r"(?:\s*日)?"
+    # Excel 日期单元格读出来是 datetime，字符串形式会带时分秒（"2026-03-05 00:00:00"）；
+    # 那是同一个日期，不能因为尾部时间就判为无法解析。
+    r"(?:(?:[Tt]|\s+)\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?"
+)
 # 注意不要加 ^ 锚点：这个模式要配 match(text, pos) 在中间位置反复使用。
 _TRAILING_SEPARATORS = re.compile(rf"[{re.escape(VALUE_SEPARATORS)}]+")
 

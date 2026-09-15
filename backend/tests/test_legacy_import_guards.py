@@ -121,8 +121,18 @@ def test_split_total_mismatch_is_rejected(client: TestClient, headers: dict[str,
                     "finance": {
                         "sales_invoice": {
                             "phases": [
-                                {"date": "2026-01-01", "amount": "100.00", "document_no": "DOC-1"},
-                                {"date": "2026-02-01", "amount": "150.00", "document_no": "DOC-2"},
+                                {
+                                    "source_group": 1,
+                                    "date": "2026-01-01",
+                                    "amount": "100.00",
+                                    "document_no": "DOC-1",
+                                },
+                                {
+                                    "source_group": 1,
+                                    "date": "2026-02-01",
+                                    "amount": "150.00",
+                                    "document_no": "DOC-2",
+                                },
                             ]
                         }
                     }
@@ -152,8 +162,18 @@ def test_split_total_correction_records_reason_and_amounts(
                     "finance": {
                         "sales_invoice": {
                             "phases": [
-                                {"date": "2026-01-01", "amount": "100.00", "document_no": "DOC-1"},
-                                {"date": "2026-02-01", "amount": "150.00", "document_no": "DOC-2"},
+                                {
+                                    "source_group": 1,
+                                    "date": "2026-01-01",
+                                    "amount": "100.00",
+                                    "document_no": "DOC-1",
+                                },
+                                {
+                                    "source_group": 1,
+                                    "date": "2026-02-01",
+                                    "amount": "150.00",
+                                    "document_no": "DOC-2",
+                                },
                             ],
                             "total_correction_reason": "原合计 300 写错，实际两期合计 250",
                         }
@@ -202,7 +222,12 @@ def test_phase_count_mismatch_revision_is_rejected(client: TestClient, headers: 
                     "finance": {
                         "sales_invoice": {
                             "phases": [
-                                {"date": "2026-01-01", "amount": "300.00", "document_no": "DOC-1"}
+                                {
+                                    "source_group": 1,
+                                    "date": "2026-01-01",
+                                    "amount": "300.00",
+                                    "document_no": "DOC-1",
+                                }
                             ]
                         }
                     }
@@ -230,8 +255,16 @@ def test_invalid_date_in_revision_is_rejected(client: TestClient, headers: dict[
                     "finance": {
                         "sales_invoice": {
                             "phases": [
-                                {"date": "2026-02-30", "amount": "100.00"},
-                                {"date": "2026-02-01", "amount": "200.00"},
+                                {
+                                    "source_group": 1,
+                                    "date": "2026-02-30",
+                                    "amount": "100.00",
+                                },
+                                {
+                                    "source_group": 1,
+                                    "date": "2026-02-01",
+                                    "amount": "200.00",
+                                },
                             ]
                         }
                     }
@@ -258,8 +291,16 @@ def test_negative_amount_in_revision_is_rejected(client: TestClient, headers: di
                     "finance": {
                         "sales_invoice": {
                             "phases": [
-                                {"date": "2026-01-01", "amount": "-100.00"},
-                                {"date": "2026-02-01", "amount": "400.00"},
+                                {
+                                    "source_group": 1,
+                                    "date": "2026-01-01",
+                                    "amount": "-100.00",
+                                },
+                                {
+                                    "source_group": 1,
+                                    "date": "2026-02-01",
+                                    "amount": "400.00",
+                                },
                             ],
                             "total_correction_reason": "把负数改掉",
                         }
@@ -299,8 +340,18 @@ def test_partial_finance_revision_keeps_other_groups(client: TestClient, headers
                     "finance": {
                         "sales_invoice": {
                             "phases": [
-                                {"date": "2026-01-01", "amount": "100.00", "document_no": "DOC-1"},
-                                {"date": "2026-02-01", "amount": "200.00", "document_no": "DOC-2"},
+                                {
+                                    "source_group": 1,
+                                    "date": "2026-01-01",
+                                    "amount": "100.00",
+                                    "document_no": "DOC-1",
+                                },
+                                {
+                                    "source_group": 1,
+                                    "date": "2026-02-01",
+                                    "amount": "200.00",
+                                    "document_no": "DOC-2",
+                                },
                             ]
                         }
                     }
@@ -766,6 +817,274 @@ def test_duplicate_phase_across_column_groups_is_flagged_not_deduplicated(
     assert amounts == ["70.00", "70.00"], "两处都填了就要写两期，不能静默去重"
 
 
+def test_same_alias_in_different_frameworks_is_not_a_chain_conflict(
+    client: TestClient, headers: dict[str, str]
+) -> None:
+    """跨框架允许同号：同一文件里两个框架的别名链不能被并成一条。"""
+    rows = [
+        _row({2: "P-ONE", 13: "SO-A/SO-C", 15: "服务器"}),
+        _row({2: "P-TWO", 13: "SO-A/SO-D", 15: "交换机"}),
+    ]
+    session_id, content = _open_session(client, headers, rows)
+    summary = _summary(client, headers, session_id)
+    assert summary["comparable"] is True, "跨框架的同号别名链被误报为冲突"
+
+    commit = _commit(client, headers, session_id, content)
+    assert commit.status_code == 200, commit.text
+    with db() as conn:
+        stored = conn.execute(
+            text(
+                "SELECT p.project_code, so.order_no FROM sales_order so "
+                "JOIN project p ON p.id = so.project_id ORDER BY p.project_code"
+            )
+        ).mappings().all()
+        chains = conn.execute(
+            text(
+                "SELECT p.project_code, h.history_order, h.order_no "
+                "FROM sales_order_number_history h "
+                "JOIN sales_order so ON so.id = h.sales_order_id "
+                "JOIN project p ON p.id = so.project_id "
+                "ORDER BY p.project_code, h.history_order"
+            )
+        ).mappings().all()
+    assert [(row["project_code"], row["order_no"]) for row in stored] == [
+        ("P-ONE", "SO-C"),
+        ("P-TWO", "SO-D"),
+    ]
+    assert [(row["project_code"], row["order_no"]) for row in chains] == [
+        ("P-ONE", "SO-A"),
+        ("P-ONE", "SO-C"),
+        ("P-TWO", "SO-A"),
+        ("P-TWO", "SO-D"),
+    ]
+
+
+# --- 多来源财务组的金额必须按来源组分别核对 --------------------------------
+
+
+def _two_source_payment_row() -> list[object]:
+    """第一组两日期共 300，第二组单值 50。"""
+    return _row(
+        {
+            PAY_DATE: "2026/01/05/2026/02/05",
+            PAY_AMOUNT: "300",
+            PAY2_DATE: date(2026, 3, 5),
+            PAY2_VOUCHER: "PAY-3",
+            PAY2_AMOUNT: Decimal("50.00"),
+        }
+    )
+
+
+def test_multi_source_split_is_checked_per_group_and_accepted(
+    client: TestClient, headers: dict[str, str]
+) -> None:
+    """正确拆分（第一组 100+200、第二组 50）必须通过，并按来源顺序落库三期。"""
+    session_id, content = _open_session(client, headers, [_two_source_payment_row()])
+    assert _summary(client, headers, session_id)["comparable"] is False
+
+    response = _resolve(
+        client,
+        headers,
+        session_id,
+        [
+            {
+                "excel_row_no": 3,
+                "resolution": {
+                    "finance": {
+                        "purchase_payment": {
+                            "phases": [
+                                {
+                                    "source_group": 1,
+                                    "date": "2026-01-05",
+                                    "amount": "100.00",
+                                    "document_no": "PAY-1",
+                                },
+                                {
+                                    "source_group": 1,
+                                    "date": "2026-02-05",
+                                    "amount": "200.00",
+                                    "document_no": "PAY-2",
+                                },
+                                {
+                                    "source_group": 2,
+                                    "date": "2026-03-05",
+                                    "amount": "50.00",
+                                    "document_no": "PAY-3",
+                                },
+                            ]
+                        }
+                    }
+                },
+            }
+        ],
+    )
+    assert response.status_code == 200, response.text
+    assert _summary(client, headers, session_id)["comparable"] is True
+
+    commit = _commit(client, headers, session_id, content)
+    assert commit.status_code == 200, commit.text
+    with db() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT phase_no, payment_date, payment_voucher_no, payment_amount "
+                "FROM purchase_payment WHERE deleted_at IS NULL ORDER BY phase_no"
+            )
+        ).mappings().all()
+    assert [
+        (int(row["phase_no"]), str(row["payment_date"]), row["payment_voucher_no"], str(row["payment_amount"]))
+        for row in rows
+    ] == [
+        (1, "2026-01-05", "PAY-1", "100.00"),
+        (2, "2026-02-05", "PAY-2", "200.00"),
+        (3, "2026-03-05", "PAY-3", "50.00"),
+    ]
+
+
+def test_revision_missing_a_source_group_is_rejected(
+    client: TestClient, headers: dict[str, str]
+) -> None:
+    """漏掉第二组：总和虽然等于第一组合计，也必须拒绝——不能只把原合计相加后放行。"""
+    session_id, content = _open_session(client, headers, [_two_source_payment_row()])
+    response = _resolve(
+        client,
+        headers,
+        session_id,
+        [
+            {
+                "excel_row_no": 3,
+                "resolution": {
+                    "finance": {
+                        "purchase_payment": {
+                            "phases": [
+                                {
+                                    "source_group": 1,
+                                    "date": "2026-01-05",
+                                    "amount": "100.00",
+                                    "document_no": "PAY-1",
+                                },
+                                {
+                                    "source_group": 1,
+                                    "date": "2026-02-05",
+                                    "amount": "200.00",
+                                    "document_no": "PAY-2",
+                                },
+                            ]
+                        }
+                    }
+                },
+            }
+        ],
+    )
+    assert response.status_code == 422, response.text
+    assert _summary(client, headers, session_id)["comparable"] is False
+    assert _commit(client, headers, session_id, content).status_code == 422
+    assert _count("purchase_payment") == 0
+
+
+def test_revision_with_wrong_second_group_total_is_rejected(
+    client: TestClient, headers: dict[str, str]
+) -> None:
+    """第二组金额与原值不符且未给理由 → 拒绝（不能拿第一组合计的差额蒙混）。"""
+    session_id, content = _open_session(client, headers, [_two_source_payment_row()])
+    response = _resolve(
+        client,
+        headers,
+        session_id,
+        [
+            {
+                "excel_row_no": 3,
+                "resolution": {
+                    "finance": {
+                        "purchase_payment": {
+                            "phases": [
+                                {
+                                    "source_group": 1,
+                                    "date": "2026-01-05",
+                                    "amount": "100.00",
+                                    "document_no": "PAY-1",
+                                },
+                                {
+                                    "source_group": 1,
+                                    "date": "2026-02-05",
+                                    "amount": "200.00",
+                                    "document_no": "PAY-2",
+                                },
+                                {
+                                    "source_group": 2,
+                                    "date": "2026-03-05",
+                                    "amount": "30.00",
+                                    "document_no": "PAY-3",
+                                },
+                            ]
+                        }
+                    }
+                },
+            }
+        ],
+    )
+    assert response.status_code == 422, response.text
+    assert _commit(client, headers, session_id, content).status_code == 422
+    assert _count("purchase_payment") == 0
+
+
+def test_revision_may_correct_a_single_group_total_with_reason(
+    client: TestClient, headers: dict[str, str]
+) -> None:
+    """某一来源组的原合计确实写错时，给出理由即可修正，且只改这一组。"""
+    session_id, content = _open_session(client, headers, [_two_source_payment_row()])
+    response = _resolve(
+        client,
+        headers,
+        session_id,
+        [
+            {
+                "excel_row_no": 3,
+                "resolution": {
+                    "finance": {
+                        "purchase_payment": {
+                            "phases": [
+                                {
+                                    "source_group": 1,
+                                    "date": "2026-01-05",
+                                    "amount": "100.00",
+                                    "document_no": "PAY-1",
+                                },
+                                {
+                                    "source_group": 1,
+                                    "date": "2026-02-05",
+                                    "amount": "150.00",
+                                    "document_no": "PAY-2",
+                                },
+                                {
+                                    "source_group": 2,
+                                    "date": "2026-03-05",
+                                    "amount": "50.00",
+                                    "document_no": "PAY-3",
+                                },
+                            ],
+                            "total_correction_reason": "第一组原合计写成 300，实际两期合计 250",
+                        }
+                    }
+                },
+            }
+        ],
+    )
+    assert response.status_code == 200, response.text
+    commit = _commit(client, headers, session_id, content)
+    assert commit.status_code == 200, commit.text
+    with db() as conn:
+        amounts = [
+            str(value)
+            for value in conn.execute(
+                text(
+                    "SELECT payment_amount FROM purchase_payment "
+                    "WHERE deleted_at IS NULL ORDER BY phase_no"
+                )
+            ).scalars().all()
+        ]
+    assert amounts == ["100.00", "150.00", "50.00"]
+
+
 def test_manual_resolution_writes_audit_log(client: TestClient, headers: dict[str, str]) -> None:
     """人工修正必须留下审计：操作者、时间、以及合计修正的原值/修正值/理由。"""
     session_id, _ = _open_session(client, headers, [_split_case_row()])
@@ -780,8 +1099,18 @@ def test_manual_resolution_writes_audit_log(client: TestClient, headers: dict[st
                     "finance": {
                         "sales_invoice": {
                             "phases": [
-                                {"date": "2026-01-01", "amount": "100.00", "document_no": "DOC-1"},
-                                {"date": "2026-02-01", "amount": "150.00", "document_no": "DOC-2"},
+                                {
+                                    "source_group": 1,
+                                    "date": "2026-01-01",
+                                    "amount": "100.00",
+                                    "document_no": "DOC-1",
+                                },
+                                {
+                                    "source_group": 1,
+                                    "date": "2026-02-01",
+                                    "amount": "150.00",
+                                    "document_no": "DOC-2",
+                                },
                             ],
                             "total_correction_reason": "原合计 300 写错，实际两期合计 250",
                         }

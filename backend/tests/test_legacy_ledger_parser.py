@@ -101,6 +101,28 @@ def test_two_dates_are_split_by_full_date_syntax(raw: str) -> None:
     assert parsed.blocking is False
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "2026-03-05 00:00:00",
+        "2026-03-05 00:00",
+        "2026/03/05 00:00:00",
+        "2026-03-05T00:00:00",
+    ],
+)
+def test_excel_datetime_string_is_still_one_date(raw: str) -> None:
+    """Excel 日期单元格读出来带时分秒：那是同一个日期，不能判为无法解析。"""
+    parsed = parse_date_sequence(raw)
+    assert parsed.values == [date(2026, 3, 5)]
+    assert parsed.blocking is False
+
+
+def test_two_dates_with_time_parts_are_split_into_two() -> None:
+    parsed = parse_date_sequence("2026-01-05 00:00:00/2026-02-05 00:00:00")
+    assert parsed.values == [date(2026, 1, 5), date(2026, 2, 5)]
+    assert parsed.blocking is False
+
+
 def test_dates_without_year_are_blocked() -> None:
     """9/1/9/15 缺少年份，无法唯一拆分，必须阻断而不是猜。"""
     parsed = parse_date_sequence("9/1/9/15")
