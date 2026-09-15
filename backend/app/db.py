@@ -295,11 +295,74 @@ HISTORY_DDL: tuple[tuple[str, str], ...] = (
 )
 
 
+PREVIEW_DDL: tuple[tuple[str, str], ...] = (
+    (
+        "legacy_import_session",
+        """
+        CREATE TABLE IF NOT EXISTS legacy_import_session (
+          id VARCHAR(64) NOT NULL,
+          created_by BIGINT UNSIGNED NOT NULL,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          expires_at DATETIME NULL,
+          mode VARCHAR(32) NOT NULL DEFAULT 'legacy_multi_value',
+          source_file_name VARCHAR(255) NOT NULL,
+          source_sha256 CHAR(64) NOT NULL,
+          parser_version VARCHAR(32) NOT NULL,
+          status VARCHAR(32) NOT NULL DEFAULT 'pending',
+          summary_json JSON NULL,
+          result_json JSON NULL,
+          committed_at DATETIME NULL,
+          PRIMARY KEY (id),
+          KEY idx_legacy_session_owner (created_by, status),
+          KEY idx_legacy_session_expiry (status, expires_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+        """,
+    ),
+    (
+        "legacy_import_source",
+        """
+        CREATE TABLE IF NOT EXISTS legacy_import_source (
+          id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+          session_id VARCHAR(64) NOT NULL,
+          sheet_name VARCHAR(128) NULL,
+          excel_row_no INT NOT NULL,
+          raw_json JSON NULL,
+          parsed_json JSON NULL,
+          resolution_json JSON NULL,
+          resolved_by BIGINT UNSIGNED NULL,
+          resolved_at DATETIME NULL,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (id),
+          UNIQUE KEY uk_legacy_source_row (session_id, excel_row_no),
+          CONSTRAINT fk_legacy_source_session FOREIGN KEY (session_id) REFERENCES legacy_import_session(id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+        """,
+    ),
+)
+
+
 def _ensure_history_storage(conn) -> None:
-    """建订单号别名与客户经理历史表（可重复运行）。"""
-    for table_name, ddl in HISTORY_DDL:
+    """建订单号别名、客户经理历史与预检会话表（可重复运行）。"""
+    for table_name, ddl in HISTORY_DDL + PREVIEW_DDL:
         if not _table_exists(conn, table_name):
             conn.execute(text(ddl))
+
+
+def purge_expired_preview_sessions(conn, *, older_than_hours: int = 24) -> int:
+    """清理过期的预检会话（连同逐行来源）。不碰已提交会话的审计来源。"""
+    expired = conn.execute(
+        text(
+            "SELECT id FROM legacy_import_session "
+            "WHERE status IN ('pending', 'expired') AND expires_at < NOW() - INTERVAL :hours HOUR"
+        ),
+        {"hours": older_than_hours},
+    ).scalars().all()
+    for session_id in expired:
+        conn.execute(
+            text("DELETE FROM legacy_import_source WHERE session_id = :id"), {"id": session_id}
+        )
+        conn.execute(text("DELETE FROM legacy_import_session WHERE id = :id"), {"id": session_id})
+    return len(expired)
 
 
 def _raw_sub_project_values(raw_json: object) -> dict[str, str | None]:

@@ -369,6 +369,8 @@ READ_ONLY_ENDPOINTS = {
 # 值是该 helper 的函数名，测试会核对它确实出现在端点函数体里。
 VIA_GUARDED_HELPER = {
     ("orders.py", "import_orders_excel"): "_run_order_import",
+    ("orders.py", "create_import_preview"): "_create_import_preview",
+    ("orders.py", "commit_import_preview"): "_commit_import_preview",
     ("purchases.py", "delete_purchase_contract"): "_soft_delete_detail",
     ("purchases.py", "delete_purchase_invoice"): "_soft_delete_detail",
     ("purchases.py", "delete_warehouse_entry"): "_soft_delete_detail",

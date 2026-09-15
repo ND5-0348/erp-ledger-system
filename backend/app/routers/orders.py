@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
+from typing import Any
 from zipfile import BadZipFile
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -12,10 +13,25 @@ from sqlalchemy import text
 from starlette.concurrency import run_in_threadpool
 
 from ..audit import write_batch_operation_log, write_operation_log
-from ..auth import CurrentUser, apply_department_scope, can_access_department, get_current_user, require_permission
+from ..auth import (
+    CurrentUser,
+    apply_department_scope,
+    can_access_department,
+    get_current_user,
+    has_permission,
+    require_permission,
+)
 from ..backup import create_backup
 from ..db import db
 from ..importer import import_excel
+from ..legacy_import_service import (
+    apply_resolutions as apply_preview_resolutions,
+    commit_session as commit_preview_session,
+    create_session as create_preview_session,
+    list_rows as list_preview_rows,
+    load_session as load_preview_session,
+    recompute_summary as recompute_preview_summary,
+)
 from ..ledger_excel import (
     EDITABLE_ORDER_KEYS,
     EXPORT_FILE_NAME,
@@ -461,6 +477,102 @@ async def import_orders_excel(
     # 工作簿解析、数据库导入与导入前备份都是同步阻塞工作。放进线程池执行，
     # 否则单 worker 的事件循环会被整份导入卡住，连健康检查都无法响应。
     return await run_in_threadpool(_run_order_import, content, Path(filename).name, user)
+
+
+class PreviewResolution(BaseModel):
+    excel_row_no: int = Field(gt=0)
+    resolution: dict[str, Any] = Field(default_factory=dict)
+
+
+class PreviewResolutions(BaseModel):
+    items: list[PreviewResolution] = Field(default_factory=list, max_length=500)
+
+
+def _create_import_preview(content: bytes, file_name: str, user: CurrentUser) -> dict:
+    with business_write() as conn:
+        return create_preview_session(conn, user_id=user.id, file_name=file_name, content=content)
+
+
+def _commit_import_preview(session_id: str, content: bytes, user: CurrentUser, is_admin: bool) -> dict:
+    with business_write() as conn:
+        return commit_preview_session(
+            conn, session_id=session_id, user=user, content=content, is_admin=is_admin
+        )
+
+
+@router.post("/import-preview")
+async def create_import_preview(
+    request: Request,
+    filename: str = Query("市场部业务台账.xlsx", max_length=255),
+    user: CurrentUser = Depends(require_permission("ledger_import")),
+) -> dict:
+    """上传并解析旧台账，返回预检会话；**不写任何业务表**。"""
+    if Path(filename).suffix.lower() != ".xlsx":
+        raise HTTPException(status_code=400, detail="仅支持 .xlsx 格式的业务台账文件")
+    content = await request.body()
+    if not content:
+        raise HTTPException(status_code=400, detail="上传文件为空")
+    if len(content) > MAX_IMPORT_BYTES:
+        raise HTTPException(status_code=413, detail="上传文件不能超过 20 MB")
+    return await run_in_threadpool(_create_import_preview, content, Path(filename).name, user)
+
+
+@router.get("/import-preview/{session_id}")
+def read_import_preview(
+    session_id: str,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    user: CurrentUser = Depends(require_permission("ledger_import")),
+) -> dict:
+    is_admin = has_permission(user.role_code, "system_admin", user.permissions)
+    with db() as conn:
+        session = load_preview_session(conn, session_id, user_id=user.id, is_admin=is_admin)
+        rows = list_preview_rows(conn, session_id, limit=limit, offset=offset)
+        summary = recompute_preview_summary(conn, session_id)
+    return {
+        "session": {
+            "id": session["id"],
+            "status": session["status"],
+            "source_file_name": session["source_file_name"],
+            "source_sha256": session["source_sha256"],
+            "expires_at": session["expires_at"].isoformat() if session["expires_at"] else None,
+            "parser_version": session["parser_version"],
+        },
+        "summary": summary,
+        "rows": rows,
+    }
+
+
+@router.put("/import-preview/{session_id}/resolutions")
+def update_import_preview(
+    session_id: str,
+    payload: PreviewResolutions,
+    user: CurrentUser = Depends(require_permission("ledger_import")),
+) -> dict:
+    """写入逐项人工确认并重新校验；有阻断项时后端同样拒绝提交。"""
+    with business_write() as conn:
+        return apply_preview_resolutions(
+            conn,
+            session_id,
+            user_id=user.id,
+            resolutions=[item.model_dump() for item in payload.items],
+        )
+
+
+@router.post("/import-preview/{session_id}/commit")
+async def commit_import_preview(
+    session_id: str,
+    request: Request,
+    user: CurrentUser = Depends(require_permission("ledger_import")),
+) -> dict:
+    """提交已通过预检的会话。需要重新上传同一份文件用于核对摘要，不接受规范化 JSON。"""
+    content = await request.body()
+    if not content:
+        raise HTTPException(status_code=400, detail="请重新上传预检时的同一份文件以核对摘要")
+    if len(content) > MAX_IMPORT_BYTES:
+        raise HTTPException(status_code=413, detail="上传文件不能超过 20 MB")
+    is_admin = has_permission(user.role_code, "system_admin", user.permissions)
+    return await run_in_threadpool(_commit_import_preview, session_id, content, user, is_admin)
 
 
 @router.get("/batch-editor/schema")

@@ -291,6 +291,7 @@ def import_excel(
     source_file_name: str | None = None,
     user: CurrentUser | None = None,
     strict_template: bool = False,
+    line_id_map: dict[int, int] | None = None,
 ) -> dict[str, Any]:
     workbook_path: Path | None = None
     if workbook_bytes is None:
@@ -697,28 +698,38 @@ def import_excel(
                 },
             )
 
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO sales_invoice
-                      (order_line_id, phase_no, invoice_doc_no, invoice_date, invoice_date_text,
-                       invoice_no, invoice_amount, pending_invoice_amount, delivered_not_invoiced_amount)
-                    VALUES
-                      (:order_line_id, 1, :invoice_doc_no, :invoice_date, :invoice_date_text,
-                       :invoice_no, :invoice_amount, :pending_invoice_amount, :delivered_not_invoiced_amount)
-                    """
-                ),
-                {
-                    "order_line_id": order_line_id,
-                    "invoice_doc_no": _as_text(_row_value(row, 73 if template_layout else position(80, 71))),
-                    "invoice_date": _as_date(_row_value(row, 74 if template_layout else position(81, 72))),
-                    "invoice_date_text": _as_text(_row_value(row, 74 if template_layout else position(81, 72))),
-                    "invoice_no": _as_text(_row_value(row, 75 if template_layout else position(82, 73))),
-                    "invoice_amount": _as_decimal(_row_value(row, 76 if template_layout else position(83, 74))),
-                    "pending_invoice_amount": _as_decimal(_row_value(row, 77 if template_layout else position(84, 75))),
-                    "delivered_not_invoiced_amount": _as_decimal(_row_value(row, 78 if template_layout else position(85, 76))),
-                },
+            # 开票列全空时不写空记录：与收票/入库/付款的处理保持一致，
+            # 否则没有开票数据的行也会留下一条金额为空的开票期次。
+            invoice_source_columns = (
+                (73, 74, 76)
+                if template_layout
+                else (position(80, 71), position(81, 72), position(83, 74))
             )
+            if any(
+                _row_value(row, column) not in (None, "") for column in invoice_source_columns
+            ):
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO sales_invoice
+                          (order_line_id, phase_no, invoice_doc_no, invoice_date, invoice_date_text,
+                           invoice_no, invoice_amount, pending_invoice_amount, delivered_not_invoiced_amount)
+                        VALUES
+                          (:order_line_id, 1, :invoice_doc_no, :invoice_date, :invoice_date_text,
+                           :invoice_no, :invoice_amount, :pending_invoice_amount, :delivered_not_invoiced_amount)
+                        """
+                    ),
+                    {
+                        "order_line_id": order_line_id,
+                        "invoice_doc_no": _as_text(_row_value(row, 73 if template_layout else position(80, 71))),
+                        "invoice_date": _as_date(_row_value(row, 74 if template_layout else position(81, 72))),
+                        "invoice_date_text": _as_text(_row_value(row, 74 if template_layout else position(81, 72))),
+                        "invoice_no": _as_text(_row_value(row, 75 if template_layout else position(82, 73))),
+                        "invoice_amount": _as_decimal(_row_value(row, 76 if template_layout else position(83, 74))),
+                        "pending_invoice_amount": _as_decimal(_row_value(row, 77 if template_layout else position(84, 75))),
+                        "delivered_not_invoiced_amount": _as_decimal(_row_value(row, 78 if template_layout else position(85, 76))),
+                    },
+                )
 
             _insert_receipt(
                 conn,
@@ -741,6 +752,9 @@ def import_excel(
                 86 if template_layout else position(93, 84),
             )
 
+            if line_id_map is not None:
+                # 预检提交需要把 Excel 行号映射到明细 id，才能补写第 3 期及以后的财务。
+                line_id_map[excel_row_no] = order_line_id
             success_rows += 1
         except PermissionError:
             raise

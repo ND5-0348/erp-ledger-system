@@ -93,7 +93,11 @@ def initialize_test_schema() -> None:
 
 def clear_business_data() -> None:
     with db() as conn:
-        for table in TEST_BUSINESS_TABLES + ("backup_record", "operation_log"):
+        # 预检会话是临时数据，不属于业务表；测试之间要清掉，否则会互相干扰。
+        for table in ("legacy_import_source", "legacy_import_session") + TEST_BUSINESS_TABLES + (
+            "backup_record",
+            "operation_log",
+        ):
             conn.execute(text(f"DELETE FROM `{table}`"))
 
 
