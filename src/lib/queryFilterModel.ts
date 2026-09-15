@@ -1,3 +1,4 @@
+import { isClosedStatus } from './ledgerStats';
 import { OrderRecord, ProjectLedger, PurchaseRecord, SalesRecord } from '../types';
 
 export type LedgerFilters = {
@@ -121,7 +122,7 @@ export function getDepartmentOptions(records: Array<{ department?: string | null
 }
 
 function normalizeStatus(status: string) {
-  if (status === 'closed' || status.includes('关') || status.includes('闭') || status.includes('完成')) {
+  if (isClosedStatus(status)) {
     return 'closed';
   }
   return 'open';

@@ -878,6 +878,30 @@ def _excel_import_file() -> bytes:
     return output.getvalue()
 
 
+@pytest.mark.parametrize('spec', [None, '型号A'])
+def test_import_same_goods_in_two_named_projects(client: TestClient, headers: dict[str, str], spec) -> None:
+    workbook = load_workbook(BytesIO(_excel_import_file()))
+    sheet = workbook.worksheets[0]
+    sheet.cell(3, 14, '项目甲')
+    sheet.cell(3, 16).value = spec
+    values = [sheet.cell(3, column).value for column in range(1, 92)]
+    values[13] = '项目乙'
+    sheet.append(values)
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    response = client.post('/api/orders/import-excel?filename=multi-project.xlsx',
+                           content=output.getvalue(), headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json()['success_rows'] == 2
+    assert _count('sales_order') == 1
+    assert _count('order_line') == 2
+    repeated = client.post('/api/orders/import-excel?filename=multi-project.xlsx',
+                           content=output.getvalue(), headers=headers)
+    assert repeated.status_code == 422, repeated.text
+    assert _count('order_line') == 2
+
+
 def test_excel_template_import_export_round_trip(client: TestClient, headers: dict[str, str]) -> None:
     template_response = client.get("/api/orders/template", headers=headers)
     assert template_response.status_code == 200, template_response.text
@@ -2072,15 +2096,19 @@ def test_invalid_input_cases(case: str, client: TestClient, headers: dict[str, s
         assert _count("project") == _count("sales_order") == _count("order_line") == 0
 
     elif case == "I-07":
+        # 判重键含数量与单价：完全一致的明细拒绝，数量或单价不同的视为不同明细。
         order_line_id, payload = _create_order(client, headers, case)
-        payload["quantity"] = "99.000000"
         response = client.post("/api/orders", json=payload, headers=headers)
         assert response.status_code == 409, response.text
         with db() as conn:
             quantity = conn.execute(text("SELECT quantity FROM order_line WHERE id = :id"), {"id": order_line_id}).scalar_one()
         assert _d(quantity) == Decimal("10.0000")
         assert _count("order_line") == 1
-        assert _action_count("create_order") == 1
+        for field, value in (("quantity", "99.000000"), ("unit_price", "120.000000")):
+            response = client.post("/api/orders", json={**payload, field: value}, headers=headers)
+            assert response.status_code == 200, response.text
+        assert _count("order_line") == 3
+        assert _action_count("create_order") == 3
 
     elif case == "I-08":
         valid = _payload("I08-valid")

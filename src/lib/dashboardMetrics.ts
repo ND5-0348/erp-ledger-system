@@ -113,6 +113,13 @@ export function getDashboardLatestModifiedAt(orders: OrderRecord[], filters: Das
 export function getDashboardMetrics({ orders, department, startDate, endDate }: DashboardMetricsInput): DashboardMetrics {
   const dashboardScopeFilter = belongsToDashboardScope(department, startDate, endDate);
   const filteredOrders = orders.filter(dashboardScopeFilter);
+  const orderGroups = new Map<string, OrderRecord[]>();
+  filteredOrders.forEach((item) => {
+    const key = JSON.stringify([item.projectId, item.orderId]);
+    const lines = orderGroups.get(key) || [];
+    lines.push(item);
+    orderGroups.set(key, lines);
+  });
 
   return {
     totalOrderAmount: filteredOrders.reduce((sum, item) => sum + Number(item.orderValue || 0), 0),
@@ -120,7 +127,7 @@ export function getDashboardMetrics({ orders, department, startDate, endDate }: 
       (sum, item) => sum + Number(item.grossProfit ?? (item.orderValue - Number(item.purchaseAmount || 0))),
       0,
     ),
-    orderCount: filteredOrders.length,
+    orderCount: orderGroups.size,
     accountsReceivable: filteredOrders.reduce(
       (sum, item) => sum + Number(item.accountsReceivable ?? Math.max(item.orderValue - Number(item.totalReceived || 0), 0)),
       0,
@@ -129,6 +136,6 @@ export function getDashboardMetrics({ orders, department, startDate, endDate }: 
       (sum, item) => sum + Number(item.accountsPayable ?? Math.max(Number(item.purchaseAmount || 0) - Number(item.totalPaid || 0), 0)),
       0,
     ),
-    closedCount: filteredOrders.filter(isClosedOrder).length,
+    closedCount: [...orderGroups.values()].filter((lines) => lines.every(isClosedOrder)).length,
   };
 }

@@ -189,7 +189,7 @@ def list_purchases(
                        purchase_amount, received_invoice_amount, total_paid, accounts_payable, latest_payment_date
                 FROM ({source_sql}) purchase_detail
                 WHERE {where_sql}
-                ORDER BY order_date DESC, project_code
+                ORDER BY order_date DESC, project_code, order_line_id
                 LIMIT :limit OFFSET :offset
                 """
             ),

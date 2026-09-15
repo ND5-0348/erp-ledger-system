@@ -18,6 +18,7 @@ import {
   normalizeLedgerStatusLabel,
 } from '../lib/salesDetailModel';
 import { buildProjectOrderSummaries } from '../lib/projectOrderSummary';
+import { getLedgerStats } from '../lib/ledgerStats';
 import OrderOperatingSummarySection from './OrderOperatingSummarySection';
 import {
   applyLedgerFilters,
@@ -41,13 +42,6 @@ const statusOptions = [
   { value: 'open', label: '进行中' },
   { value: 'closed', label: '已关闭' },
 ];
-
-function normalizeOrderStatus(status: string) {
-  if (status === 'closed' || status.includes('关') || status.includes('闭') || status.includes('完成')) {
-    return 'closed';
-  }
-  return 'open';
-}
 
 function getPaginationItems(totalPages: number): Array<number | 'ellipsis'> {
   if (totalPages <= 4) {
@@ -226,33 +220,10 @@ export default function LedgerScreen({
     });
   };
 
-  // Totals & KPI Metrics based on FILTERED or ALL ledgers? Let's use ALL ledgers for global stats, but dynamically updated!
-  const stats = useMemo(() => {
-    let totalOrderVal = 0;
-    let completedCount = 0;
-    let inProgressCount = 0;
-    let warningCount = 0;
-
-    ledgers.forEach(item => {
-      totalOrderVal += item.orderAmount;
-      if (normalizeOrderStatus(item.orderStatus) === 'closed') {
-        completedCount++;
-      } else {
-        inProgressCount++;
-      }
-      // If payment is pending or we have high accounts receivable, or just some mocked items
-      if (item.orderAmount - item.totalReceived > 500000 && normalizeOrderStatus(item.orderStatus) !== 'closed') {
-        warningCount++;
-      }
-    });
-
-    return {
-      totalOrderVal,
-      completedCount,
-      inProgressCount,
-      warningCount: warningCount || 3 // Default 3 warning to match screenshot exactly
-    };
-  }, [ledgers]);
+  // 汇总全部筛选结果，不受当前显示页影响。
+  const stats = useMemo(() => getLedgerStats(filteredLedgers, {
+    orders, sales, filters: submittedFilters,
+  }), [filteredLedgers, orders, sales, submittedFilters]);
 
   // Add Item Handler
   const handleAddSubmit = (e: React.FormEvent) => {
@@ -619,8 +590,8 @@ export default function LedgerScreen({
             <FileSpreadsheet className="w-5 h-5" />
           </div>
           <div>
-            <p className="text-xs font-medium text-slate-400">项目总金额</p>
-            <p className="text-lg font-bold text-slate-900 mt-0.5">￥{formatMoney(stats.totalOrderVal)}</p>
+            <p className="text-xs font-medium text-slate-400" title="按所选订单日期和开票日期匹配明细，销售订单金额每条明细只计一次">销售订单金额合计</p>
+            <p className="text-lg font-bold text-slate-900 mt-0.5">{formatMoney(stats.totalOrderVal)} 元</p>
           </div>
         </div>
 
@@ -652,8 +623,9 @@ export default function LedgerScreen({
             <AlertTriangle className="w-5 h-5" />
           </div>
           <div>
-            <p className="text-xs font-medium text-slate-400">延期预警</p>
-            <p className="text-lg font-bold text-slate-900 mt-0.5">{stats.warningCount} 个</p>
+            <p className="text-xs font-medium text-slate-400" title="待增加项目关闭时间后启用">延期预警</p>
+            <p className="text-lg font-bold text-slate-900 mt-0.5">—（占位）</p>
+            <p className="text-xs text-slate-400 mt-1">待增加项目关闭时间后启用</p>
           </div>
         </div>
       </div>
