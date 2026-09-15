@@ -17,12 +17,15 @@ from .config import BACKUP_DIR
 
 
 # 业务备份表清单。顺序即恢复时的插入顺序，必须满足外键依赖：
-# sub_project 依赖 sales_order，order_line 依赖 sales_order 与 sub_project。
+# project_manager_history 依赖 project；sub_project 依赖 sales_order；
+# order_line 依赖 sales_order 与 sub_project；sales_order_number_history 依赖 sales_order。
 BACKUP_TABLES = [
     "import_batch",
     "ledger_raw_row",
     "project",
+    "project_manager_history",
     "sales_order",
+    "sales_order_number_history",
     "sub_project",
     "order_line",
     "purchase_info",

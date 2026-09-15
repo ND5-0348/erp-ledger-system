@@ -15,6 +15,7 @@ from sqlalchemy.engine import Connection
 from .audit import write_operation_log
 from .auth import CurrentUser, can_access_department
 from .config import DOCS_DIR
+from .ledger_history import register_current_manager, register_current_number
 from .line_identity import find_duplicate_line
 from .ledger_excel import SAMPLE_ORDER_NO, SAMPLE_PROJECT_CODE, TEMPLATE_HEADERS, is_template_sample_row
 from .validation import validate_business_date
@@ -169,7 +170,9 @@ def _reset_business_data(conn: Connection) -> None:
         "purchase_info",
         "order_line",
         "sub_project",
+        "sales_order_number_history",
         "sales_order",
+        "project_manager_history",
         "project",
         "ledger_raw_row",
         "import_batch",
@@ -347,6 +350,9 @@ def import_excel(
     failed_rows = 0
     skipped_rows = 0
     error_messages: list[str] = []
+    # 本批次已登记过历史的订单/框架，避免逐行重复 upsert
+    registered_orders: set[int] = set()
+    registered_projects: set[int] = set()
 
     for excel_row_no, row in enumerate(
         worksheet.iter_rows(min_row=data_start_row, values_only=True),
@@ -467,6 +473,18 @@ def import_excel(
                     "close_status": _as_text(_row_value(row, 89 if template_layout else position(96, 87))),
                 },
             )
+
+            # 订单号与负责人的历史登记：普通导入只在还没有历史时登记当前值，
+            # 绝不虚构历史、也不覆盖已确认的别名或交接链——改变当前订单号或现任
+            # 负责人属于改号/交接流程，必须走预检确认（H3）后执行。
+            if sales_order_id not in registered_orders:
+                register_current_number(conn, sales_order_id, order_no)
+                registered_orders.add(sales_order_id)
+            if project_id not in registered_projects:
+                register_current_manager(
+                    conn, project_id, _as_text(_row_value(row, position(5, 5))) or ""
+                )
+                registered_projects.add(project_id)
 
             # 子项目是订单下的独立层级：同一订单可以有多个子项目，
             # 每个子项目各自保存客户单位、最终用户、区域平台。

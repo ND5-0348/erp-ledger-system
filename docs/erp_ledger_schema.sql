@@ -149,6 +149,34 @@ CREATE TABLE IF NOT EXISTS sales_order (
   CONSTRAINT fk_sales_order_import_batch FOREIGN KEY (import_batch_id) REFERENCES import_batch(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
+CREATE TABLE IF NOT EXISTS project_manager_history (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  project_id BIGINT UNSIGNED NOT NULL,
+  manager_name VARCHAR(64) NOT NULL,
+  history_order INT NOT NULL,
+  effective_from DATE NULL,
+  source VARCHAR(32) NOT NULL DEFAULT 'legacy_import',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  -- 唯一键用 (项目, 顺序)：允许同一个人重复任职（甲→乙→甲 有两条“甲”）
+  UNIQUE KEY uk_manager_history_order (project_id, history_order),
+  KEY idx_manager_history_name (manager_name),
+  CONSTRAINT fk_manager_history_project FOREIGN KEY (project_id) REFERENCES project(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE IF NOT EXISTS sales_order_number_history (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  sales_order_id BIGINT UNSIGNED NOT NULL,
+  order_no VARCHAR(64) NOT NULL,
+  history_order INT NOT NULL,
+  source VARCHAR(32) NOT NULL DEFAULT 'legacy_import',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_order_number_history_order (sales_order_id, history_order),
+  KEY idx_order_number_history_no (order_no),
+  CONSTRAINT fk_order_number_history_order FOREIGN KEY (sales_order_id) REFERENCES sales_order(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
 CREATE TABLE IF NOT EXISTS sub_project (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   sales_order_id BIGINT UNSIGNED NOT NULL,

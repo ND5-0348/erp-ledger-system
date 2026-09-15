@@ -75,6 +75,7 @@ TEST_BUSINESS_TABLES = (
     "sales_receipt", "sales_invoice", "sales_contract", "purchase_payment", "finance_payment_entry",
     "finance_invoice_check", "warehouse_entry", "purchase_invoice",
     "purchase_contract", "delivery_record", "purchase_info", "order_line", "sub_project",
+    "sales_order_number_history", "project_manager_history",
     "sales_order", "ledger_raw_row", "project", "import_batch",
 )
 

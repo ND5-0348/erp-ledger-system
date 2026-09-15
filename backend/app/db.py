@@ -176,9 +176,10 @@ def apply_runtime_migrations() -> None:
                     )
                 )
 
-        # 子项目实体的结构随启动生效；存量数据搬迁由 migrate_sub_projects()
+        # 子项目实体与历史表的结构随启动生效；存量数据搬迁由 migrate_sub_projects()
         # 显式执行，不在启动时自动改动业务数据。
         _ensure_sub_project_storage(conn)
+        _ensure_history_storage(conn)
 
 
 SUB_PROJECT_DDL = """
@@ -253,6 +254,52 @@ def _ensure_sub_project_storage(conn) -> None:
                 "FOREIGN KEY (sub_project_id) REFERENCES sub_project(id)"
             )
         )
+
+
+HISTORY_DDL: tuple[tuple[str, str], ...] = (
+    (
+        "project_manager_history",
+        """
+        CREATE TABLE IF NOT EXISTS project_manager_history (
+          id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+          project_id BIGINT UNSIGNED NOT NULL,
+          manager_name VARCHAR(64) NOT NULL,
+          history_order INT NOT NULL,
+          effective_from DATE NULL,
+          source VARCHAR(32) NOT NULL DEFAULT 'legacy_import',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (id),
+          UNIQUE KEY uk_manager_history_order (project_id, history_order),
+          KEY idx_manager_history_name (manager_name),
+          CONSTRAINT fk_manager_history_project FOREIGN KEY (project_id) REFERENCES project(id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+        """,
+    ),
+    (
+        "sales_order_number_history",
+        """
+        CREATE TABLE IF NOT EXISTS sales_order_number_history (
+          id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+          sales_order_id BIGINT UNSIGNED NOT NULL,
+          order_no VARCHAR(64) NOT NULL,
+          history_order INT NOT NULL,
+          source VARCHAR(32) NOT NULL DEFAULT 'legacy_import',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (id),
+          UNIQUE KEY uk_order_number_history_order (sales_order_id, history_order),
+          KEY idx_order_number_history_no (order_no),
+          CONSTRAINT fk_order_number_history_order FOREIGN KEY (sales_order_id) REFERENCES sales_order(id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+        """,
+    ),
+)
+
+
+def _ensure_history_storage(conn) -> None:
+    """建订单号别名与客户经理历史表（可重复运行）。"""
+    for table_name, ddl in HISTORY_DDL:
+        if not _table_exists(conn, table_name):
+            conn.execute(text(ddl))
 
 
 def _raw_sub_project_values(raw_json: object) -> dict[str, str | None]:
