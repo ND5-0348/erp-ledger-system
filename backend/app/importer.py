@@ -107,6 +107,21 @@ def _has_business_payload(row: tuple[Any, ...]) -> bool:
     return any(_as_text(_row_value(row, position)) for position in BUSINESS_PAYLOAD_POSITIONS)
 
 
+# 项目级共享字段：命中已有项目时必须与台账一致，普通导入只能追加明细。
+#
+# 范围依据 2026-09-15 对真实业务台账（25 个项目、19 个多明细项目）的实测：
+# 部门、分公司、三级团队、区域平台在同一项目编号下 0% 出现多值；
+# 而**客户单位（31.6%）、最终用户（10.5%）、客户经理（5.3%）、项目名称（36.8%）
+# 在同一项目编号下本来就会不同**——它们描述的是明细对应的终端客户与代理，
+# 属于合法的明细级差异，纳入校验会把真实数据整批拦下。因此这四个字段不参与校验。
+SHARED_PROJECT_FIELDS: tuple[tuple[str, int, int, str], ...] = (
+    ("department", 3, 3, "部门"),
+    ("branch_company", 4, 4, "分公司"),
+    ("team_level3_name", 9, 9, "三级团队"),
+    ("regional_platform", 12, 12, "区域平台"),
+)
+
+
 def _is_latest_layout(headers: list[Any] | tuple[Any, ...]) -> bool:
     header_names = {str(header or "").strip() for header in headers}
     return bool(LATEST_LAYOUT_HEADERS & header_names)
@@ -157,6 +172,49 @@ def _reset_business_data(conn: Connection) -> None:
     for table in tables:
         conn.execute(text(f"TRUNCATE TABLE {table}"))
     conn.execute(text("SET FOREIGN_KEY_CHECKS=1"))
+
+
+def _find_shared_field_conflicts(
+    conn: Connection,
+    project_code: str,
+    row: tuple[Any, ...],
+    position,
+    user: CurrentUser | None,
+) -> tuple[int | None, list[str]]:
+    """校验导入行与台账中已有项目的兼容性。
+
+    返回（已有项目 id, 冲突字段描述）。若项目不存在则返回 (None, [])。
+    数据库原部门对当前账号不可录入时直接抛 PermissionError——这挡住“拿别的
+    部门的项目编号、把部门填成自己能访问的部门”来绕过部门边界。
+    """
+    existing = conn.execute(
+        text(
+            """
+            SELECT id, department, branch_company, account_manager, team_level3_name,
+                   customer_unit_name, end_user_name, regional_platform
+            FROM project
+            WHERE project_code = :project_code AND deleted_at IS NULL
+            """
+        ),
+        {"project_code": project_code},
+    ).mappings().first()
+    if existing is None:
+        return None, []
+
+    if user is not None and not can_access_department(user, existing["department"], require_entry=True):
+        raise PermissionError(
+            f"项目 {project_code} 属于部门“{existing['department'] or '空'}”，"
+            "无权向该部门的项目导入数据"
+        )
+
+    conflicts: list[str] = []
+    for column, latest, legacy, label in SHARED_PROJECT_FIELDS:
+        excel_value = _as_text(_row_value(row, position(latest, legacy)))
+        stored_value = _as_text(existing[column])
+        # 只在两边都有值且不同时报冲突：Excel 留空表示不改动，台账为空表示可补充。
+        if excel_value and stored_value and excel_value != stored_value:
+            conflicts.append(f"{label}（台账为“{stored_value}”，Excel 为“{excel_value}”）")
+    return int(existing["id"]), conflicts
 
 
 def import_excel(
@@ -280,38 +338,44 @@ def import_excel(
                 },
             )
 
-            project_id = _execute_scalar(
-                conn,
-                """
-                INSERT INTO project
-                  (project_code, project_name, department, branch_company, account_manager,
-                   team_level3_name, customer_unit_name, end_user_name, regional_platform)
-                VALUES
-                  (:project_code, :project_name, :department, :branch_company, :account_manager,
-                   :team_level3_name, :customer_unit_name, :end_user_name, :regional_platform)
-                ON DUPLICATE KEY UPDATE
-                  id = LAST_INSERT_ID(id),
-                  project_name = COALESCE(project_name, VALUES(project_name)),
-                  department = COALESCE(VALUES(department), department),
-                  branch_company = COALESCE(VALUES(branch_company), branch_company),
-                  account_manager = COALESCE(VALUES(account_manager), account_manager),
-                  team_level3_name = COALESCE(VALUES(team_level3_name), team_level3_name),
-                  customer_unit_name = COALESCE(VALUES(customer_unit_name), customer_unit_name),
-                  end_user_name = COALESCE(VALUES(end_user_name), end_user_name),
-                  regional_platform = COALESCE(VALUES(regional_platform), regional_platform)
-                """,
-                {
-                    "project_code": project_code,
-                    "project_name": _as_text(_row_value(row, position(14, 14))),
-                    "department": department,
-                    "branch_company": _as_text(_row_value(row, position(4, 4))),
-                    "account_manager": _as_text(_row_value(row, position(5, 5))),
-                    "team_level3_name": _as_text(_row_value(row, position(9, 9))),
-                    "customer_unit_name": _as_text(_row_value(row, position(10, 10))),
-                    "end_user_name": _as_text(_row_value(row, position(11, 11))),
-                    "regional_platform": _as_text(_row_value(row, position(12, 12))),
-                },
+            existing_project_id, conflicts = _find_shared_field_conflicts(
+                conn, project_code, row, position, user
             )
+            if conflicts:
+                raise ValueError(
+                    f"第 {excel_row_no} 行项目 {project_code} 已在台账中，"
+                    "以下项目级共享字段与台账不一致，普通导入只能追加明细、不能修改它们："
+                    + "、".join(conflicts)
+                )
+
+            if existing_project_id is not None:
+                project_id = existing_project_id
+            else:
+                project_id = _execute_scalar(
+                    conn,
+                    """
+                    INSERT INTO project
+                      (project_code, project_name, department, branch_company, account_manager,
+                       team_level3_name, customer_unit_name, end_user_name, regional_platform)
+                    VALUES
+                      (:project_code, :project_name, :department, :branch_company, :account_manager,
+                       :team_level3_name, :customer_unit_name, :end_user_name, :regional_platform)
+                    ON DUPLICATE KEY UPDATE
+                      id = LAST_INSERT_ID(id),
+                      project_name = COALESCE(project_name, VALUES(project_name))
+                    """,
+                    {
+                        "project_code": project_code,
+                        "project_name": _as_text(_row_value(row, position(14, 14))),
+                        "department": department,
+                        "branch_company": _as_text(_row_value(row, position(4, 4))),
+                        "account_manager": _as_text(_row_value(row, position(5, 5))),
+                        "team_level3_name": _as_text(_row_value(row, position(9, 9))),
+                        "customer_unit_name": _as_text(_row_value(row, position(10, 10))),
+                        "end_user_name": _as_text(_row_value(row, position(11, 11))),
+                        "regional_platform": _as_text(_row_value(row, position(12, 12))),
+                    },
+                )
 
             sales_order_id = _execute_scalar(
                 conn,

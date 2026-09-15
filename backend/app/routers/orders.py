@@ -408,7 +408,7 @@ def export_orders(
 async def import_orders_excel(
     request: Request,
     filename: str = Query("市场部业务台账.xlsx", max_length=255),
-    user: CurrentUser = Depends(require_permission("order_entry")),
+    user: CurrentUser = Depends(require_permission("ledger_import")),
 ) -> dict:
     if Path(filename).suffix.lower() != ".xlsx":
         raise HTTPException(status_code=400, detail="仅支持 .xlsx 格式的业务台账文件")

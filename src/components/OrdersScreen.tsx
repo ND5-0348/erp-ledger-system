@@ -58,6 +58,8 @@ interface OrdersScreenProps {
   canEnterOrders: boolean;
   canEditOrders: boolean;
   canDeleteOrders: boolean;
+  /** 整表导入是独立权限：能录订单不代表能导入整份台账。 */
+  canImportLedger: boolean;
 }
 
 function getPaginationItems(totalPages: number): Array<number | 'ellipsis'> {
@@ -81,7 +83,7 @@ function createDeleteVerificationCode() {
   return Array.from(randomValues, (value) => deleteVerificationAlphabet[value % deleteVerificationAlphabet.length]).join('');
 }
 
-export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpdateOrder, onDeleteOrder, onBatchSaved, canEnterOrders, canEditOrders, canDeleteOrders }: OrdersScreenProps) {
+export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpdateOrder, onDeleteOrder, onBatchSaved, canEnterOrders, canEditOrders, canDeleteOrders, canImportLedger }: OrdersScreenProps) {
   // Query Filters State
   const [projectId, setProjectId] = useState('');
   const [orderId, setOrderId] = useState('');
@@ -838,13 +840,15 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
           <p className="text-sm text-slate-500 font-sans mt-1">查看和管理客户订单的基础业务信息</p>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2 self-start sm:self-center">
+          {canImportLedger && (
+            <label className="flex items-center gap-1.5 px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-lg shadow-sm transition-all text-xs font-semibold cursor-pointer">
+              <FileUp className="w-4 h-4 text-blue-600" />
+              <span>导入Excel</span>
+              <input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={handleBatchImport} className="hidden" />
+            </label>
+          )}
           {canEnterOrders && (
             <>
-              <label className="flex items-center gap-1.5 px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-lg shadow-sm transition-all text-xs font-semibold cursor-pointer">
-                <FileUp className="w-4 h-4 text-blue-600" />
-                <span>导入Excel</span>
-                <input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={handleBatchImport} className="hidden" />
-              </label>
               <button
                 type="button"
                 onClick={() => setBatchEditorMode('create')}

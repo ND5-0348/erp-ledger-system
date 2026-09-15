@@ -924,7 +924,8 @@ def test_excel_template_import_export_round_trip(client: TestClient, headers: di
             "password": "Excel-Scope-Test-20260721!",
             "display_name": "Excel Scope User",
             "role_code": "order_entry",
-            "permissions": ["order_entry"],
+            # 导入需要独立的 ledger_import 权限；这里给到权限后再验证部门边界仍然生效。
+            "permissions": ["order_entry", "ledger_import"],
             "department_scope": ["OTHER"],
             "department_can_view": True,
             "department_can_entry": True,

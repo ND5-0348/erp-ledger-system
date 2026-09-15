@@ -22,7 +22,7 @@ import {
   KeyRound,
 } from 'lucide-react';
 import { BackendUserRecord } from '../api';
-import { Permission, ROLE_LABELS, RoleCode, SYSTEM_PERMISSION_OPTIONS } from '../lib/permissions';
+import { Permission, RoleCode, SYSTEM_PERMISSION_OPTIONS, permissionRoleLabel } from '../lib/permissions';
 import { OperationLog, BackupInfo } from '../types';
 
 export interface CreateUserPayload {
@@ -34,6 +34,8 @@ export interface CreateUserPayload {
   department_scope: string[];
   department_can_view: boolean;
   department_can_entry: boolean;
+  /** 整表导入账号必须显式表达“全部部门”，空列表不再无声代表全部。 */
+  department_all: boolean;
 }
 
 export type UpdateUserPermissionsPayload = Omit<CreateUserPayload, 'username' | 'password' | 'display_name'>;
@@ -60,6 +62,12 @@ interface SystemScreenProps {
 const PERMISSION_OPTIONS = SYSTEM_PERMISSION_OPTIONS;
 const PERMISSION_LABELS = Object.fromEntries(PERMISSION_OPTIONS.map((item) => [item.value, item.label])) as Record<Permission, string>;
 const ENTRY_REQUIRES_VIEW_MESSAGE = '已勾选录入权限，请同时勾选“查看”权限，用于核对录入数据是否有误。';
+const IMPORT_REQUIRES_DEPARTMENT_MESSAGE = '“整表导入”账号必须选择部门范围，或显式勾选“全部部门”。';
+
+/** 非管理员的整表导入账号需要有明确的部门策略，空部门列表不再无声表示全部。 */
+function needsExplicitDepartmentPolicy(permissions: Permission[]) {
+  return permissions.includes('ledger_import') && !permissions.includes('system_admin');
+}
 
 function deriveRoleCode(permissions: Permission[]): RoleCode {
   if (permissions.includes('system_admin')) return 'admin';
@@ -68,6 +76,7 @@ function deriveRoleCode(permissions: Permission[]): RoleCode {
   if (permissions.length === 1 && permissions[0] === 'sales_entry') return 'sales_entry';
   return 'viewer';
 }
+
 
 function parseList(value: string[] | string | null | undefined) {
   if (!value) return [];
@@ -82,6 +91,14 @@ function parseList(value: string[] | string | null | undefined) {
 
 function formatDateTime(value: string | null | undefined) {
   return value ? value.replace('T', ' ').slice(0, 19) : '-';
+}
+
+/**
+ * 账号实际生效的权限：permissions_json 为空表示继承角色默认权限，
+ * 后端会用 effective_permissions 补齐，避免老账号被显示成“无权限”并在保存时被误撤权。
+ */
+function userEffectivePermissions(user: BackendUserRecord): Permission[] {
+  return parseList(user.effective_permissions ?? user.permissions_json) as Permission[];
 }
 
 export default function SystemScreen({
@@ -119,6 +136,7 @@ export default function SystemScreen({
     department_scope: [] as string[],
     department_can_view: false,
     department_can_entry: false,
+    department_all: false,
   });
   const [userMessage, setUserMessage] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -131,6 +149,7 @@ export default function SystemScreen({
     department_scope: [],
     department_can_view: false,
     department_can_entry: false,
+    department_all: false,
   });
   const [editDepartmentInput, setEditDepartmentInput] = useState('');
   const [resettingUser, setResettingUser] = useState<BackendUserRecord | null>(null);
@@ -198,6 +217,10 @@ export default function SystemScreen({
       setUserMessage('选择部门后至少勾选查看或录入权限');
       return;
     }
+    if (needsExplicitDepartmentPolicy(userForm.permissions) && userForm.department_scope.length === 0 && !userForm.department_all) {
+      setUserMessage(IMPORT_REQUIRES_DEPARTMENT_MESSAGE);
+      return;
+    }
     try {
       const { confirm_password: _confirmPassword, ...payload } = userForm;
       await onCreateUser({ ...payload, role_code: deriveRoleCode(payload.permissions) });
@@ -211,6 +234,7 @@ export default function SystemScreen({
         department_scope: [],
         department_can_view: false,
         department_can_entry: false,
+        department_all: false,
       });
       setUserMessage('账号创建成功');
     } catch (error) {
@@ -281,14 +305,17 @@ export default function SystemScreen({
   };
 
   const openPermissionEditor = (user: BackendUserRecord) => {
-    const permissions = parseList(user.permissions_json) as Permission[];
+    const permissions = userEffectivePermissions(user);
+    const departmentScope = parseList(user.department_scope_json);
     setEditingUser(user);
     setEditForm({
       role_code: user.role_code,
       permissions,
-      department_scope: parseList(user.department_scope_json),
+      department_scope: departmentScope,
       department_can_view: Boolean(user.department_can_view),
       department_can_entry: Boolean(user.department_can_entry),
+      // 空部门范围在数据层表示“全部部门”：编辑已有账号时显式呈现，避免保存时被误判。
+      department_all: departmentScope.length === 0,
     });
     setEditDepartmentInput('');
     setUserMessage('');
@@ -348,6 +375,10 @@ export default function SystemScreen({
     }
     if (editForm.department_scope.length > 0 && !editForm.department_can_view && !editForm.department_can_entry) {
       setUserMessage('选择部门后至少勾选查看或录入权限');
+      return;
+    }
+    if (needsExplicitDepartmentPolicy(editForm.permissions) && editForm.department_scope.length === 0 && !editForm.department_all) {
+      setUserMessage(IMPORT_REQUIRES_DEPARTMENT_MESSAGE);
       return;
     }
     try {
@@ -513,6 +544,22 @@ export default function SystemScreen({
                       />
                       <span>录入</span>
                     </label>
+                    <label className="inline-flex items-center gap-1.5">
+                      <input
+                        type="checkbox"
+                        checked={userForm.department_all}
+                        onChange={(event) => {
+                          const departmentAll = event.target.checked;
+                          setUserForm({
+                            ...userForm,
+                            department_all: departmentAll,
+                            department_scope: departmentAll ? [] : userForm.department_scope,
+                          });
+                          setUserMessage('');
+                        }}
+                      />
+                      <span>全部部门</span>
+                    </label>
                   </div>
                 </div>
                 {userForm.department_can_entry && !userForm.department_can_view && (
@@ -552,7 +599,15 @@ export default function SystemScreen({
                       </button>
                     </span>
                   ))}
-                  {userForm.department_scope.length === 0 && <span className="text-xs text-slate-400 py-1">未选择时默认全部部门</span>}
+                  {userForm.department_scope.length === 0 && (
+                    <span className="text-xs text-slate-400 py-1">
+                      {userForm.department_all
+                        ? '已勾选“全部部门”'
+                        : needsExplicitDepartmentPolicy(userForm.permissions)
+                          ? IMPORT_REQUIRES_DEPARTMENT_MESSAGE
+                          : '未选择时默认全部部门'}
+                    </span>
+                  )}
                 </div>
               </div>
               <button type="submit" className="w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold">创建账号</button>
@@ -577,9 +632,9 @@ export default function SystemScreen({
                     <tr key={user.id} className="text-xs text-slate-700">
                       <td className="px-4 py-2 font-mono text-blue-600">{user.username}</td>
                       <td className="px-4 py-2 font-semibold">{user.display_name}</td>
-                      <td className="px-4 py-2">{ROLE_LABELS[user.role_code as RoleCode] || user.role_code}</td>
+                      <td className="px-4 py-2">{permissionRoleLabel(userEffectivePermissions(user))}</td>
                       <td className="px-4 py-2">
-                        {parseList(user.permissions_json).map((permission) => PERMISSION_LABELS[permission as Permission] || permission).join('、') || '无'}
+                        {userEffectivePermissions(user).map((permission) => PERMISSION_LABELS[permission] || permission).join('、') || '无'}
                       </td>
                       <td className="px-4 py-2">
                         {parseList(user.department_scope_json).join('、') || '全部部门'}
@@ -666,10 +721,10 @@ export default function SystemScreen({
                   <tr key={user.id} className="text-xs text-slate-700">
                     <td className="px-4 py-3 font-mono text-slate-600">{user.username}</td>
                     <td className="px-4 py-3 font-semibold">{user.display_name}</td>
-                    <td className="px-4 py-3">{ROLE_LABELS[user.role_code as RoleCode] || user.role_code}</td>
+                    <td className="px-4 py-3">{permissionRoleLabel(userEffectivePermissions(user))}</td>
                     <td className="px-4 py-3">
-                      {parseList(user.permissions_json)
-                        .map((permission) => PERMISSION_LABELS[permission as Permission] || permission)
+                      {userEffectivePermissions(user)
+                        .map((permission) => PERMISSION_LABELS[permission] || permission)
                         .join('、') || '无'}
                     </td>
                     <td className="px-4 py-3 font-mono text-slate-400">{formatDateTime(user.updated_at)}</td>
@@ -846,6 +901,22 @@ export default function SystemScreen({
                       />
                       <span>录入</span>
                     </label>
+                    <label className="inline-flex items-center gap-1.5">
+                      <input
+                        type="checkbox"
+                        checked={editForm.department_all}
+                        onChange={(event) => {
+                          const departmentAll = event.target.checked;
+                          setEditForm({
+                            ...editForm,
+                            department_all: departmentAll,
+                            department_scope: departmentAll ? [] : editForm.department_scope,
+                          });
+                          setUserMessage('');
+                        }}
+                      />
+                      <span>全部部门</span>
+                    </label>
                   </div>
                 </div>
                 {editForm.department_can_entry && !editForm.department_can_view && (
@@ -885,7 +956,15 @@ export default function SystemScreen({
                       </button>
                     </span>
                   ))}
-                  {editForm.department_scope.length === 0 && <span className="text-xs text-slate-400 py-1">未选择时默认全部部门</span>}
+                  {editForm.department_scope.length === 0 && (
+                    <span className="text-xs text-slate-400 py-1">
+                      {editForm.department_all
+                        ? '已勾选“全部部门”'
+                        : needsExplicitDepartmentPolicy(editForm.permissions)
+                          ? IMPORT_REQUIRES_DEPARTMENT_MESSAGE
+                          : '未选择时默认全部部门'}
+                    </span>
+                  )}
                 </div>
               </div>
             </div>
