@@ -17,6 +17,7 @@ from ..ledger_excel import (
 )
 from ..serializers import clean_row, clean_rows
 from ..validation import BusinessDate, Money, Ratio
+from ..write_guard import business_write
 
 router = APIRouter(prefix="/api/sales", tags=["sales"])
 
@@ -201,7 +202,7 @@ def update_sales_batch(
 
     prepared: list[tuple[int, dict[str, object], dict[str, object], dict[str, object]]] = []
     close_status_by_order: dict[int, str | None] = {}
-    with db() as conn:
+    with business_write() as conn:
         for item in payload.items:
             order_line = _ensure_order_line_in_conn(conn, item.order_line_id, user, lock=True)
             data = _payload_dict(item)
@@ -420,7 +421,7 @@ def add_sales_contract(
     user: CurrentUser = Depends(require_permission("sales_entry")),
 ) -> dict:
     _ensure_order_line(order_line_id, user, require_entry=True)
-    with db() as conn:
+    with business_write() as conn:
         result = conn.execute(
             text(
                 """
@@ -451,7 +452,7 @@ def update_sales_contract(
     user: CurrentUser = Depends(require_permission("sales_edit")),
 ) -> dict:
     order_line_id = _ensure_detail_record("sales_contract", contract_id, user, require_entry=True)
-    with db() as conn:
+    with business_write() as conn:
         before = _record_snapshot(conn, "sales_contract", contract_id)
         conn.execute(
             text(
@@ -492,7 +493,7 @@ def add_sales_invoice(
     user: CurrentUser = Depends(require_permission("sales_entry")),
 ) -> dict:
     _ensure_order_line(order_line_id, user, require_entry=True)
-    with db() as conn:
+    with business_write() as conn:
         phase_no = _next_phase(conn, "sales_invoice", order_line_id)
         result = conn.execute(
             text(
@@ -524,7 +525,7 @@ def update_sales_invoice(
     user: CurrentUser = Depends(require_permission("sales_edit")),
 ) -> dict:
     order_line_id = _ensure_detail_record("sales_invoice", invoice_id, user, require_entry=True)
-    with db() as conn:
+    with business_write() as conn:
         before = _record_snapshot(conn, "sales_invoice", invoice_id)
         conn.execute(
             text(
@@ -566,7 +567,7 @@ def add_sales_receipt(
     user: CurrentUser = Depends(require_permission("sales_entry")),
 ) -> dict:
     _ensure_order_line(order_line_id, user, require_entry=True)
-    with db() as conn:
+    with business_write() as conn:
         phase_no = _next_phase(conn, "sales_receipt", order_line_id)
         _validate_receipt_total(conn, order_line_id, payload.receipt_amount)
         result = conn.execute(
@@ -598,7 +599,7 @@ def update_sales_receipt(
     user: CurrentUser = Depends(require_permission("sales_edit")),
 ) -> dict:
     order_line_id = _ensure_detail_record("sales_receipt", receipt_id, user, require_entry=True)
-    with db() as conn:
+    with business_write() as conn:
         before = _record_snapshot(conn, "sales_receipt", receipt_id)
         _validate_receipt_total(conn, order_line_id, payload.receipt_amount, receipt_id)
         conn.execute(
@@ -630,7 +631,7 @@ def delete_sales_receipt(
 ) -> dict:
     order_line_id = _ensure_detail_record("sales_receipt", receipt_id, user, require_entry=True)
     _soft_delete_detail("sales_receipt", receipt_id, user, "delete_sales_receipt", "销售回款")
-    with db() as conn:
+    with business_write() as conn:
         _sync_close_status(conn, order_line_id)
     return get_sales_detail(order_line_id, user)
 
@@ -930,7 +931,7 @@ def _ensure_detail_record(table_name: str, record_id: int, user: CurrentUser, re
 
 
 def _soft_delete_detail(table_name: str, record_id: int, user: CurrentUser, action_name: str, label: str) -> None:
-    with db() as conn:
+    with business_write() as conn:
         before = _record_snapshot(conn, table_name, record_id)
         conn.execute(text(f"UPDATE {table_name} SET deleted_at = CURRENT_TIMESTAMP WHERE id = :record_id"), {"record_id": record_id})
         write_operation_log(conn, user, "销售管理", action_name, f"删除{label} {record_id}", before=before)

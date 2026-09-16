@@ -28,6 +28,8 @@ ALL_PERMISSIONS = {
     "sales_edit",
     "sales_delete",
     "system_admin",
+    # 整表导入是独立权限点：能录订单不等于能一次性导入整份台账（含采购及销售财务数据）。
+    "ledger_import",
 }
 
 ROLE_PERMISSIONS: dict[str, set[Permission]] = {
@@ -169,6 +171,29 @@ def decode_access_token(token: str) -> dict:
     return payload
 
 
+def migrate_ledger_import_permission(conn) -> None:
+    """给原本已有 system_admin 的账号补上 ledger_import（可重复运行）。
+
+    只处理显式权限 JSON 的账号：
+    - 含 system_admin 且缺 ledger_import → 追加；
+    - 普通账号不隐式获权；
+    - permissions_json 为空（NULL）表示继承角色默认，保持不动，admin 角色本身已含新权限；
+    - 显式空数组 "[]" 保持为空，不改成继承角色默认。
+    """
+    rows = conn.execute(text("SELECT id, permissions_json FROM erp_user")).mappings().all()
+    for row in rows:
+        stored = row["permissions_json"]
+        if stored in (None, ""):
+            continue
+        permissions = parse_json_list(stored)
+        if "system_admin" not in permissions or "ledger_import" in permissions:
+            continue
+        conn.execute(
+            text("UPDATE erp_user SET permissions_json = :permissions_json WHERE id = :user_id"),
+            {"user_id": int(row["id"]), "permissions_json": encode_json_list(permissions + ["ledger_import"])},
+        )
+
+
 def ensure_default_admin() -> None:
     with db() as conn:
         _ensure_user_permission_columns(conn)
@@ -194,27 +219,28 @@ def ensure_default_admin() -> None:
                     "department_scope_json": encode_json_list([]),
                 },
             )
-            return
-        conn.execute(
-            text(
-                """
-                INSERT INTO erp_user
-                  (username, password_hash, display_name, role_code, permissions_json,
-                   department_scope_json, department_can_view, department_can_entry, is_active)
-                VALUES
-                  (:username, :password_hash, :display_name, :role_code, :permissions_json,
-                   :department_scope_json, 1, 1, 1)
-                """
-            ),
-            {
-                "username": "admin",
-                "password_hash": hash_password(settings.default_admin_password),
-                "display_name": "系统管理员",
-                "role_code": "admin",
-                "permissions_json": encode_json_list(sorted(ALL_PERMISSIONS)),
-                "department_scope_json": encode_json_list([]),
-            },
-        )
+        else:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO erp_user
+                      (username, password_hash, display_name, role_code, permissions_json,
+                       department_scope_json, department_can_view, department_can_entry, is_active)
+                    VALUES
+                      (:username, :password_hash, :display_name, :role_code, :permissions_json,
+                       :department_scope_json, 1, 1, 1)
+                    """
+                ),
+                {
+                    "username": "admin",
+                    "password_hash": hash_password(settings.default_admin_password),
+                    "display_name": "系统管理员",
+                    "role_code": "admin",
+                    "permissions_json": encode_json_list(sorted(ALL_PERMISSIONS)),
+                    "department_scope_json": encode_json_list([]),
+                },
+            )
+        migrate_ledger_import_permission(conn)
 
 
 def current_user_from_token(token: str) -> CurrentUser:

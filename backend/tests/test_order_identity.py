@@ -6,8 +6,11 @@ from fastapi import HTTPException
 from app.routers.orders import OrderUpdate, _validate_batch_create_targets
 
 LINE_TABLE = (
-    'CREATE TABLE order_line (id INTEGER, sales_order_id INTEGER, project_name TEXT, goods_name TEXT,'
-    ' specification_model TEXT, quantity NUMERIC, sales_unit_price NUMERIC, deleted_at TEXT)'
+    'CREATE TABLE order_line (id INTEGER, sales_order_id INTEGER, sub_project_id INTEGER, project_name TEXT,'
+    ' goods_name TEXT, specification_model TEXT, quantity NUMERIC, sales_unit_price NUMERIC, deleted_at TEXT)'
+)
+SUB_PROJECT_TABLE = (
+    'CREATE TABLE sub_project (id INTEGER, sales_order_id INTEGER, name TEXT, deleted_at TEXT)'
 )
 PURCHASE_TABLE = (
     'CREATE TABLE purchase_info (id INTEGER, order_line_id INTEGER, supplier_name TEXT, deleted_at TEXT)'
@@ -67,14 +70,19 @@ def _line_engine(quantity=740, sales_unit_price=2.26, spec=None, supplier='天�
     with engine.begin() as conn:
         conn.execute(text('CREATE TABLE project (id INTEGER, project_code TEXT, project_name TEXT, deleted_at TEXT)'))
         conn.execute(text('CREATE TABLE sales_order (id INTEGER, project_id INTEGER, order_no TEXT, deleted_at TEXT)'))
+        conn.execute(text(SUB_PROJECT_TABLE))
         conn.execute(text(LINE_TABLE))
         conn.execute(text(PURCHASE_TABLE))
         conn.execute(text("INSERT INTO project VALUES (1, 'P1', '项目甲', NULL)"))
         conn.execute(text("INSERT INTO sales_order VALUES (1, 1, 'O1', NULL)"))
+        # 同一订单下的两个子项目：客户单位等属于子项目，可以各自不同。
+        conn.execute(text("INSERT INTO sub_project VALUES (1, 1, '项目甲', NULL)"))
+        conn.execute(text("INSERT INTO sub_project VALUES (2, 1, '项目乙', NULL)"))
         conn.execute(
             text(
-                'INSERT INTO order_line (id, sales_order_id, project_name, goods_name, specification_model,'
-                ' quantity, sales_unit_price, deleted_at) VALUES (1, 1, :name, :goods, :spec, :quantity, :price, NULL)'
+                'INSERT INTO order_line (id, sales_order_id, sub_project_id, project_name, goods_name,'
+                ' specification_model, quantity, sales_unit_price, deleted_at)'
+                ' VALUES (1, 1, 1, :name, :goods, :spec, :quantity, :price, NULL)'
             ),
             {'name': '项目甲', 'goods': '设备', 'spec': spec, 'quantity': quantity, 'price': sales_unit_price},
         )
@@ -86,38 +94,39 @@ def _line_engine(quantity=740, sales_unit_price=2.26, spec=None, supplier='天�
 
 
 @pytest.mark.parametrize('spec', [None, '', '型号A'])
-def test_import_duplicate_query_uses_project_name_and_ignores_deleted(spec):
+def test_import_duplicate_query_is_scoped_to_one_sub_project(spec):
+    """判重限定在同一子项目内；换一个子项目，五项完全相同也是合法明细。"""
     conn = _line_engine(spec=spec)
     with conn:
-        assert _order_line_exists(conn, 'P1', 'O1', '设备', spec, '项目甲', 740, 2.26, '天翼电信终端有限公司安徽分公司')
-        assert not _order_line_exists(conn, 'P1', 'O1', '设备', spec, '项目乙', 740, 2.26, '天翼电信终端有限公司安徽分公司')
+        assert _order_line_exists(conn, 1, '设备', spec, 740, 2.26, '天翼电信终端有限公司安徽分公司')
+        assert not _order_line_exists(conn, 2, '设备', spec, 740, 2.26, '天翼电信终端有限公司安徽分公司')
         conn.execute(text("UPDATE order_line SET deleted_at = '2026-09-14'"))
-        assert not _order_line_exists(conn, 'P1', 'O1', '设备', spec, '项目甲', 740, 2.26, '天翼电信终端有限公司安徽分公司')
+        assert not _order_line_exists(conn, 1, '设备', spec, 740, 2.26, '天翼电信终端有限公司安徽分公司')
 
 
 def test_import_duplicate_query_distinguishes_quantity_and_price():
     conn = _line_engine()
     with conn:
-        assert not _order_line_exists(conn, 'P1', 'O1', '设备', None, '项目甲', 1, 2.26, '天翼电信终端有限公司安徽分公司')
-        assert not _order_line_exists(conn, 'P1', 'O1', '设备', None, '项目甲', 740, 1.80, '天翼电信终端有限公司安徽分公司')
-        assert _order_line_exists(conn, 'P1', 'O1', '设备', None, '项目甲', 740, 2.26, '天翼电信终端有限公司安徽分公司')
+        assert not _order_line_exists(conn, 1, '设备', None, 1, 2.26, '天翼电信终端有限公司安徽分公司')
+        assert not _order_line_exists(conn, 1, '设备', None, 740, 1.80, '天翼电信终端有限公司安徽分公司')
+        assert _order_line_exists(conn, 1, '设备', None, 740, 2.26, '天翼电信终端有限公司安徽分公司')
 
 
 def test_import_duplicate_query_distinguishes_supplier():
     conn = _line_engine()
     with conn:
-        assert _order_line_exists(conn, 'P1', 'O1', '设备', None, '项目甲', 740, 2.26, '天翼电信终端有限公司安徽分公司')
-        assert not _order_line_exists(conn, 'P1', 'O1', '设备', None, '项目甲', 740, 2.26, '安徽恒米科技有限公司')
-        assert not _order_line_exists(conn, 'P1', 'O1', '设备', None, '项目甲', 740, 2.26, None)
-        assert _order_line_exists(conn, 'P1', 'O1', '设备', None, '项目甲', 740, 2.26, ' 天翼电信终端有限公司安徽分公司 ')
+        assert _order_line_exists(conn, 1, '设备', None, 740, 2.26, '天翼电信终端有限公司安徽分公司')
+        assert not _order_line_exists(conn, 1, '设备', None, 740, 2.26, '安徽恒米科技有限公司')
+        assert not _order_line_exists(conn, 1, '设备', None, 740, 2.26, None)
+        assert _order_line_exists(conn, 1, '设备', None, 740, 2.26, ' 天翼电信终端有限公司安徽分公司 ')
 
 
 def test_import_duplicate_query_treats_blank_and_zero_as_equal():
     conn = _line_engine(quantity=None, sales_unit_price=None, supplier=None)
     with conn:
-        assert _order_line_exists(conn, 'P1', 'O1', '设备', None, '项目甲', None, None, None)
-        assert _order_line_exists(conn, 'P1', 'O1', '设备', None, '项目甲', 0, 0, None)
-        assert not _order_line_exists(conn, 'P1', 'O1', '设备', None, '项目甲', 740, 0, None)
+        assert _order_line_exists(conn, 1, '设备', None, None, None, None)
+        assert _order_line_exists(conn, 1, '设备', None, 0, 0, None)
+        assert not _order_line_exists(conn, 1, '设备', None, 740, 0, None)
 
 
 def _batch_conn(line_rows: str, purchase_rows: str = ''):

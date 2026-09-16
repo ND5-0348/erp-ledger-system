@@ -465,6 +465,7 @@ export default function App() {
   const canEditSales = hasPermission(currentUser, 'sales_edit');
   const canDeleteSales = hasPermission(currentUser, 'sales_delete');
   const canManageSystem = hasPermission(currentUser, 'system_admin');
+  const canImportLedger = hasPermission(currentUser, 'ledger_import');
 
   return (
     <div className="min-h-screen bg-[#F3F4F6] flex font-sans text-slate-900 select-none overflow-hidden">
@@ -622,6 +623,7 @@ export default function App() {
               canEnterOrders={canEnterOrders}
               canEditOrders={canEditOrders}
               canDeleteOrders={canDeleteOrders}
+              canImportLedger={canImportLedger}
             />
           )}
           {currentScreen === 'purchases' && <PurchasesScreen purchases={purchases} orders={orders} canEnterPurchases={canEnterPurchases} canEditPurchases={canEditPurchases} canDeletePurchases={canDeletePurchases} onRefresh={loadBackendData} />}

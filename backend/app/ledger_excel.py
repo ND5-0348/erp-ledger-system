@@ -191,7 +191,7 @@ def export_ledger_bytes(
         "project_id": ("p.project_code", True),
         "department": ("p.department", False),
         "manager": ("p.account_manager", True),
-        "client_unit": ("p.customer_unit_name", True),
+        "client_unit": ("sp.customer_unit_name", True),
     }
     for key, (column, use_like) in project_text_filters.items():
         value = active_filters.get(key)
@@ -502,7 +502,7 @@ def _export_sql(where_sql: str) -> str:
           ol.id AS order_line_id,
           so.gross_net_type, p.project_code, p.department, p.branch_company, p.account_manager,
           so.order_date, so.business_type, so.statistic_category, p.team_level3_name,
-          p.customer_unit_name, p.end_user_name, p.regional_platform, so.order_no,
+          sp.customer_unit_name, sp.end_user_name, sp.regional_platform, so.order_no,
           COALESCE(ol.project_name, p.project_name) AS project_name,
           ol.goods_name, ol.specification_model, ol.unit_name, ol.quantity, ol.sales_tax_rate,
           ol.sales_unit_price_no_tax, ol.sales_unit_price, ol.revenue_no_tax, ol.order_value,
@@ -548,6 +548,7 @@ def _export_sql(where_sql: str) -> str:
         FROM project p
         JOIN sales_order so ON so.project_id = p.id
         JOIN order_line ol ON ol.sales_order_id = so.id
+        LEFT JOIN sub_project sp ON sp.id = ol.sub_project_id AND sp.deleted_at IS NULL
         LEFT JOIN purchase_info pi ON pi.order_line_id = ol.id AND pi.deleted_at IS NULL
         LEFT JOIN delivery_record dr ON dr.id = (
           SELECT MIN(dr0.id) FROM delivery_record dr0 WHERE dr0.order_line_id = ol.id AND dr0.deleted_at IS NULL

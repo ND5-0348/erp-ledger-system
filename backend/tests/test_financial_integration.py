@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import os
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from decimal import Decimal
@@ -13,10 +13,10 @@ from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 from sqlalchemy import text
 
-from app.auth import ALL_PERMISSIONS, CurrentUser, ensure_default_admin
+from conftest import TEST_PASSWORD
+from app.auth import ALL_PERMISSIONS, CurrentUser
 from app.config import ROOT_DIR, settings
-from app.db import _split_sql, db, engine, server_engine
-from app.main import app
+from app.db import db
 from app.ledger_excel import (
     EDITABLE_ORDER_KEYS,
     PURCHASE_EDITABLE_COLUMN_NUMBERS,
@@ -29,64 +29,8 @@ from app.ledger_excel import (
 )
 from app.routers import purchases
 
-TEST_DATABASE_PREFIX = "erp_ledger_test_"
-TEST_PASSWORD = "Integration-Test-20260714!"
-
-
-def _test_database_name() -> str:
-    name = settings.mysql_database
-    if not name.startswith(TEST_DATABASE_PREFIX):
-        raise RuntimeError(f"Set MYSQL_DATABASE to a name beginning with {TEST_DATABASE_PREFIX!r}.")
-    return name
-
-
-def _initialize_schema() -> None:
-    database = _test_database_name()
-    schema = (ROOT_DIR / "docs" / "erp_ledger_schema.sql").read_text(encoding="utf-8")
-    with server_engine.begin() as conn:
-        for statement in _split_sql(schema.replace("erp_ledger", database)):
-            conn.execute(text(statement))
-    ensure_default_admin()
-
-
-def _clear_business_data() -> None:
-    tables = (
-        "sales_receipt", "sales_invoice", "sales_contract", "purchase_payment", "finance_payment_entry",
-        "finance_invoice_check", "warehouse_entry", "purchase_invoice",
-        "purchase_contract", "delivery_record", "purchase_info", "order_line",
-        "sales_order", "ledger_raw_row", "project", "import_batch",
-        "backup_record", "operation_log",
-    )
-    with db() as conn:
-        for table in tables:
-            conn.execute(text(f"DELETE FROM `{table}`"))
-
-
-@pytest.fixture(scope="session", autouse=True)
-def test_database() -> None:
-    database = _test_database_name()
-    _initialize_schema()
-    yield
-    engine.dispose()
-    with server_engine.begin() as conn:
-        conn.execute(text(f"DROP DATABASE IF EXISTS `{database}`"))
-
-
-@pytest.fixture(autouse=True)
-def clean_database() -> None:
-    _clear_business_data()
-
-
-@pytest.fixture
-def client() -> TestClient:
-    return TestClient(app, raise_server_exceptions=False)
-
-
-@pytest.fixture
-def headers(client: TestClient) -> dict[str, str]:
-    response = client.post("/api/auth/login", json={"username": "admin", "password": TEST_PASSWORD})
-    assert response.status_code == 200, response.text
-    return {"Authorization": f"Bearer {response.json()['access_token']}"}
+# 建库、清库、client、headers 等夹具统一在 backend/tests/conftest.py，
+# 该文件负责拒绝业务库名与业务备份目录。
 
 
 def _payload(suffix: str) -> dict[str, str]:
@@ -980,7 +924,8 @@ def test_excel_template_import_export_round_trip(client: TestClient, headers: di
             "password": "Excel-Scope-Test-20260721!",
             "display_name": "Excel Scope User",
             "role_code": "order_entry",
-            "permissions": ["order_entry"],
+            # 导入需要独立的 ledger_import 权限；这里给到权限后再验证部门边界仍然生效。
+            "permissions": ["order_entry", "ledger_import"],
             "department_scope": ["OTHER"],
             "department_can_view": True,
             "department_can_entry": True,

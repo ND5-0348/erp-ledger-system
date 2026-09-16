@@ -309,6 +309,8 @@ export interface BackendUserRecord {
   display_name: string;
   role_code: string;
   permissions_json: string[] | string | null;
+  /** 实际生效的权限（permissions_json 为空时由后端按角色默认权限补齐）。 */
+  effective_permissions?: string[];
   department_scope_json: string[] | string | null;
   department_can_view: number | boolean;
   department_can_entry: number | boolean;
@@ -381,13 +383,24 @@ async function ensureSuccessfulResponse(response: Response) {
   throw new ApiError(response.status, message);
 }
 
-function parseErrorMessage(body: string) {
+export function parseErrorMessage(body: string) {
   if (!body) {
     return '';
   }
   try {
     const parsed = JSON.parse(body) as { detail?: unknown };
-    return typeof parsed.detail === 'string' ? parsed.detail : body;
+    if (typeof parsed.detail === 'string') {
+      return parsed.detail;
+    }
+    // 结构化错误：写入忙（409 BUSINESS_WRITE_BUSY）等返回 {code, message}，
+    // 直接展示 message，不要把整个 JSON 丢给用户。
+    if (parsed.detail && typeof parsed.detail === 'object') {
+      const detail = parsed.detail as { message?: unknown };
+      if (typeof detail.message === 'string' && detail.message) {
+        return detail.message;
+      }
+    }
+    return body;
   } catch {
     return body;
   }
@@ -423,6 +436,7 @@ export const api = {
     department_scope: string[];
     department_can_view: boolean;
     department_can_entry: boolean;
+    department_all: boolean;
   }) =>
     request<{ items: BackendUserRecord[] }>('/auth/users', { method: 'POST', body: JSON.stringify(data) }),
   updateUserPermissions: (
@@ -433,6 +447,7 @@ export const api = {
       department_scope: string[];
       department_can_view: boolean;
       department_can_entry: boolean;
+      department_all: boolean;
     },
   ) => request<{ items: BackendUserRecord[] }>(`/auth/users/${userId}`, { method: 'PUT', body: JSON.stringify(data) }),
   resetUserPassword: (userId: number, password: string) =>

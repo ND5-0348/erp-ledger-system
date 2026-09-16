@@ -6,10 +6,8 @@ import {
   Calendar,
   CheckCircle2,
   Filter,
-  Minus,
   RefreshCw,
   ShoppingCart,
-  TrendingDown,
   TrendingUp,
   Wallet,
 } from 'lucide-react';
@@ -94,12 +92,12 @@ export default function DashboardScreen({ logs, ledgers, orders, onNavigate }: D
   const maxRankingAmount = Math.max(...salesRanking.map((item) => item.amount), 1);
 
   const metrics = [
-    { label: '销售订单总金额', value: compactMoney(dashboardMetrics.totalOrderAmount), icon: Wallet, trend: '实时', trendType: 'up' },
-    { label: '毛利润', value: compactMoney(dashboardMetrics.grossProfit), icon: TrendingUp, trend: '实时', trendType: 'up' },
-    { label: '订单总数', value: `${dashboardMetrics.orderCount.toLocaleString('zh-CN')} 个`, icon: ShoppingCart, trend: '实时', trendType: 'up' },
-    { label: '应收账款', value: compactMoney(dashboardMetrics.accountsReceivable), icon: ArrowDownLeft, trend: '实时', trendType: 'down' },
-    { label: '应付账款', value: compactMoney(dashboardMetrics.accountsPayable), icon: ArrowUpRight, trend: '实时', trendType: 'flat' },
-    { label: '已关闭订单', value: `${dashboardMetrics.closedCount.toLocaleString('zh-CN')} 个`, icon: CheckCircle2, trend: '实时', trendType: 'up' },
+    { label: '销售订单总金额', value: compactMoney(dashboardMetrics.totalOrderAmount), icon: Wallet },
+    { label: '毛利润', value: compactMoney(dashboardMetrics.grossProfit), icon: TrendingUp },
+    { label: '订单总数', value: `${dashboardMetrics.orderCount.toLocaleString('zh-CN')} 个`, icon: ShoppingCart },
+    { label: '应收账款', value: compactMoney(dashboardMetrics.accountsReceivable), icon: ArrowDownLeft },
+    { label: '应付账款', value: compactMoney(dashboardMetrics.accountsPayable), icon: ArrowUpRight },
+    { label: '已关闭订单', value: `${dashboardMetrics.closedCount.toLocaleString('zh-CN')} 个`, icon: CheckCircle2 },
   ] as const;
 
   return (
@@ -171,20 +169,6 @@ export default function DashboardScreen({ logs, ledgers, orders, onNavigate }: D
                 </div>
               </div>
               <div className="text-xl font-bold text-slate-900 tracking-tight font-sans">{metric.value}</div>
-              <div
-                className={`text-xs flex items-center mt-2 font-sans font-medium ${
-                  metric.trendType === 'down' ? 'text-emerald-600' : metric.trendType === 'flat' ? 'text-slate-400' : 'text-rose-600'
-                }`}
-              >
-                {metric.trendType === 'down' ? (
-                  <TrendingDown className="w-3.5 h-3.5 mr-0.5" />
-                ) : metric.trendType === 'flat' ? (
-                  <Minus className="w-3.5 h-3.5 mr-0.5" />
-                ) : (
-                  <TrendingUp className="w-3.5 h-3.5 mr-0.5" />
-                )}
-                <span>{metric.trend}</span>
-              </div>
             </div>
           );
         })}

@@ -35,6 +35,7 @@ PERMISSION_LABELS_CN = {
     "sales_edit": "销售信息修改",
     "sales_delete": "销售信息删除",
     "system_admin": "系统管理",
+    "ledger_import": "整表导入（含采购及销售财务数据）",
 }
 
 
@@ -80,6 +81,8 @@ class UserCreate(BaseModel):
     department_scope: list[str] = Field(default_factory=list)
     department_can_view: bool = False
     department_can_entry: bool = False
+    # 新建/修改导入账号时必须明确部门策略：空范围不能让“全部部门”被无声表达。
+    department_all: bool = False
 
 
 class UserPermissionUpdate(BaseModel):
@@ -88,6 +91,7 @@ class UserPermissionUpdate(BaseModel):
     department_scope: list[str] = Field(default_factory=list)
     department_can_view: bool = False
     department_can_entry: bool = False
+    department_all: bool = False
 
 
 class UserPasswordReset(BaseModel):
@@ -106,6 +110,25 @@ def _validate_department_permissions(
         )
     if department_scope and not (department_can_view or department_can_entry):
         raise HTTPException(status_code=400, detail="选择部门后至少需要勾选查看或录入权限")
+
+
+def _validate_import_department_policy(
+    permissions: list[str],
+    department_scope: list[str],
+    department_all: bool,
+) -> None:
+    """非管理员的整表导入账号必须有明确的部门策略。
+
+    空部门范围在数据层表示“全部部门”，这是历史语义，继续兼容；
+    但配置界面必须显式勾选“全部部门”，避免空列表被无声当成全部权限。
+    """
+    if "ledger_import" not in permissions or "system_admin" in permissions:
+        return
+    if not department_scope and not department_all:
+        raise HTTPException(
+            status_code=400,
+            detail="整表导入账号必须选择部门范围；如需全部部门的导入权限，请显式勾选“全部部门”",
+        )
 
 
 @router.post("/login")
@@ -176,7 +199,19 @@ def _list_users(status: str) -> dict:
             ),
             {"is_active": is_active},
         ).mappings().all()
-    return {"items": clean_rows(rows)}
+    # permissions_json 为空表示继承角色默认权限。界面必须看到实际生效的权限，
+    # 否则老账号会被显示成“无权限”，与实际不符。
+    items = [
+        {
+            **row,
+            "effective_permissions": normalize_permissions(
+                str(row["role_code"]),
+                parse_json_list(row["permissions_json"]) if row["permissions_json"] else None,
+            ),
+        }
+        for row in rows
+    ]
+    return {"items": clean_rows(items)}
 
 
 @router.get("/users")
@@ -198,6 +233,7 @@ def create_user(payload: UserCreate, admin: CurrentUser = Depends(require_permis
         payload.department_can_view,
         payload.department_can_entry,
     )
+    _validate_import_department_policy(permissions, department_scope, payload.department_all)
     with db() as conn:
         exists = conn.execute(
             text("SELECT 1 FROM erp_user WHERE username = :username"),
@@ -263,6 +299,7 @@ def update_user_permissions(
         payload.department_can_view,
         payload.department_can_entry,
     )
+    _validate_import_department_policy(permissions, department_scope, payload.department_all)
     with db() as conn:
         target = conn.execute(
             text(

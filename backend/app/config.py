@@ -10,9 +10,12 @@ from dotenv import load_dotenv
 ROOT_DIR = Path(__file__).resolve().parents[2]
 BACKEND_DIR = ROOT_DIR / "backend"
 DOCS_DIR = ROOT_DIR / "docs"
-BACKUP_DIR = BACKEND_DIR / "backups"
 
 load_dotenv(BACKEND_DIR / ".env")
+
+# 应用业务备份目录。默认仍是 backend/backups（保持既有备份可读）；
+# 测试环境通过 BACKUP_ROOT 指向系统临时目录，避免测试产生的备份混进业务目录。
+BACKUP_DIR = Path(os.getenv("BACKUP_ROOT") or (BACKEND_DIR / "backups"))
 
 
 @dataclass(frozen=True)

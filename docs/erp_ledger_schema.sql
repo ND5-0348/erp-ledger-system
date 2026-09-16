@@ -149,9 +149,90 @@ CREATE TABLE IF NOT EXISTS sales_order (
   CONSTRAINT fk_sales_order_import_batch FOREIGN KEY (import_batch_id) REFERENCES import_batch(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
+-- 预检会话：临时数据，不属于业务备份清单；到期可清理。
+CREATE TABLE IF NOT EXISTS legacy_import_session (
+  id VARCHAR(64) NOT NULL,
+  created_by BIGINT UNSIGNED NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  expires_at DATETIME NULL,
+  mode VARCHAR(32) NOT NULL DEFAULT 'legacy_multi_value',
+  source_file_name VARCHAR(255) NOT NULL,
+  source_sha256 CHAR(64) NOT NULL,
+  parser_version VARCHAR(32) NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'pending',
+  summary_json JSON NULL,
+  result_json JSON NULL,
+  committed_at DATETIME NULL,
+  PRIMARY KEY (id),
+  KEY idx_legacy_session_owner (created_by, status),
+  KEY idx_legacy_session_expiry (status, expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- 逐行解析与人工确认来源。原始值只存库，不进日志、不进 Git。
+CREATE TABLE IF NOT EXISTS legacy_import_source (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  session_id VARCHAR(64) NOT NULL,
+  sheet_name VARCHAR(128) NULL,
+  excel_row_no INT NOT NULL,
+  raw_json JSON NULL,
+  parsed_json JSON NULL,
+  resolution_json JSON NULL,
+  resolved_by BIGINT UNSIGNED NULL,
+  resolved_at DATETIME NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_legacy_source_row (session_id, excel_row_no),
+  CONSTRAINT fk_legacy_source_session FOREIGN KEY (session_id) REFERENCES legacy_import_session(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE IF NOT EXISTS project_manager_history (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  project_id BIGINT UNSIGNED NOT NULL,
+  manager_name VARCHAR(64) NOT NULL,
+  history_order INT NOT NULL,
+  effective_from DATE NULL,
+  source VARCHAR(32) NOT NULL DEFAULT 'legacy_import',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  -- 唯一键用 (项目, 顺序)：允许同一个人重复任职（甲→乙→甲 有两条“甲”）
+  UNIQUE KEY uk_manager_history_order (project_id, history_order),
+  KEY idx_manager_history_name (manager_name),
+  CONSTRAINT fk_manager_history_project FOREIGN KEY (project_id) REFERENCES project(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE IF NOT EXISTS sales_order_number_history (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  sales_order_id BIGINT UNSIGNED NOT NULL,
+  order_no VARCHAR(64) NOT NULL,
+  history_order INT NOT NULL,
+  source VARCHAR(32) NOT NULL DEFAULT 'legacy_import',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_order_number_history_order (sales_order_id, history_order),
+  KEY idx_order_number_history_no (order_no),
+  CONSTRAINT fk_order_number_history_order FOREIGN KEY (sales_order_id) REFERENCES sales_order(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE IF NOT EXISTS sub_project (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  sales_order_id BIGINT UNSIGNED NOT NULL,
+  name VARCHAR(255) NOT NULL DEFAULT '',
+  customer_unit_name VARCHAR(255) NULL,
+  end_user_name VARCHAR(255) NULL,
+  regional_platform VARCHAR(128) NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  deleted_at DATETIME NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_sub_project_order_name (sales_order_id, name),
+  KEY idx_sub_project_customer (customer_unit_name),
+  CONSTRAINT fk_sub_project_sales_order FOREIGN KEY (sales_order_id) REFERENCES sales_order(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
 CREATE TABLE IF NOT EXISTS order_line (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   sales_order_id BIGINT UNSIGNED NOT NULL,
+  sub_project_id BIGINT UNSIGNED NULL,
   raw_row_id BIGINT UNSIGNED NULL,
   source_excel_row_no INT NULL,
   project_name VARCHAR(255) NULL,
@@ -169,10 +250,12 @@ CREATE TABLE IF NOT EXISTS order_line (
   deleted_at DATETIME NULL,
   PRIMARY KEY (id),
   KEY idx_order_line_order (sales_order_id),
+  KEY idx_order_line_sub_project (sub_project_id),
   KEY idx_order_line_raw (raw_row_id),
   KEY idx_order_line_goods (goods_name),
   KEY idx_order_line_value (order_value),
   CONSTRAINT fk_order_line_sales_order FOREIGN KEY (sales_order_id) REFERENCES sales_order(id),
+  CONSTRAINT fk_order_line_sub_project FOREIGN KEY (sub_project_id) REFERENCES sub_project(id),
   CONSTRAINT fk_order_line_raw_row FOREIGN KEY (raw_row_id) REFERENCES ledger_raw_row(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
@@ -413,9 +496,9 @@ SELECT
   so.order_date,
   so.business_type,
   so.statistic_category,
-  p.customer_unit_name,
-  p.end_user_name,
-  p.regional_platform,
+  sp.customer_unit_name,
+  sp.end_user_name,
+  sp.regional_platform,
   COALESCE(ol.project_name, p.project_name) AS project_name,
   GREATEST(
     p.updated_at,
@@ -483,6 +566,9 @@ SELECT
 FROM project p
 JOIN sales_order so ON so.project_id = p.id AND so.deleted_at IS NULL
 JOIN order_line ol ON ol.sales_order_id = so.id AND ol.deleted_at IS NULL
+-- 客户单位/最终用户/区域平台属于子项目层级：同一框架下不同子项目可以有不同值，
+-- 必须从 sub_project 取，不能再用框架项目上的值（那是串值）。
+LEFT JOIN sub_project sp ON sp.id = ol.sub_project_id AND sp.deleted_at IS NULL
 LEFT JOIN purchase_info pi ON pi.order_line_id = ol.id AND pi.deleted_at IS NULL
 LEFT JOIN delivery_record dr ON dr.order_line_id = ol.id AND dr.deleted_at IS NULL
 LEFT JOIN (
@@ -549,7 +635,11 @@ SELECT
   p.department,
   p.branch_company,
   p.account_manager,
-  p.customer_unit_name,
+  -- 框架下的客户单位属于子项目：多值时明确显示“多个”，不用某一个子项目的值冒充框架统一值。
+  CASE
+    WHEN COUNT(DISTINCT v.customer_unit_name) > 1 THEN '多个'
+    ELSE MAX(v.customer_unit_name)
+  END AS customer_unit_name,
   MIN(v.order_date) AS first_order_date,
   MAX(v.order_date) AS last_order_date,
   COUNT(DISTINCT v.order_no) AS order_count,
@@ -568,7 +658,7 @@ SELECT
 FROM project p
 LEFT JOIN v_order_line_finance v ON v.project_code = p.project_code
 WHERE p.deleted_at IS NULL
-GROUP BY p.project_code, p.project_name, p.department, p.branch_company, p.account_manager, p.customer_unit_name;
+GROUP BY p.project_code, p.project_name, p.department, p.branch_company, p.account_manager;
 
 DROP VIEW IF EXISTS v_order_ledger_summary;
 CREATE VIEW v_order_ledger_summary AS
@@ -579,7 +669,11 @@ SELECT
   v.department,
   v.branch_company,
   v.account_manager,
-  v.customer_unit_name,
+  -- 同订单下不同子项目客户单位可以不同：多值时显示“多个”，避免冒充订单统一值。
+  CASE
+    WHEN COUNT(DISTINCT v.customer_unit_name) > 1 THEN '多个'
+    ELSE MAX(v.customer_unit_name)
+  END AS customer_unit_name,
   v.order_date,
   v.business_type,
   v.statistic_category,
@@ -598,4 +692,4 @@ SELECT
   SUM(COALESCE(v.gross_profit, 0)) AS gross_profit
 FROM v_order_line_finance v
 GROUP BY v.project_code, v.order_no, v.department, v.branch_company, v.account_manager,
-  v.customer_unit_name, v.order_date, v.business_type, v.statistic_category, v.close_status;
+  v.order_date, v.business_type, v.statistic_category, v.close_status;

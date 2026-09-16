@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
+from typing import Any
 from zipfile import BadZipFile
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -9,12 +10,28 @@ from openpyxl.utils.exceptions import InvalidFileException
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import text
+from starlette.concurrency import run_in_threadpool
 
 from ..audit import write_batch_operation_log, write_operation_log
-from ..auth import CurrentUser, apply_department_scope, can_access_department, get_current_user, require_permission
+from ..auth import (
+    CurrentUser,
+    apply_department_scope,
+    can_access_department,
+    get_current_user,
+    has_permission,
+    require_permission,
+)
 from ..backup import create_backup
 from ..db import db
 from ..importer import import_excel
+from ..legacy_import_service import (
+    apply_resolutions as apply_preview_resolutions,
+    commit_session as commit_preview_session,
+    create_session as create_preview_session,
+    list_rows as list_preview_rows,
+    load_session as load_preview_session,
+    recompute_summary as recompute_preview_summary,
+)
 from ..ledger_excel import (
     EDITABLE_ORDER_KEYS,
     EXPORT_FILE_NAME,
@@ -29,6 +46,7 @@ from ..ledger_excel import (
 )
 from ..serializers import clean_row, clean_rows
 from ..validation import BusinessDate, Money, PreciseNumber, Ratio
+from ..write_guard import business_write
 
 router = APIRouter(prefix="/api/orders", tags=["orders"])
 
@@ -232,12 +250,12 @@ def list_orders(
                            p.branch_company,
                            p.account_manager,
                            p.team_level3_name,
-                           p.end_user_name,
-                           p.regional_platform,
+                           sp.end_user_name,
+                           sp.regional_platform,
                            so.order_date,
                            so.business_type,
                            so.statistic_category,
-                           p.customer_unit_name,
+                           sp.customer_unit_name,
                            COALESCE(ol.project_name, p.project_name) AS project_name,
                            finance.total_received,
                            finance.total_paid,
@@ -277,6 +295,7 @@ def list_orders(
                     FROM project p
                     JOIN sales_order so ON so.project_id = p.id AND so.deleted_at IS NULL
                     JOIN order_line ol ON ol.sales_order_id = so.id AND ol.deleted_at IS NULL
+                    LEFT JOIN sub_project sp ON sp.id = ol.sub_project_id AND sp.deleted_at IS NULL
                     LEFT JOIN purchase_info pi ON pi.order_line_id = ol.id AND pi.deleted_at IS NULL
                     LEFT JOIN delivery_record dr ON dr.order_line_id = ol.id AND dr.deleted_at IS NULL
                     LEFT JOIN v_order_line_finance finance ON finance.order_line_id = ol.id
@@ -299,7 +318,7 @@ def create_order_line(
 ) -> dict:
     _validate_create_payload(payload, user)
     try:
-        with db() as conn:
+        with business_write() as conn:
             order_line_id = _create_order_line(conn, payload)
             write_operation_log(
                 conn,
@@ -323,7 +342,7 @@ def create_order_lines_batch(
         _validate_create_payload(item, user)
     created_ids: list[int] = []
     try:
-        with db() as conn:
+        with business_write() as conn:
             for item in payload.items:
                 created_ids.append(_create_order_line(conn, item))
             write_operation_log(
@@ -404,33 +423,23 @@ def export_orders(
     )
 
 
-@router.post("/import-excel")
-async def import_orders_excel(
-    request: Request,
-    filename: str = Query("市场部业务台账.xlsx", max_length=255),
-    user: CurrentUser = Depends(require_permission("order_entry")),
-) -> dict:
-    if Path(filename).suffix.lower() != ".xlsx":
-        raise HTTPException(status_code=400, detail="仅支持 .xlsx 格式的业务台账文件")
-    content = await request.body()
-    if not content:
-        raise HTTPException(status_code=400, detail="上传文件为空")
-    if len(content) > MAX_IMPORT_BYTES:
-        raise HTTPException(status_code=413, detail="上传文件不能超过 20 MB")
-
+def _run_order_import(content: bytes, file_name: str, user: CurrentUser) -> dict:
+    """同步导入流程：解析工作簿、写库、导入前备份，全部在写入互斥内完成。"""
     try:
-        with db() as conn:
+        with business_write() as conn:
             create_backup(conn, user, "pre_import")
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail="导入前自动备份失败，已取消导入") from exc
 
     try:
-        with db() as conn:
+        with business_write() as conn:
             result = import_excel(
                 conn,
                 reset=False,
                 workbook_bytes=content,
-                source_file_name=Path(filename).name,
+                source_file_name=file_name,
                 user=user,
                 strict_template=True,
             )
@@ -449,6 +458,135 @@ async def import_orders_excel(
         raise HTTPException(status_code=422, detail=f"Excel 导入失败：{exc}") from exc
     except IntegrityError as exc:
         raise HTTPException(status_code=409, detail="导入数据与现有项目、订单或业务明细重复") from exc
+
+
+@router.post("/import-excel")
+async def import_orders_excel(
+    request: Request,
+    filename: str = Query("市场部业务台账.xlsx", max_length=255),
+    user: CurrentUser = Depends(require_permission("ledger_import")),
+) -> dict:
+    if Path(filename).suffix.lower() != ".xlsx":
+        raise HTTPException(status_code=400, detail="仅支持 .xlsx 格式的业务台账文件")
+    content = await request.body()
+    if not content:
+        raise HTTPException(status_code=400, detail="上传文件为空")
+    if len(content) > MAX_IMPORT_BYTES:
+        raise HTTPException(status_code=413, detail="上传文件不能超过 20 MB")
+
+    # 工作簿解析、数据库导入与导入前备份都是同步阻塞工作。放进线程池执行，
+    # 否则单 worker 的事件循环会被整份导入卡住，连健康检查都无法响应。
+    return await run_in_threadpool(_run_order_import, content, Path(filename).name, user)
+
+
+class PreviewResolution(BaseModel):
+    excel_row_no: int = Field(gt=0)
+    resolution: dict[str, Any] = Field(default_factory=dict)
+
+
+class PreviewResolutions(BaseModel):
+    items: list[PreviewResolution] = Field(default_factory=list, max_length=500)
+
+
+def _create_import_preview(content: bytes, file_name: str, user: CurrentUser) -> dict:
+    with business_write() as conn:
+        return create_preview_session(conn, user_id=user.id, file_name=file_name, content=content)
+
+
+def _commit_import_preview(session_id: str, content: bytes, user: CurrentUser, is_admin: bool) -> dict:
+    """预检提交：与普通导入同样先做导入前备份，备份失败就不写任何业务数据。"""
+    try:
+        with business_write() as conn:
+            create_backup(conn, user, "pre_legacy_commit")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="导入前自动备份失败，已取消提交") from exc
+
+    try:
+        with business_write() as conn:
+            return commit_preview_session(
+                conn, session_id=session_id, user=user, content=content, is_admin=is_admin
+            )
+    except HTTPException:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.post("/import-preview")
+async def create_import_preview(
+    request: Request,
+    filename: str = Query("市场部业务台账.xlsx", max_length=255),
+    user: CurrentUser = Depends(require_permission("ledger_import")),
+) -> dict:
+    """上传并解析旧台账，返回预检会话；**不写任何业务表**。"""
+    if Path(filename).suffix.lower() != ".xlsx":
+        raise HTTPException(status_code=400, detail="仅支持 .xlsx 格式的业务台账文件")
+    content = await request.body()
+    if not content:
+        raise HTTPException(status_code=400, detail="上传文件为空")
+    if len(content) > MAX_IMPORT_BYTES:
+        raise HTTPException(status_code=413, detail="上传文件不能超过 20 MB")
+    return await run_in_threadpool(_create_import_preview, content, Path(filename).name, user)
+
+
+@router.get("/import-preview/{session_id}")
+def read_import_preview(
+    session_id: str,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    user: CurrentUser = Depends(require_permission("ledger_import")),
+) -> dict:
+    is_admin = has_permission(user.role_code, "system_admin", user.permissions)
+    with db() as conn:
+        session = load_preview_session(conn, session_id, user_id=user.id, is_admin=is_admin)
+        rows = list_preview_rows(conn, session_id, limit=limit, offset=offset)
+        summary = recompute_preview_summary(conn, session_id)
+    return {
+        "session": {
+            "id": session["id"],
+            "status": session["status"],
+            "source_file_name": session["source_file_name"],
+            "source_sha256": session["source_sha256"],
+            "expires_at": session["expires_at"].isoformat() if session["expires_at"] else None,
+            "parser_version": session["parser_version"],
+        },
+        "summary": summary,
+        "rows": rows,
+    }
+
+
+@router.put("/import-preview/{session_id}/resolutions")
+def update_import_preview(
+    session_id: str,
+    payload: PreviewResolutions,
+    user: CurrentUser = Depends(require_permission("ledger_import")),
+) -> dict:
+    """写入逐项人工确认并重新校验；有阻断项时后端同样拒绝提交。"""
+    with business_write() as conn:
+        return apply_preview_resolutions(
+            conn,
+            session_id,
+            user=user,
+            resolutions=[item.model_dump() for item in payload.items],
+        )
+
+
+@router.post("/import-preview/{session_id}/commit")
+async def commit_import_preview(
+    session_id: str,
+    request: Request,
+    user: CurrentUser = Depends(require_permission("ledger_import")),
+) -> dict:
+    """提交已通过预检的会话。需要重新上传同一份文件用于核对摘要，不接受规范化 JSON。"""
+    content = await request.body()
+    if not content:
+        raise HTTPException(status_code=400, detail="请重新上传预检时的同一份文件以核对摘要")
+    if len(content) > MAX_IMPORT_BYTES:
+        raise HTTPException(status_code=413, detail="上传文件不能超过 20 MB")
+    is_admin = has_permission(user.role_code, "system_admin", user.permissions)
+    return await run_in_threadpool(_commit_import_preview, session_id, content, user, is_admin)
 
 
 @router.get("/batch-editor/schema")
@@ -491,7 +629,7 @@ def create_basic_order_lines_batch(
     _validate_batch_create_targets(order_payloads)
     created_ids: list[int] = []
     try:
-        with db() as conn:
+        with business_write() as conn:
             for item in order_payloads:
                 created_ids.append(_create_order_line(conn, item))
             write_operation_log(
@@ -518,7 +656,7 @@ def update_basic_order_lines_batch(
 
     prepared: list[tuple[dict, OrderUpdate, dict[str, object], dict[str, object]]] = []
     try:
-        with db() as conn:
+        with business_write() as conn:
             for item in payload.items:
                 ids = _ensure_order_line_in_conn(conn, item.order_line_id, user, require_entry=True, lock=True)
                 order_payload = _basic_order_update(item)
@@ -572,6 +710,9 @@ def update_order_line(
         "branch_company": data["branch_company"],
         "account_manager": data["account_manager"],
         "team_level3_name": data["team_name"],
+    }
+    # 客户单位/最终用户/区域平台属于子项目，不属于框架项目。
+    sub_project_data = {
         "customer_unit_name": data["customer_unit_name"],
         "end_user_name": data["user_name"],
         "regional_platform": data["regional_platform"],
@@ -616,7 +757,7 @@ def update_order_line(
         "pending_delivery_amount_no_tax": data["pending_delivery_amount_no_tax"],
         "pending_delivery_amount": data["pending_delivery_amount"],
     }
-    with db() as conn:
+    with business_write() as conn:
         _validate_batch_update_targets(conn, [(ids, payload, data, {})])
         before = conn.execute(
             text("SELECT * FROM v_order_line_finance WHERE order_line_id = :order_line_id"),
@@ -630,10 +771,7 @@ def update_order_line(
                     department = :department,
                     branch_company = :branch_company,
                     account_manager = :account_manager,
-                    team_level3_name = :team_level3_name,
-                    customer_unit_name = :customer_unit_name,
-                    end_user_name = :end_user_name,
-                    regional_platform = :regional_platform
+                    team_level3_name = :team_level3_name
                 WHERE id = :project_id
                 """
             ),
@@ -653,11 +791,17 @@ def update_order_line(
             ),
             {"sales_order_id": ids["sales_order_id"], **order_data},
         )
+        # 子项目名称可能被改：先定位/建立目标子项目并写入子项目字段，
+        # 再把明细挂到它下面（改子项目名等于把这条明细移到目标子项目）。
+        sub_project_id = _resolve_sub_project(
+            conn, ids["sales_order_id"], line_data["project_name"], sub_project_data
+        )
         conn.execute(
             text(
                 """
                 UPDATE order_line
-                SET project_name = :project_name,
+                SET sub_project_id = :sub_project_id,
+                    project_name = :project_name,
                     goods_name = :goods_name,
                     specification_model = :specification_model,
                     unit_name = :unit_name,
@@ -670,7 +814,7 @@ def update_order_line(
                 WHERE id = :order_line_id
                 """
             ),
-            {"order_line_id": order_line_id, **line_data},
+            {"order_line_id": order_line_id, "sub_project_id": sub_project_id, **line_data},
         )
         _upsert_line_record(conn, "purchase_info", order_line_id, purchase_data)
         _upsert_line_record(conn, "delivery_record", order_line_id, delivery_data)
@@ -696,7 +840,7 @@ def delete_order_line(
     user: CurrentUser = Depends(require_permission("order_delete")),
 ) -> dict:
     ids = _ensure_order_line(order_line_id, user, require_entry=True)
-    with db() as conn:
+    with business_write() as conn:
         before = conn.execute(
             text("SELECT * FROM v_order_line_finance WHERE order_line_id = :order_line_id"),
             {"order_line_id": order_line_id},
@@ -945,10 +1089,7 @@ def _update_basic_order_line_in_conn(
                 department = :department,
                 branch_company = :branch_company,
                 account_manager = :account_manager,
-                team_level3_name = :team_level3_name,
-                customer_unit_name = :customer_unit_name,
-                end_user_name = :end_user_name,
-                regional_platform = :regional_platform
+                team_level3_name = :team_level3_name
             WHERE id = :project_id
             """
         ),
@@ -959,9 +1100,6 @@ def _update_basic_order_line_in_conn(
             "branch_company": data["branch_company"],
             "account_manager": data["account_manager"],
             "team_level3_name": data["team_name"],
-            "customer_unit_name": data["customer_unit_name"],
-            "end_user_name": data["user_name"],
-            "regional_platform": data["regional_platform"],
         },
     )
     conn.execute(
@@ -985,11 +1123,22 @@ def _update_basic_order_line_in_conn(
             "statistic_category": data["statistical_category"],
         },
     )
+    sub_project_id = _resolve_sub_project(
+        conn,
+        ids["sales_order_id"],
+        data["project_name"],
+        {
+            "customer_unit_name": data["customer_unit_name"],
+            "end_user_name": data["user_name"],
+            "regional_platform": data["regional_platform"],
+        },
+    )
     conn.execute(
         text(
             """
             UPDATE order_line
-            SET project_name = :project_name,
+            SET sub_project_id = :sub_project_id,
+                project_name = :project_name,
                 goods_name = :goods_name,
                 specification_model = :specification_model,
                 unit_name = :unit_name,
@@ -1004,6 +1153,7 @@ def _update_basic_order_line_in_conn(
         ),
         {
             "order_line_id": order_line_id,
+            "sub_project_id": sub_project_id,
             "project_name": data["project_name"],
             "goods_name": data["goods_name"],
             "specification_model": data["specification_model"],
@@ -1022,15 +1172,13 @@ def _create_order_line(conn, payload: OrderUpdate) -> int:
         text("SELECT id FROM project WHERE project_code = :project_code LIMIT 1"),
         {"project_code": data["project_code"]},
     ).mappings().first()
+    # 框架项目只承载框架级字段：客户经理、分公司、部门、三级团队。
     project_values = {
         "project_code": data["project_code"],
         "department": data["department"],
         "branch_company": data["branch_company"],
         "account_manager": data["account_manager"],
         "team_level3_name": data["team_name"],
-        "customer_unit_name": data["customer_unit_name"],
-        "end_user_name": data["user_name"],
-        "regional_platform": data["regional_platform"],
     }
     if project:
         project_id = int(project["id"])
@@ -1045,11 +1193,11 @@ def _create_order_line(conn, payload: OrderUpdate) -> int:
             text(
                 """
                 INSERT INTO project
-                  (project_code, project_name, department, branch_company, account_manager,
-                   team_level3_name, customer_unit_name, end_user_name, regional_platform)
+                  (project_code, project_name, department, branch_company,
+                   account_manager, team_level3_name)
                 VALUES
-                  (:project_code, :project_name, :department, :branch_company, :account_manager,
-                   :team_level3_name, :customer_unit_name, :end_user_name, :regional_platform)
+                  (:project_code, :project_name, :department, :branch_company,
+                   :account_manager, :team_level3_name)
                 """
             ),
             project_values,
@@ -1096,13 +1244,25 @@ def _create_order_line(conn, payload: OrderUpdate) -> int:
         )
         sales_order_id = int(result.lastrowid or 0)
 
+    # 子项目是订单下的独立层级：客户单位/最终用户/区域平台存在这里，
+    # 同一订单下不同子项目可以有不同值。
+    sub_project_id = _resolve_sub_project(
+        conn,
+        sales_order_id,
+        data["project_name"],
+        {
+            "customer_unit_name": data["customer_unit_name"],
+            "end_user_name": data["user_name"],
+            "regional_platform": data["regional_platform"],
+        },
+    )
+
     duplicate = conn.execute(
         text(
             """
             SELECT ol.id FROM order_line ol
             LEFT JOIN purchase_info pi ON pi.order_line_id = ol.id AND pi.deleted_at IS NULL
-            WHERE ol.sales_order_id = :sales_order_id AND ol.deleted_at IS NULL
-              AND TRIM(COALESCE(ol.project_name, '')) = TRIM(COALESCE(:project_name, ''))
+            WHERE ol.sub_project_id = :sub_project_id AND ol.deleted_at IS NULL
               AND TRIM(COALESCE(ol.goods_name, '')) = TRIM(COALESCE(:goods_name, ''))
               AND TRIM(COALESCE(ol.specification_model, '')) = TRIM(COALESCE(:specification_model, ''))
               AND COALESCE(ol.quantity, 0) = COALESCE(:quantity, 0)
@@ -1112,9 +1272,8 @@ def _create_order_line(conn, payload: OrderUpdate) -> int:
             """
         ),
         {
-            "sales_order_id": sales_order_id,
+            "sub_project_id": sub_project_id,
             "goods_name": data["goods_name"],
-            "project_name": data["project_name"],
             "specification_model": data["specification_model"],
             "quantity": _as_decimal(data["quantity"]),
             "sales_unit_price": _as_decimal(data["unit_price"]),
@@ -1124,7 +1283,7 @@ def _create_order_line(conn, payload: OrderUpdate) -> int:
     if duplicate:
         raise HTTPException(
             status_code=409,
-            detail="相同订单、相同项目名称下已存在同名同规格同数量同单价同采购厂商的明细"
+            detail="相同订单、相同子项目下已存在同名同规格同数量同单价同采购厂商的明细"
             "（数量、单价或采购厂商不同视为不同明细）",
         )
 
@@ -1132,14 +1291,14 @@ def _create_order_line(conn, payload: OrderUpdate) -> int:
         text(
             """
             INSERT INTO order_line
-              (sales_order_id, project_name, goods_name, specification_model, unit_name, quantity,
+              (sales_order_id, sub_project_id, project_name, goods_name, specification_model, unit_name, quantity,
                sales_tax_rate, sales_unit_price_no_tax, sales_unit_price, revenue_no_tax, order_value)
             VALUES
-              (:sales_order_id, :project_name, :goods_name, :specification_model, :unit_name, :quantity,
+              (:sales_order_id, :sub_project_id, :project_name, :goods_name, :specification_model, :unit_name, :quantity,
                :sales_tax_rate, :net_unit_price, :unit_price, :net_revenue, :order_value)
             """
         ),
-        {"sales_order_id": sales_order_id, **data},
+        {"sales_order_id": sales_order_id, "sub_project_id": sub_project_id, **data},
     )
     order_line_id = int(result.lastrowid or 0)
     _upsert_line_record(
@@ -1234,6 +1393,58 @@ def _price(value: Decimal) -> Decimal:
 
 def _money(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def _resolve_sub_project(
+    conn,
+    sales_order_id: int,
+    name: object,
+    values: dict[str, object],
+) -> int:
+    """按（订单, 子项目名称）定位子项目；不存在则新建，并写入子项目级字段。
+
+    客户单位、最终用户、区域平台属于子项目层级：同一订单下不同子项目可以有
+    不同值，因此它们既不写在框架项目上，也不能用订单内的其他子项目的值代替。
+    """
+    normalized = str(name or "").strip()
+    existing = conn.execute(
+        text(
+            "SELECT id FROM sub_project WHERE sales_order_id = :sales_order_id "
+            "AND name = :name AND deleted_at IS NULL"
+        ),
+        {"sales_order_id": sales_order_id, "name": normalized},
+    ).scalar()
+    if existing:
+        conn.execute(
+            text(
+                """
+                UPDATE sub_project
+                SET customer_unit_name = :customer_unit_name,
+                    end_user_name = :end_user_name,
+                    regional_platform = :regional_platform
+                WHERE id = :sub_project_id
+                """
+            ),
+            {"sub_project_id": int(existing), **values},
+        )
+        return int(existing)
+    result = conn.execute(
+        text(
+            """
+            INSERT INTO sub_project
+              (sales_order_id, name, customer_unit_name, end_user_name, regional_platform)
+            VALUES
+              (:sales_order_id, :name, :customer_unit_name, :end_user_name, :regional_platform)
+            ON DUPLICATE KEY UPDATE
+              id = LAST_INSERT_ID(id),
+              customer_unit_name = VALUES(customer_unit_name),
+              end_user_name = VALUES(end_user_name),
+              regional_platform = VALUES(regional_platform)
+            """
+        ),
+        {"sales_order_id": sales_order_id, "name": normalized, **values},
+    )
+    return int(result.lastrowid or 0)
 
 
 def _upsert_line_record(conn, table_name: str, order_line_id: int, data: dict[str, object]) -> None:
