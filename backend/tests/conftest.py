@@ -72,7 +72,7 @@ from app.main import app  # noqa: E402
 
 # 测试运行时会清空的表。账号、日志、备份记录保留，恢复类用例需要它们。
 TEST_BUSINESS_TABLES = (
-    "sales_receipt", "sales_invoice", "sales_contract", "purchase_payment", "finance_payment_entry",
+    "legacy_import_audit_source", "sales_receipt", "sales_invoice", "sales_contract", "purchase_payment", "finance_payment_entry",
     "finance_invoice_check", "warehouse_entry", "purchase_invoice",
     "purchase_contract", "delivery_record", "purchase_info", "order_line", "sub_project",
     "sales_order_number_history", "project_manager_history",
@@ -118,9 +118,28 @@ def clean_database(mysql_test_database: None) -> None:
     clear_business_data()
 
 
+class FreshEditorClient(TestClient):
+    """Legacy functional tests save from a freshly opened editor.
+
+    Explicit X-Edit-Context is always preserved. Tests of stale/missing versions
+    instantiate plain TestClient so this convenience cannot hide conflicts.
+    """
+    def request(self, method, url, **kwargs):
+        if method.upper() in ('POST','PUT','DELETE'):
+            from app.edit_versions import read_context
+            import json
+            headers=dict(kwargs.get('headers') or {})
+            if not any(k.lower()=='x-edit-context' for k in headers):
+                with db() as conn:
+                    ids=conn.execute(text('SELECT id FROM project')).scalars().all()
+                    headers['X-Edit-Context']=json.dumps(read_context(conn,ids))
+                kwargs['headers']=headers
+        return super().request(method,url,**kwargs)
+
+
 @pytest.fixture
 def client(clean_database: None) -> TestClient:
-    return TestClient(app, raise_server_exceptions=False)
+    return FreshEditorClient(app, raise_server_exceptions=False)
 
 
 @pytest.fixture

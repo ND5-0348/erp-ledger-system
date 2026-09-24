@@ -46,7 +46,7 @@ _DATE_TOKEN = re.compile(
     r"(?:(?:[Tt]|\s+)\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?"
 )
 # 注意不要加 ^ 锚点：这个模式要配 match(text, pos) 在中间位置反复使用。
-_TRAILING_SEPARATORS = re.compile(rf"[{re.escape(VALUE_SEPARATORS)}]+")
+_TRAILING_SEPARATORS = re.compile(rf"[{re.escape(NAME_SEPARATORS)}]+")
 
 
 @dataclass(frozen=True)
@@ -235,7 +235,7 @@ def parse_date_sequence(raw_value: object) -> SequenceParse:
                     code=AMBIGUOUS_DATE_SEQUENCE,
                     message=(
                         f"“{text}”无法唯一拆分为日期序列（剩余片段“{remainder}”）；"
-                        "日期之间请用 / 或分号分隔，并写全四位年份"
+                        "日期之间请用 /、逗号或分号分隔，并写全四位年份"
                     ),
                 )
             ],

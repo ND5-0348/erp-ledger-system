@@ -13,9 +13,10 @@ DOCS_DIR = ROOT_DIR / "docs"
 
 load_dotenv(BACKEND_DIR / ".env")
 
-# 应用业务备份目录。默认仍是 backend/backups（保持既有备份可读）；
+# 应用业务备份目录。新文件位于 BACKUP_ROOT/<数据库名>，旧根目录文件只读兼容；
 # 测试环境通过 BACKUP_ROOT 指向系统临时目录，避免测试产生的备份混进业务目录。
-BACKUP_DIR = Path(os.getenv("BACKUP_ROOT") or (BACKEND_DIR / "backups"))
+LEGACY_BACKUP_DIR = Path(os.getenv("BACKUP_ROOT") or (BACKEND_DIR / "backups"))
+BACKUP_DIR = LEGACY_BACKUP_DIR / os.getenv("MYSQL_DATABASE", "erp_ledger")
 
 
 @dataclass(frozen=True)

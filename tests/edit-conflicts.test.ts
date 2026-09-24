@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict';
+import { editingApi, setApiToken, combineEditContexts } from '../src/api';
+const saved={data_epoch:3,projects:{'1':7}};
+const sent: RequestInit[]=[];
+globalThis.fetch=async (_url,init) => { sent.push(init!); return new Response('{}'); };
+setApiToken('synthetic-token');
+const editor=editingApi(saved);
+await editor.updateOrder(1,{goods_name:'未保存内容'});
+const headers=sent[0].headers as Record<string,string>;
+assert.equal(headers.Authorization,'Bearer synthetic-token');
+assert.equal(headers['Content-Type'],'application/json');
+assert.deepEqual(JSON.parse(headers['X-Edit-Context']),saved);
+assert.throws(()=>combineEditContexts([saved,{data_epoch:4,projects:{'2':1}}]));
+assert.throws(()=>combineEditContexts([saved,{data_epoch:3,projects:{'1':8}}]));
+assert.equal(combineEditContexts([saved,undefined]),undefined);
+assert.deepEqual(combineEditContexts([saved,{data_epoch:3,projects:{'2':1}}]),{data_epoch:3,projects:{'1':7,'2':1}});

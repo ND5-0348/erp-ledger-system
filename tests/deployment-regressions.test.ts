@@ -9,7 +9,7 @@ import { applyLedgerFilters, emptyLedgerFilters } from '../src/lib/queryFilterMo
 const row = { projectId: 'P1', orderId: 'O1', department: 'A', orderDate: '2026-09-14',
   orderValue: 100, orderStatus: 'closed' } as OrderRecord;
 const stats = getDashboardMetrics({ ledgers: [], orders: [row, {...row, orderStatus: 'open'}], department: 'A' });
-assert.equal(stats.totalOrderAmount, 200);
+assert.equal(stats.totalOrderAmount, '200.00');
 assert.equal(stats.orderCount, 1);
 assert.equal(stats.closedCount, 0);
 const result = await loadAllPages(async ({offset, limit}) => ({total: 1201,
@@ -24,6 +24,6 @@ const projects = [
   {id: 'P3', department: 'B', orderAmount: 500, orderStatus: 'open'},
 ] as ProjectLedger[];
 assert.deepEqual(getLedgerStats(applyLedgerFilters(projects, {...emptyLedgerFilters, department: 'A'})),
-  {totalOrderVal: 300, completedCount: 1, inProgressCount: 1});
-assert.deepEqual(getLedgerStats([]), {totalOrderVal: 0, completedCount: 0, inProgressCount: 0});
+  {totalOrderVal: '300.00', completedCount: 1, inProgressCount: 1});
+assert.deepEqual(getLedgerStats([]), {totalOrderVal: '0.00', completedCount: 0, inProgressCount: 0});
 assert.equal(applyLedgerFilters(projects, {...emptyLedgerFilters, orderStatus: 'open'}).length, 2);

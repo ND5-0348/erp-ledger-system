@@ -200,26 +200,7 @@ def ensure_default_admin() -> None:
         existing = conn.execute(
             text("SELECT password_hash FROM erp_user WHERE username = 'admin'")
         ).mappings().first()
-        if existing:
-            conn.execute(
-                text(
-                    """
-                    UPDATE erp_user
-                    SET role_code = 'admin',
-                        permissions_json = :permissions_json,
-                        department_scope_json = :department_scope_json,
-                        department_can_view = 1,
-                        department_can_entry = 1,
-                        is_active = 1
-                    WHERE username = 'admin'
-                """
-                ),
-                {
-                    "permissions_json": encode_json_list(sorted(ALL_PERMISSIONS)),
-                    "department_scope_json": encode_json_list([]),
-                },
-            )
-        else:
+        if not existing:
             conn.execute(
                 text(
                     """

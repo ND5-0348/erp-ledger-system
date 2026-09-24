@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 import logging
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -14,8 +15,10 @@ from .config import settings, validate_security_settings
 from .auth import current_user_from_token, ensure_default_admin
 from .db import active_table_count, db, initialize_schema
 from .audit import failed_mutation_metadata, failure_reason, write_operation_log
-from .routers import auth, dashboard, ledgers, orders, purchases, sales, system
+from .routers import history, auth, dashboard, ledgers, orders, purchases, sales, system
 from .validation import validation_error_message
+from .import_report import ImportReportError
+from .import_batches import router as import_batches_router
 
 startup_state = {"database": "not_checked", "imported_rows": 0, "error": None}
 logger = logging.getLogger(__name__)
@@ -37,6 +40,24 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="ERP Ledger API", version="1.0.0", lifespan=lifespan)
+
+
+@app.exception_handler(ImportReportError)
+async def import_report_exception_handler(_: Request, exc: ImportReportError):
+    return JSONResponse(status_code=422,content={'detail':exc.detail,'report':exc.report})
+
+
+@app.middleware("http")
+async def edit_request_context(request: Request, call_next):
+    from .edit_versions import request_context
+    token=request_context.set(request)
+    try:
+        if request.method in ('POST','PUT','DELETE') and request.headers.get('content-type','').startswith('application/json'):
+            try: request.state.edit_body=await request.json()
+            except ValueError: request.state.edit_body={}
+        return await call_next(request)
+    finally:
+        request_context.reset(token)
 
 
 @app.middleware("http")
@@ -99,9 +120,11 @@ app.include_router(dashboard.router)
 app.include_router(auth.router)
 app.include_router(ledgers.router)
 app.include_router(orders.router)
+app.include_router(history.router)
 app.include_router(purchases.router)
 app.include_router(sales.router)
 app.include_router(system.router)
+app.include_router(import_batches_router)
 
 
 @app.get("/api/health")
@@ -122,6 +145,17 @@ def health() -> dict:
 
 FRONTEND_DIST = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend_dist"))
 
+
+def _frontend_path(frontend_root: str, full_path: str) -> Path | None:
+    root = Path(frontend_root).resolve()
+    target = (root / full_path).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return None
+    return target
+
+
 if os.path.isdir(FRONTEND_DIST):
     assets_path = os.path.join(FRONTEND_DIST, "assets")
     if os.path.isdir(assets_path):
@@ -131,8 +165,10 @@ if os.path.isdir(FRONTEND_DIST):
     async def serve_frontend(full_path: str):
         if full_path.startswith("api/"):
             raise HTTPException(status_code=404)
-        target = os.path.join(FRONTEND_DIST, full_path)
-        if os.path.isfile(target):
+        target = _frontend_path(FRONTEND_DIST, full_path)
+        if target is None:
+            raise HTTPException(status_code=404)
+        if target.is_file():
             return FileResponse(target)
         index = os.path.join(FRONTEND_DIST, "index.html")
         if os.path.isfile(index):

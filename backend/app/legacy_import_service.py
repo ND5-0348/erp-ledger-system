@@ -24,10 +24,11 @@ from typing import Any
 from fastapi import HTTPException
 from openpyxl import load_workbook
 from pydantic import ValidationError
-from sqlalchemy import text
+from sqlalchemy import text, bindparam
 from sqlalchemy.engine import Connection
 
 from .audit import write_operation_log
+from .financial_calculations import refresh_balances
 from .ledger_history import (
     conflicts_in_project,
     find_order_by_number,
@@ -61,6 +62,15 @@ from .legacy_resolution import (
 PARSER_VERSION = "legacy-parser-2"
 SESSION_TTL_HOURS = 24
 MAX_PREVIEW_ROWS = 20000
+
+
+def preview_context(conn, codes):
+    from .edit_versions import read_context
+    codes=sorted(set(str(code).strip() for code in codes if code))
+    rows=conn.execute(text('SELECT id,project_code FROM project WHERE project_code IN :codes').bindparams(bindparam('codes',expanding=True)),{'codes':codes}).mappings().all() if codes else []
+    context=read_context(conn,[r['id'] for r in rows])
+    found={r['project_code']:r['id'] for r in rows}
+    return {**context,'project_codes':{c:found.get(c) for c in codes}}
 
 # 财务列组：业务组 → 该组在 91 列模板里占用的列组列表，每组为
 # (日期列, 金额列, 票据列)。列号是模板绝对列号。
@@ -186,6 +196,7 @@ def parse_row(
     *,
     excel_row_no: int,
     sheet_name: str,
+    finance_sources: dict | None = None,
 ) -> dict[str, Any]:
     """解析一行：订单号别名链、负责人交接链、各组财务期次，以及全部问题。"""
     issues: list[Issue] = []
@@ -199,8 +210,8 @@ def parse_row(
     issues.extend(issue.with_location(sheet=sheet_name, row=excel_row_no) for issue in manager_parse.issues)
 
     finance: dict[str, Any] = {}
-    for name, sources in FINANCE_SOURCES.items():
-        label = FINANCE_LABELS[name]
+    for name, sources in (FINANCE_SOURCES if finance_sources is None else finance_sources).items():
+        label = FINANCE_LABELS.get(name, name)
         entry: dict[str, Any] = {
             "label": label,
             "date_raw": None,
@@ -444,6 +455,11 @@ def create_session(
     if len(workbook.worksheets) <= sheet_index:
         raise HTTPException(status_code=422, detail="Excel 中缺少业务工作表")
     worksheet = workbook.worksheets[sheet_index]
+    from .ledger_excel import standard_template_version
+    source_headers = next(worksheet.iter_rows(min_row=header_row, max_row=header_row, values_only=True))
+    if standard_template_version(source_headers) is None:
+        workbook.close()
+        raise HTTPException(status_code=422, detail="预检请使用受支持的91列或92列标准模板，其他布局请使用维护导入预检")
     sheet_name = worksheet.title
     parsed_rows: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
     for index, row in enumerate(
@@ -470,10 +486,10 @@ def create_session(
             """
             INSERT INTO legacy_import_session
               (id, created_by, expires_at, mode, source_file_name, source_sha256,
-               parser_version, status, summary_json)
+               parser_version, status, summary_json, edit_context)
             VALUES
               (:id, :created_by, :expires_at, 'legacy_multi_value', :file_name, :sha256,
-               :parser_version, 'pending', CAST(:summary AS JSON))
+               :parser_version, 'pending', CAST(:summary AS JSON), CAST(:context AS JSON))
             """
         ),
         {
@@ -484,6 +500,7 @@ def create_session(
             "sha256": digest,
             "parser_version": PARSER_VERSION,
             "summary": json.dumps(summary, ensure_ascii=False),
+            "context": json.dumps(preview_context(conn,[_cell(values,PROJECT_CODE_COLUMN) for values,_ in parsed_rows])),
         },
     )
     for values, row in parsed_rows:
@@ -521,7 +538,7 @@ def load_session(conn: Connection, session_id: str, *, user_id: int, is_admin: b
         text(
             """
             SELECT id, created_by, created_at, expires_at, status, source_file_name,
-                   source_sha256, parser_version, summary_json, result_json
+                   source_sha256, parser_version, summary_json, result_json, edit_context
             FROM legacy_import_session WHERE id = :id
             """
         ),
@@ -563,12 +580,21 @@ def list_rows(conn: Connection, session_id: str, *, limit: int = 50, offset: int
         parsed = json.loads(parsed) if isinstance(parsed, str) else parsed
         resolution = row["resolution_json"]
         resolution = json.loads(resolution) if isinstance(resolution, str) else resolution
+        state = build_row_state(int(row["excel_row_no"]), parsed, resolution)
         items.append(
             {
                 "excel_row_no": int(row["excel_row_no"]),
                 "parsed": parsed,
                 "resolution": resolution,
                 "resolved_at": row["resolved_at"].isoformat() if row["resolved_at"] else None,
+                # Keep the original parse alongside the values and issues that
+                # actually govern submission after structured corrections.
+                "effective": {
+                    "order_history": state.order_chain,
+                    "manager_history": state.manager_chain,
+                    "finance": state.finance,
+                    "issues": [_issue_payload(issue) for issue in state.issues],
+                },
             }
         )
     return {"total": int(total or 0), "items": items}
@@ -737,6 +763,8 @@ def load_states(conn: Connection, session_id: str) -> list[RowState]:
 
 
 def _project_id_by_code(conn: Connection, project_code: str) -> int | None:
+    if conn is None:
+        return None
     value = conn.execute(
         text("SELECT id FROM project WHERE project_code = :code AND deleted_at IS NULL"),
         {"code": project_code},
@@ -938,9 +966,16 @@ def check_commit_ready(conn: Connection, session: dict[str, Any], *, content: by
     阻断判定与预检阶段**同一套逻辑**：人工确认过的内容要重新通过期次数、合计、
     日期、金额校验，还要通过与库内现状的别名/负责人一致性检查。
     """
+    baseline=session.get('edit_context')
+    baseline=json.loads(baseline) if isinstance(baseline,str) else baseline
+    if not baseline:raise HTTPException(409,'预检缺少版本信息，请重新上传文件预检')
+    actual=preview_context(conn,baseline['project_codes'])
+    if baseline['data_epoch']!=actual['data_epoch']:
+        raise HTTPException(409,'数据在预检后已恢复或替换，请重新预检；本次未提交')
     if session["status"] == "committed":
         stored = session.get("result_json")
         return {"already_committed": True, "result": json.loads(stored) if isinstance(stored, str) else stored}
+    if actual!=baseline:raise HTTPException(409,'项目关联数据在预检后已变化，请重新预检；本次未提交')
     if session["status"] != "pending":
         raise HTTPException(status_code=409, detail=f"会话状态为 {session['status']}，不能提交")
 
@@ -981,7 +1016,7 @@ def commit_session(
         return {"already_committed": True, **(ready.get("result") or {})}
 
     states = load_states(conn, session_id)
-    workbook_bytes, row_map = build_normalized_workbook(states)
+    workbook_bytes, row_map = build_normalized_workbook(states, source_content=content)
     line_ids: dict[int, int] = {}
     result = import_excel(
         conn,
@@ -999,9 +1034,15 @@ def commit_session(
         )
 
     phases = append_phases(conn, states, line_ids, row_map)
+    conn.execute(text('UPDATE import_batch SET source_sha256=:sha WHERE id=:id'),{'sha':session['source_sha256'],'id':result['batch_id']})
+    # Normalization clears financial source columns before the ordinary import.
+    # Refresh compatibility balances only after every confirmed phase is present.
+    for order_line_id in set(line_ids.values()):
+        refresh_balances(conn, order_line_id)
     history_records = register_histories(conn, states, line_ids, row_map)
 
     payload = {
+        "batch_id": result['batch_id'],
         "session_id": session_id,
         "success_rows": result["success_rows"],
         "skipped_rows": result["skipped_rows"],
@@ -1009,6 +1050,10 @@ def commit_session(
         "history_records": history_records,
         "file_sha256": session["source_sha256"],
     }
+    source_rows=conn.execute(text('SELECT * FROM legacy_import_source WHERE session_id=:id ORDER BY excel_row_no'),{'id':session_id}).mappings().all()
+    for source_row in source_rows:
+        conn.execute(text('INSERT INTO legacy_import_audit_source (session_id,source_sha256,excel_row_no,raw_json) VALUES (:id,:sha,:row,:raw)'),
+                     {'id':session_id,'sha':session['source_sha256'],'row':source_row['excel_row_no'],'raw':json.dumps(dict(source_row),ensure_ascii=False,default=_jsonable)})
     finish_session(conn, session_id, result=payload)
     # 审计只记录可核对的元数据：会话、文件摘要、条数、期次数。不含原始业务内容。
     write_operation_log(
@@ -1033,6 +1078,7 @@ def commit_session(
 
 # 业务 → (日期列, 票据列, 金额列)。写期次时按这张表拼列名。
 PHASE_TABLE_COLUMNS: dict[str, tuple[str, str, str]] = {
+    "finance_payment_entry": ("payment_date", "voucher_code", "booked_amount"),
     "sales_invoice": ("invoice_date", "invoice_no", "invoice_amount"),
     "sales_receipt": ("receipt_date", "payment_notice_no", "receipt_amount"),
     "purchase_payment": ("payment_date", "payment_voucher_no", "payment_amount"),
@@ -1061,7 +1107,9 @@ PHASE_SOURCE_COLUMNS: tuple[int, ...] = tuple(
 )
 
 
-def build_normalized_workbook(states: list[RowState]) -> tuple[bytes, dict[int, int]]:
+def build_normalized_workbook(
+    states: list[RowState], *, source_content: bytes | None = None
+) -> tuple[bytes, dict[int, int]]:
     """按"原始行 + 人工确认"重建一份规范化工件。
 
     订单号写当前号（链尾），客户经理写现任；财务源列全部清空，改由
@@ -1071,7 +1119,30 @@ def build_normalized_workbook(states: list[RowState]) -> tuple[bytes, dict[int, 
     规范化后是紧凑排列的；调用方必须用这张映射把明细 id 对回原始行，
     否则空行之后的财务与历史会整体错位。
     """
-    from .ledger_excel import TEMPLATE_HEADERS, template_bytes
+    from .ledger_excel import TEMPLATE_HEADERS, template_bytes, normalize_standard_row, standard_template_version
+
+    # A plain 0.5 means 0.5 percentage points; 0.005 formatted as percent means
+    # the same rate. The template's styles must not change that interpretation.
+    # Read from the digest-verified original upload, including for older sessions
+    # whose stored JSON has values only. One sequential pass supports large files.
+    rate_formats: dict[int, tuple[str, str]] = {}
+    source_version = None
+    if source_content is not None:
+        source_workbook = load_workbook(_BytesReader(source_content), read_only=True, data_only=True)
+        try:
+            source_sheet = source_workbook.worksheets[0]
+            source_version = standard_template_version(next(source_sheet.iter_rows(min_row=2, max_row=2, values_only=True)))
+            if source_version is None:
+                raise HTTPException(status_code=422, detail="原始模板布局无法确定，请重新预检")
+            wanted_rows = {state.excel_row_no for state in states}
+            for excel_row, cells in enumerate(source_workbook.worksheets[0].iter_rows(min_row=3), start=3):
+                if excel_row in wanted_rows:
+                    rate_formats[excel_row] = tuple(
+                        (cells[column - 1].number_format or "General") if len(cells) >= column else "General"
+                        for column in (19, 25)
+                    )
+        finally:
+            source_workbook.close()
 
     workbook = load_workbook(_BytesReader(template_bytes()))
     worksheet = workbook.worksheets[0]
@@ -1084,7 +1155,8 @@ def build_normalized_workbook(states: list[RowState]) -> tuple[bytes, dict[int, 
     for offset, state in enumerate(states):
         normalized_row = 3 + offset
         row_map[state.excel_row_no] = normalized_row
-        values = list(state.raw_values)
+        # Stored legacy sessions retain their original 91-column source values.
+        values = normalize_standard_row(state.raw_values, source_version or (91 if len(state.raw_values) == 91 else 92))
         values += [None] * (total_columns - len(values))
         for column in PHASE_SOURCE_COLUMNS:
             if 1 <= column <= total_columns:
@@ -1095,6 +1167,9 @@ def build_normalized_workbook(states: list[RowState]) -> tuple[bytes, dict[int, 
             values[MANAGER_COLUMN - 1] = state.manager_chain[-1]
         for column, value in enumerate(values[:total_columns], start=1):
             worksheet.cell(normalized_row, column, _restore_value(value))
+        if state.excel_row_no in rate_formats:
+            for column, number_format in zip((19, 25), rate_formats[state.excel_row_no]):
+                worksheet.cell(normalized_row, column).number_format = number_format
 
     buffer = _BytesWriter()
     workbook.save(buffer)

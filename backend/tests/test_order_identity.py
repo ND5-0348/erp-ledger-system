@@ -7,7 +7,8 @@ from app.routers.orders import OrderUpdate, _validate_batch_create_targets
 
 LINE_TABLE = (
     'CREATE TABLE order_line (id INTEGER, sales_order_id INTEGER, sub_project_id INTEGER, project_name TEXT,'
-    ' goods_name TEXT, specification_model TEXT, quantity NUMERIC, sales_unit_price NUMERIC, deleted_at TEXT)'
+    ' goods_name TEXT, specification_model TEXT, quantity NUMERIC, sales_unit_price NUMERIC,'
+    ' source_preserved INTEGER DEFAULT 0, deleted_at TEXT)'
 )
 SUB_PROJECT_TABLE = (
     'CREATE TABLE sub_project (id INTEGER, sales_order_id INTEGER, name TEXT, deleted_at TEXT)'

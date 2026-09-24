@@ -120,14 +120,14 @@ assert.deepEqual(
     receivedInvoiceAmount: summaries[0].receivedInvoiceAmount,
   },
   {
-    salesOrderAmount: 500,
-    purchaseAmount: 300,
-    deliveryValue: 400,
-    deliveryCost: 240,
-    receiptAmount: 100,
-    paymentAmount: 50,
-    invoiceAmount: 200,
-    receivedInvoiceAmount: 120,
+    salesOrderAmount: '500.00',
+    purchaseAmount: '300.00',
+    deliveryValue: '400.00',
+    deliveryCost: '240.00',
+    receiptAmount: '100.00',
+    paymentAmount: '50.00',
+    invoiceAmount: '200.00',
+    receivedInvoiceAmount: '120.00',
   },
 );
 assert.equal(summaries[0].lines[0].supplier, '厂商一');

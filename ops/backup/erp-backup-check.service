@@ -1,0 +1,12 @@
+[Unit]
+Description=Check ERP backup integrity and age
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash /opt/erp-ledger-backup/check-backup-age.sh
+User=root
+UMask=0077
+TimeoutStartSec=1h
+NoNewPrivileges=true
+PrivateTmp=true

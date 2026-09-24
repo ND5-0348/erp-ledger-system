@@ -1,0 +1,10 @@
+[Unit]
+Description=ERP daily backup at 02:00 China time
+
+[Timer]
+OnCalendar=*-*-* 02:00:00 Asia/Shanghai
+Persistent=true
+Unit=erp-full-backup.service
+
+[Install]
+WantedBy=timers.target

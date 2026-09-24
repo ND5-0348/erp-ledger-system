@@ -92,27 +92,28 @@ test('purchase payload follows X-BO keys and excludes automatic readonly columns
   );
 });
 
-test('sales payload follows BP-CM keys and excludes CI-CJ automatic columns', () => {
+test('sales payload follows BP-CN keys and excludes both receivables and status', () => {
   const salesColumns: BackendBatchEditorColumn[] = [
     { excel_column: 'BP', label: '合同签订日期', key: 'contract_signed_date', value_type: 'date', editable: true, required: false },
-    { excel_column: 'BR', label: '合同价值', key: 'sales_contract_value', value_type: 'number', editable: true, required: false },
-    { excel_column: 'CD', label: '回款占比', key: 'receipt1_ratio', value_type: 'percentage', editable: true, required: false },
+    { excel_column: 'BR', label: '合同金额', key: 'sales_contract_value', value_type: 'number', editable: true, required: false },
+    { excel_column: 'CD', label: '回款占比', key: 'receipt1_ratio', value_type: 'percentage', editable: false, required: false },
     { excel_column: 'CI', label: '回款合计', key: 'total_received', value_type: 'number', editable: false, required: false },
-    { excel_column: 'CJ', label: '应收款', key: 'accounts_receivable', value_type: 'number', editable: false, required: false },
-    { excel_column: 'CK', label: '是否关闭', key: 'close_status', value_type: 'text', editable: true, required: false },
-    { excel_column: 'CL', label: '人工成本', key: 'labor_cost', value_type: 'number', editable: true, required: false },
+    { excel_column: 'CJ', label: '交付应收款', key: 'delivery_accounts_receivable', value_type: 'number', editable: false, required: false },
+    { excel_column: 'CK', label: '开票应收款', key: 'invoice_accounts_receivable', value_type: 'number', editable: false, required: false },
+    { excel_column: 'CL', label: '是否关闭', key: 'close_status', value_type: 'text', editable: false, required: false },
+    { excel_column: 'CM', label: '人工成本', key: 'labor_cost', value_type: 'number', editable: true, required: false },
+    { excel_column: 'CN', label: '其他成本', key: 'other_cost', value_type: 'number', editable: true, required: false },
   ];
   assert.deepEqual(
     buildSalesInformationPayload(
       salesColumns,
-      ['2026/7/26', '1,130.00', '35.398230%', '400.00', '730.00', '进行中', '12.34'],
+      ['2026/7/26', '1,130.00', '35.398230%', '400.00', '165.00', '730.00', '进行中', '12.34', '5.67'],
     ),
     {
       contract_signed_date: '2026-07-26',
       sales_contract_value: '1130.00',
-      receipt1_ratio: '35.398230',
-      close_status: '进行中',
       labor_cost: '12.34',
+      other_cost: '5.67',
     },
   );
 });

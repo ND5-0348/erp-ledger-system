@@ -26,6 +26,7 @@ from app.ledger_excel import (
     SAMPLE_ORDER_NO,
     SAMPLE_PROJECT_CODE,
     TEMPLATE_HEADERS,
+    LEGACY_TEMPLATE_HEADERS,
 )
 from app.routers import purchases
 
@@ -237,13 +238,14 @@ def test_batch_basic_editor_schema_create_update_and_readonly_boundary(
     assert schema_response.status_code == 200, schema_response.text
     schema = schema_response.json()
     assert schema["editable_through"] == "W"
-    assert len(schema["columns"]) == len(TEMPLATE_HEADERS) == 91
+    assert len(schema["columns"]) == len(TEMPLATE_HEADERS) == 92
     assert [column["key"] for column in schema["columns"][:23]] == EDITABLE_ORDER_KEYS
-    assert all(column["editable"] for column in schema["columns"][:23])
+    assert all(column["editable"] for column in schema["columns"][:21])
+    assert not any(column["editable"] for column in schema["columns"][21:23])
     assert not any(column["editable"] for column in schema["columns"][23:])
     assert {
         column["excel_column"] for column in schema["columns"] if column["required"]
-    } == {"B", "J", "M", "O", "W"}
+    } == {"B", "J", "M", "O"}
 
     first = _payload("BATCH-BASIC")
     second = {
@@ -270,7 +272,7 @@ def test_batch_basic_editor_schema_create_update_and_readonly_boundary(
     assert rows_response.status_code == 200, rows_response.text
     editor_rows = rows_response.json()["rows"]
     assert len(editor_rows) == 2
-    assert all(len(row["values"]) == 91 for row in editor_rows)
+    assert all(len(row["values"]) == 92 for row in editor_rows)
     first_editor = next(row for row in editor_rows if row["order_line_id"] == order_line_ids[0])
     assert first_editor["values"][1] == first["project_code"]
     assert first_editor["values"][22] == first["order_value"]
@@ -278,8 +280,8 @@ def test_batch_basic_editor_schema_create_update_and_readonly_boundary(
 
     update_items = []
     for order_line_id, source, manager in (
-        (order_line_ids[0], first, "批量客户经理"),
-        (order_line_ids[1], second, "批量客户经理"),
+        (order_line_ids[0], first, first["account_manager"]),
+        (order_line_ids[1], second, first["account_manager"]),
     ):
         item = _basic_payload(source)
         item.update(
@@ -320,16 +322,16 @@ def test_batch_basic_editor_schema_create_update_and_readonly_boundary(
     assert len(logs) == 1
     audit_detail = json.loads(str(logs[0]))
     audit_entries = audit_detail["batch_entries"]
-    assert audit_detail["summary"] == "在线表格批量修改 2 条基本信息，共 4 个单元格"
+    assert audit_detail["summary"] == "在线表格批量修改 2 条基本信息，共 2 个单元格"
     assert audit_detail["before"] is None
     assert audit_detail["after"] is None
     assert len(audit_entries) == 2
-    assert all(set(entry["before"]) == {"order_line_id", *EDITABLE_ORDER_KEYS} for entry in audit_entries)
+    assert all(set(entry["before"]) == ({"order_line_id", *EDITABLE_ORDER_KEYS} - {"net_revenue", "order_value"}) for entry in audit_entries)
     assert all(entry["before"]["account_manager"] == first["account_manager"] for entry in audit_entries)
-    assert all(entry["after"]["account_manager"] == "批量客户经理" for entry in audit_entries)
+    assert all(entry["after"]["account_manager"] == first["account_manager"] for entry in audit_entries)
     assert all(entry["before"]["customer_unit_name"] == first["customer_unit_name"] for entry in audit_entries)
     assert all(entry["after"]["customer_unit_name"] == "批量修改客户单位" for entry in audit_entries)
-    assert manager == "批量客户经理"
+    assert manager == first["account_manager"]
     assert goods == [first["goods_name"], second["goods_name"]]
 
     unchanged_response = client.put(
@@ -390,6 +392,7 @@ def test_purchase_batch_editor_round_trip_and_readonly_boundary(
     item.update(
         {
             "supplier_name": "批量采购厂商",
+            "purchase_unit_price": "90.000000",
             "purchase_amount": "900.00",
             "delivery_quantity": "6.000000",
             "purchase_contract_no": "PC-BATCH-001",
@@ -495,7 +498,7 @@ def test_purchase_batch_update_is_atomic(
     first = _purchase_editor_payload(editor, rows_by_id[first_id])
     second = _purchase_editor_payload(editor, rows_by_id[second_id])
     first["supplier_name"] = "该修改必须回滚"
-    second["purchase_amount"] = "100.00"
+    second["purchase_unit_price"] = "10.000000"
     second["payment1_amount"] = "101.00"
 
     response = client.put(
@@ -521,7 +524,7 @@ def test_sales_batch_editor_round_trip_and_readonly_boundary(
     assert rows_response.status_code == 200, rows_response.text
     editor = rows_response.json()
     assert editor["editable_from"] == "BP"
-    assert editor["editable_through"] == "CM"
+    assert editor["editable_through"] == "CN"
     assert editor["fixed_columns"] == ["B", "C", "D", "E", "F", "G", "M", "N", "O"]
     assert {
         column["key"] for column in editor["columns"] if column["editable"]
@@ -604,8 +607,9 @@ def test_sales_batch_editor_round_trip_and_readonly_boundary(
     assert values_by_key["receipt1_notice_no"] == "RCPT1-BATCH-001"
     assert values_by_key["receipt2_notice_no"] == "RCPT2-BATCH-001"
     assert _d(values_by_key["total_received"]) == Decimal("700.00")
-    assert _d(values_by_key["accounts_receivable"]) == Decimal("430.00")
-    assert values_by_key["close_status"] == "进行中"
+    assert _d(values_by_key["delivery_accounts_receivable"]) == Decimal("-135.00")
+    assert _d(values_by_key["invoice_accounts_receivable"]) == Decimal("-100.00")
+    assert values_by_key["close_status"] is None
     assert _d(values_by_key["labor_cost"]) == Decimal("12.34")
     assert _d(values_by_key["other_cost"]) == Decimal("5.67")
 
@@ -627,7 +631,7 @@ def test_sales_batch_editor_round_trip_and_readonly_boundary(
     assert forbidden_response.status_code == 422, forbidden_response.text
 
 
-def test_sales_batch_rejects_conflicting_shared_close_status_atomically(
+def test_sales_batch_ignores_manually_submitted_close_status(
     client: TestClient,
     headers: dict[str, str],
 ) -> None:
@@ -657,10 +661,11 @@ def test_sales_batch_rejects_conflicting_shared_close_status_atomically(
         json={"items": [first, second]},
         headers=headers,
     )
-    assert response.status_code == 422, response.text
-    assert _finance(first_id)["sales_contract_no"] is None
+    assert response.status_code == 200, response.text
+    assert _finance(first_id)["sales_contract_no"] == "必须回滚"
     assert _finance(first_id)["close_status"] is None
-    assert _action_count("batch_update_sales") == 0
+    assert _finance(second_id)["close_status"] is None
+    assert _action_count("batch_update_sales") == 1
 
 
 def test_batch_basic_create_rejects_conflicting_shared_fields_atomically(
@@ -813,7 +818,7 @@ def _excel_import_file() -> bytes:
         date(2026, 7, 30), "REC-XL-002", Decimal("126.00"), Decimal("55.7522"), Decimal("226.00"),
         Decimal("0.00"), "进行中", Decimal("12.34"), Decimal("5.67"),
     ]
-    assert len(values) == len(TEMPLATE_HEADERS) == 91
+    assert len(values) == len(LEGACY_TEMPLATE_HEADERS) == 91
     for column, value in enumerate(values, start=1):
         worksheet.cell(3, column, value)
     output = BytesIO()
@@ -852,14 +857,14 @@ def test_excel_template_import_export_round_trip(client: TestClient, headers: di
     assert _action_count("download_order_template") == 1
     template = load_workbook(BytesIO(template_response.content), read_only=True, data_only=True)
     assert template["Sheet1"].cell(1, 1).value == "订单情况（王淼）"
-    assert template["Sheet1"].cell(1, 39).value == "采购合同（周航）"
-    assert [template["Sheet1"].cell(2, column).value for column in range(1, 92)] == TEMPLATE_HEADERS
+    assert template["Sheet1"].cell(1, 39).value == "采购合同（杨志毅）"
+    assert [template["Sheet1"].cell(2, column).value for column in range(1, 93)] == TEMPLATE_HEADERS
     assert template["Sheet1"].cell(3, 2).value == SAMPLE_PROJECT_CODE
     assert template["Sheet1"].cell(3, 13).value == SAMPLE_ORDER_NO
     assert Decimal(str(template["Sheet1"].cell(3, 19).value)) == Decimal("0.13")
     assert template["Sheet1"].cell(3, 24).value == "示例采购厂商"
     assert Decimal(str(template["Sheet1"].cell(3, 25).value)) == Decimal("0.13")
-    assert template["Sheet1"].cell(3, 90).value is None
+    assert template["Sheet1"].cell(3, 92).value is None
     assert template["Sheet1"].cell(3, 91).value is None
     template.close()
 
@@ -960,15 +965,15 @@ def test_excel_template_import_export_round_trip(client: TestClient, headers: di
     assert _action_count("export_orders") == 2
     exported = load_workbook(BytesIO(export_response.content), read_only=True, data_only=True)
     worksheet = exported["Sheet1"]
-    assert [worksheet.cell(2, column).value for column in range(1, 92)] == TEMPLATE_HEADERS
+    assert [worksheet.cell(2, column).value for column in range(1, 93)] == TEMPLATE_HEADERS
     assert worksheet.cell(3, 2).value == "XL-IMPORT-001"
     assert worksheet.cell(3, 24).value == "Excel Supplier"
     assert Decimal(str(worksheet.cell(3, 19).value)) == Decimal("0.13")
     assert Decimal(str(worksheet.cell(3, 25).value)) == Decimal("0.13")
     assert Decimal(str(worksheet.cell(3, 52).value)) == Decimal("158.2")
     assert Decimal(str(worksheet.cell(3, 87).value)) == Decimal("226")
-    assert Decimal(str(worksheet.cell(3, 90).value)) == Decimal("12.34")
-    assert Decimal(str(worksheet.cell(3, 91).value)) == Decimal("5.67")
+    assert Decimal(str(worksheet.cell(3, 91).value)) == Decimal("12.34")
+    assert Decimal(str(worksheet.cell(3, 92).value)) == Decimal("5.67")
     exported.close()
 
     filtered_export_response = client.get(
@@ -1761,8 +1766,9 @@ def test_normal_financial_cases(case: str, client: TestClient, headers: dict[str
         assert _count("delivery_record", "order_line_id = :id", id=order_line_id) == 1
         assert _d(_ledger(payload["project_code"])["order_amount"]) == Decimal("1130.00")
         assert _dashboard(client, headers) == {
-            "orderAmount": 1130.0, "grossProfit": 339.0, "orderCount": 1,
-            "accountsReceivable": 1130.0, "accountsPayable": 791.0, "closedCount": 0,
+            "orderAmount": "1130.00", "grossProfit": "339.00", "orderCount": 1,
+            "accountsReceivable": "1130.00", "accountsPayable": "791.00", "closedCount": 0,
+            "deliveryAccountsReceivable": "565.00", "invoiceAccountsReceivable": "0.00",
         }
         assert _action_count("create_order") == 1
 
@@ -1797,11 +1803,13 @@ def test_normal_financial_cases(case: str, client: TestClient, headers: dict[str
         finance = _finance(order_line_id)
         assert _d(finance["total_paid"]) == Decimal("300.00")
         assert _d(finance["accounts_payable"]) == Decimal("491.00")
-        assert _dashboard(client, headers)["accountsPayable"] == 491.0
+        assert _dashboard(client, headers)["accountsPayable"] == "491.00"
 
     elif case == "N-05":
         client.post(f"/api/purchases/{order_line_id}/payments", json=_payment("300.00"), headers=headers)
-        response = client.post(f"/api/purchases/{order_line_id}/payments", json=_payment("491.00", "2026-07-25"), headers=headers)
+        # This case asserts an omitted due date; the shared helper supplies one
+        # by default. Do not discard explicitly supplied dates in production.
+        response = client.post(f"/api/purchases/{order_line_id}/payments", json={**_payment("491.00", "2026-07-25"), "due_payment_date": None}, headers=headers)
         assert response.status_code == 200, response.text
         assert response.json()["payments"][1]["phase_no"] == 2
         assert response.json()["payments"][1]["due_payment_date"] is None
@@ -1899,16 +1907,18 @@ def test_normal_financial_cases(case: str, client: TestClient, headers: dict[str
 def test_boundary_financial_cases(case: str, client: TestClient, headers: dict[str, str]) -> None:
     if case == "B-01":
         maximum = "9999999999999999.99"
-        order_line_id, payload = _create_order(client, headers, case, order_value=maximum, purchase_amount="0.00")
+        order_line_id, payload = _create_order(client, headers, case, quantity=None, order_value=maximum, purchase_amount="0.00")
         assert _d(_finance(order_line_id)["order_value"]) == Decimal(maximum)
         response = client.get("/api/orders", params={"project_id": payload["project_code"]}, headers=headers)
         assert response.status_code == 200, response.text
+        assert response.json()["items"][0]["order_value"] == maximum
         assert _d(response.json()["items"][0]["order_value"]) == Decimal(maximum)
+        assert _dashboard(client, headers)["orderAmount"] == maximum
 
     elif case == "B-02":
         quantity = "999999999999.999999"
         order_line_id, _ = _create_order(
-            client, headers, case, quantity=quantity, net_unit_price=quantity, unit_price=quantity,
+            client, headers, case, quantity=quantity, net_unit_price="0", unit_price="0",
             order_value="9999999999999999.99", purchase_amount="0.00",
         )
         with db() as conn:
@@ -1921,8 +1931,8 @@ def test_boundary_financial_cases(case: str, client: TestClient, headers: dict[s
         assert response.status_code == 200, response.text
         finance = _finance(order_line_id)
         assert _d(finance["total_received"]) == Decimal("0.00")
-        assert _d(finance["accounts_receivable"]) == Decimal("1130.00")
-        assert _dashboard(client, headers)["closedCount"] == 0
+        assert _d(finance["accounts_receivable"]) == Decimal("0.00")
+        assert _dashboard(client, headers)["closedCount"] == 1
 
     elif case == "B-04":
         _, payload = _create_order(client, headers, case, order_date="2099-12-31")
@@ -2036,6 +2046,8 @@ def test_invalid_input_cases(case: str, client: TestClient, headers: dict[str, s
         for field in ("project_code", "order_no", "goods_name", "customer_unit_name", "order_value"):
             payload = _payload(f"{case}-{field}")
             payload.pop(field)
+            if field == "order_value":
+                payload["quantity"] = None  # With no quantity, the amount cannot be derived.
             response = client.post("/api/orders", json=payload, headers=headers)
             assert response.status_code == 422, response.text
         assert _count("project") == _count("sales_order") == _count("order_line") == 0

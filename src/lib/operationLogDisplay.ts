@@ -43,7 +43,7 @@ const FIELD_LABELS: Record<string, string> = {
   regional_platform: '区域平台',
   project_name: '项目名称',
   close_status: '关闭状态',
-  goods_name: '货物名称',
+  goods_name: '物资/服务名称',
   specification_model: '规格型号',
   unit_name: '单位',
   quantity: '销售数量',
@@ -61,14 +61,14 @@ const FIELD_LABELS: Record<string, string> = {
   purchase_unit_price_no_tax: '采购不含税单价',
   purchase_unit_price: '采购含税单价',
   cost_no_tax: '不含税采购金额',
-  purchase_amount: '含税采购金额',
+  purchase_amount: '采购金额',
   purchase_tax_amount: '采购税金',
   labor_cost: '人工成本',
   other_cost: '其他成本',
   delivery_date: '交货日期',
   delivery_quantity: '交货数量',
   delivery_revenue_no_tax: '不含税交付收入',
-  delivery_value: '交付金额',
+  delivery_value: '交付收入',
   delivery_cost_no_tax: '不含税交付成本',
   delivery_cost: '交付成本',
   pending_delivery_quantity: '未交付数量',
@@ -108,7 +108,7 @@ const FIELD_LABELS: Record<string, string> = {
   payment_voucher_no: '付款凭证号',
   payment_amount: '付款金额',
   contract_signed_date: '合同签订日期',
-  sales_contract_no: '销售合同号',
+  sales_contract_no: '翔云合同号',
   contract_value: '合同金额',
   sales_contract_value: '销售合同金额',
   sales_performance_period: '销售合同履约周期',
@@ -191,6 +191,8 @@ const IGNORED_FIELDS = new Set([
   'total_received',
   'total_paid',
   'accounts_receivable',
+  'delivery_accounts_receivable',
+  'invoice_accounts_receivable',
   'accounts_payable',
   'financial_accounts_payable',
   'gross_profit_no_tax',
@@ -222,12 +224,9 @@ function formatValue(value: unknown, fieldName = '') {
   if (typeof value === 'boolean') return value ? '是' : '否';
   if (Array.isArray(value)) return value.length ? value.join('、') : '空';
   if (typeof value === 'object') return JSON.stringify(value);
-  if (
-    fieldName
-    && /(amount|cost|price|quantity|rate|ratio|value|signed|received|paid|profit|phase_no)/.test(fieldName)
-    && /^-?\d+(\.\d+)?$/.test(String(value))
-  ) {
-    return String(Number(value));
+  if (fieldName && /(amount|cost|price|quantity|rate|ratio|value|signed|received|paid|profit|phase_no)/.test(fieldName)
+      && /^-?\d+\.\d+$/.test(String(value))) {
+    return String(value).replace(/0+$/, '').replace(/\.$/, '');
   }
   return String(value);
 }

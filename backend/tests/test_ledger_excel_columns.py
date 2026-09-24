@@ -65,7 +65,7 @@ PERCENTAGE_KEYS = {
 def _mapped_columns() -> list[dict[str, object]]:
     basic = editor_columns("basic")[:23]
     purchase = editor_columns("purchase")[23:67]
-    sales = editor_columns("sales")[67:91]
+    sales = editor_columns("sales")[67:92]
     return [column for column in basic + purchase + sales if column["key"]]
 
 

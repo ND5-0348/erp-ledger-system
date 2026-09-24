@@ -8,8 +8,11 @@ from sqlalchemy import text
 
 from ..audit import write_batch_operation_log, write_operation_log
 from ..auth import CurrentUser, apply_department_scope, can_access_department, get_current_user, require_permission
+from ..edit_versions import line_context
 from ..db import db
+from ..history_queries import order_match, manager_match, enrich_history, enrich_phases
 from ..line_identity import DUPLICATE_LINE_DETAIL, find_duplicate_line, order_line_identity
+from ..financial_calculations import calculate_line, line_snapshot, refresh_line, refresh_balances
 from ..ledger_excel import (
     editor_changed_keys,
     editor_columns,
@@ -132,10 +135,13 @@ def list_purchases(
     project_id: str | None = None,
     order_id: str | None = None,
     manager: str | None = None,
+    include_history_manager: bool = False,
     department: str | None = None,
     supplier_name: str | None = None,
     contract_no: str | None = None,
     payment_date: str | None = None,
+    payment_start_date: BusinessDate | None = None,
+    payment_end_date: BusinessDate | None = None,
     limit: int = Query(200, ge=1, le=500),
     offset: int = Query(0, ge=0),
     user: CurrentUser = Depends(get_current_user),
@@ -146,10 +152,10 @@ def list_purchases(
         conditions.append("project_code LIKE :project_id")
         params["project_id"] = f"%{project_id}%"
     if order_id:
-        conditions.append("order_no LIKE :order_id")
+        conditions.append(order_match())
         params["order_id"] = f"%{order_id}%"
     if manager:
-        conditions.append("account_manager LIKE :manager")
+        conditions.append(manager_match() if include_history_manager else "account_manager LIKE :manager")
         params["manager"] = f"%{manager}%"
     if department:
         conditions.append("department = :department")
@@ -160,9 +166,18 @@ def list_purchases(
     if contract_no:
         conditions.append("purchase_contract_no LIKE :contract_no")
         params["contract_no"] = f"%{contract_no}%"
+    phase_conditions = ["hp.deleted_at IS NULL"]
     if payment_date:
-        conditions.append("latest_payment_date = :payment_date")
-        params["payment_date"] = payment_date
+        phase_conditions.append("hp.payment_date = :phase_date")
+        params["phase_date"] = payment_date
+    if payment_start_date:
+        phase_conditions.append("hp.payment_date >= :phase_start")
+        params["phase_start"] = payment_start_date
+    if payment_end_date:
+        phase_conditions.append("hp.payment_date <= :phase_end")
+        params["phase_end"] = payment_end_date
+    if len(phase_conditions)>1:
+        conditions.append("order_line_id IN (SELECT hp.order_line_id FROM purchase_payment hp WHERE " + " AND ".join(phase_conditions) + ")")
     apply_department_scope(conditions, params, user)
     where_sql = " AND ".join(conditions)
     source_sql = """
@@ -197,7 +212,17 @@ def list_purchases(
             ),
             params,
         ).mappings().all()
-    return {"total": int(total or 0), "items": clean_rows(rows)}
+        items = enrich_history(conn, rows)
+        enrich_phases(conn, items, "purchase_payment", "payment_date", "payment_amount", "payment_phases")
+        if len(phase_conditions)>1:
+            for item in items:
+                matched = [p for p in item['payment_phases'] if p['date'] and
+                    (not payment_date or p['date']==payment_date) and
+                    (not payment_start_date or p['date']>=str(payment_start_date)) and
+                    (not payment_end_date or p['date']<=str(payment_end_date))]
+                item['total_paid'] = format(sum(Decimal(str(p['amount'] or 0)) for p in matched), 'f')
+
+    return {"total": int(total or 0), "items": items}
 
 
 @router.post("/batch-editor/rows")
@@ -234,6 +259,7 @@ def update_purchases_batch(
             order_line = _ensure_order_line_in_conn(conn, item.order_line_id, user, lock=True)
             data = _payload_dict(item)
             data.pop("order_line_id", None)
+            data = _calculated_purchase_data(conn, item.order_line_id, data)
             before = editor_payload_snapshot(conn, user, item.order_line_id, "purchase")
             if editor_changed_keys("purchase", before, data):
                 prepared.append((item.order_line_id, order_line, data, before))
@@ -367,7 +393,12 @@ def get_purchase_detail(order_line_id: int, user: CurrentUser = Depends(get_curr
             {"order_line_id": order_line_id},
         ).mappings().all()
 
+        edit_context = line_context(conn,[order_line_id])
+
+    unsigned = (Decimal(summary["purchase_amount"] or 0) - Decimal(summary["purchase_contract_signed_amount"] or 0))
+    contracts = [{**dict(row), "unsigned_amount": unsigned} for row in contracts]
     return {
+        "edit_context":edit_context,
         "summary": clean_row(summary),
         "contracts": clean_rows(contracts),
         "invoices": clean_rows(invoices),
@@ -387,6 +418,8 @@ def update_purchase_summary(
     _ensure_order_line(order_line_id, user, require_entry=True)
     data = _payload_dict(payload)
     with business_write() as conn:
+        conn.execute(text("SELECT id FROM order_line WHERE id=:id FOR UPDATE"), {"id": order_line_id})
+        data = _calculated_purchase_data(conn, order_line_id, data)
         before = _purchase_summary_snapshot(conn, order_line_id)
         paid_total = conn.execute(
             text(
@@ -459,6 +492,7 @@ def update_purchase_summary(
                 ),
                 {"order_line_id": order_line_id, **data},
             )
+        refresh_line(conn, order_line_id, sales=False, purchase=False)
         after = _purchase_summary_snapshot(conn, order_line_id)
         write_operation_log(
             conn,
@@ -494,6 +528,7 @@ def add_purchase_contract(
             {"order_line_id": order_line_id, **_payload_dict(payload)},
         )
         record_id = int(result.lastrowid or 0)
+        refresh_balances(conn, order_line_id)
         write_operation_log(
             conn, user, "采购管理", "create_purchase_contract", f"新增采购合同 {record_id}",
             after=_record_snapshot(conn, "purchase_contract", record_id),
@@ -524,6 +559,7 @@ def update_purchase_contract(
             ),
             {"contract_id": contract_id, **_payload_dict(payload)},
         )
+        refresh_balances(conn, order_line_id)
         write_operation_log(
             conn, user, "采购管理", "update_purchase_contract", f"修改采购合同 {contract_id}",
             before=before, after=_record_snapshot(conn, "purchase_contract", contract_id),
@@ -879,7 +915,8 @@ def _ensure_order_line_in_conn(
     row = conn.execute(
         text(
             """
-            SELECT ol.id AS order_line_id, ol.quantity, p.department
+            SELECT ol.id AS order_line_id, ol.quantity,
+                   CASE WHEN ol.source_preserved=1 THEN ol.line_department ELSE p.department END AS department
             FROM order_line ol
             JOIN sales_order so ON so.id = ol.sales_order_id AND so.deleted_at IS NULL
             JOIN project p ON p.id = so.project_id AND p.deleted_at IS NULL
@@ -1095,6 +1132,8 @@ def _save_purchase_batch_item(conn, order_line_id: int, data: dict[str, object])
         },
     )
 
+    refresh_line(conn, order_line_id, sales=False, purchase=False)
+
 
 def _upsert_order_line_record(
     conn,
@@ -1192,9 +1231,12 @@ def _ensure_order_line(order_line_id: int, user: CurrentUser, require_entry: boo
 
 
 def _payload_dict(payload: BaseModel) -> dict:
-    if hasattr(payload, "model_dump"):
-        return payload.model_dump()
-    return payload.dict()
+    data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+    for key in ('unsigned_amount', 'purchase_unsigned_amount'):
+        if key in data:
+            data[key] = None
+    return data
+
 
 
 def _ensure_detail_record(table_name: str, record_id: int, user: CurrentUser, require_entry: bool = False) -> int:
@@ -1221,6 +1263,7 @@ def _soft_delete_detail(table_name: str, record_id: int, user: CurrentUser, acti
     with business_write() as conn:
         before = _record_snapshot(conn, table_name, record_id)
         conn.execute(text(f"UPDATE {table_name} SET deleted_at = CURRENT_TIMESTAMP WHERE id = :record_id"), {"record_id": record_id})
+        refresh_balances(conn, int(before["order_line_id"]))
         write_operation_log(conn, user, "采购管理", action_name, f"删除{label} {record_id}", before=before)
 
 
@@ -1262,7 +1305,7 @@ def _next_phase(conn, table_name: str, order_line_id: int) -> int:
             f"""
             SELECT COALESCE(MAX(phase_no), 0) + 1
             FROM {table_name}
-            WHERE order_line_id = :order_line_id AND deleted_at IS NULL
+            WHERE order_line_id = :order_line_id
             """
         ),
         {"order_line_id": order_line_id},
@@ -1357,3 +1400,9 @@ def _validate_finance_invoice_check_total(conn, order_line_id: int, received_inv
     ).scalar()
     if Decimal(checked or 0) + received_invoice_amount > Decimal(purchase_amount or 0):
         raise HTTPException(status_code=422, detail="累计发票校验金额不能超过含税采购金额，数据有错误，请检查后重新提交。")
+
+
+def _calculated_purchase_data(conn, order_line_id: int, data: dict) -> dict:
+    previous = line_snapshot(conn, order_line_id)
+    calculated = calculate_line({**previous, **data}, previous)
+    return {key: calculated.get(key, value) for key, value in data.items()}

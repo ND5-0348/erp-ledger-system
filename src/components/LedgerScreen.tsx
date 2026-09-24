@@ -1,3 +1,5 @@
+import { api } from '../api';
+import { matchedManagers } from '../lib/historyQuery';
 import React, { useState, useMemo } from 'react';
 import { 
   FileOutput,
@@ -19,6 +21,7 @@ import {
 } from '../lib/salesDetailModel';
 import { buildProjectOrderSummaries } from '../lib/projectOrderSummary';
 import { getLedgerStats } from '../lib/ledgerStats';
+import { differenceMoney, formatMoney as formatExactMoney, type MoneyValue } from '../lib/money';
 import OrderOperatingSummarySection from './OrderOperatingSummarySection';
 import {
   applyLedgerFilters,
@@ -63,6 +66,7 @@ export default function LedgerScreen({
   const [projectId, setProjectId] = useState('');
   const [department, setDepartment] = useState('');
   const [manager, setManager] = useState('');
+  const [includeHistoryManager, setIncludeHistoryManager] = useState('');
   const [clientUnit, setClientUnit] = useState('');
   const [orderId, setOrderId] = useState('');
   const [orderStatus, setOrderStatus] = useState('');
@@ -111,6 +115,7 @@ export default function LedgerScreen({
     setProjectId('');
     setDepartment('');
     setManager('');
+    setIncludeHistoryManager('');
     setClientUnit('');
     setOrderId('');
     setOrderStatus('');
@@ -125,7 +130,7 @@ export default function LedgerScreen({
 
   const handleSearch = () => {
     if (startDate && endDate && startDate > endDate) {
-      alert('订单日期的开始日期不能晚于结束日期。');
+      alert('销售订单日期的开始日期不能晚于结束日期。');
       return;
     }
     if (invoiceStartDate && invoiceEndDate && invoiceStartDate > invoiceEndDate) {
@@ -137,6 +142,7 @@ export default function LedgerScreen({
         projectId,
         department,
         manager,
+        includeHistoryManager,
         clientUnit,
         orderId,
         orderStatus,
@@ -237,9 +243,9 @@ export default function LedgerScreen({
       id: newLedger.id,
       clientUnit: newLedger.clientUnit,
       projectName: newLedger.projectName,
-      orderAmount: parseFloat(newLedger.orderAmount) || 0,
-      purchaseAmount: parseFloat(newLedger.purchaseAmount) || 0,
-      totalReceived: parseFloat(newLedger.totalReceived) || 0,
+      orderAmount: newLedger.orderAmount || '0',
+      purchaseAmount: newLedger.purchaseAmount || '0',
+      totalReceived: newLedger.totalReceived || '0',
       department: newLedger.department || '未登记部门',
       manager: newLedger.manager || '未指定',
       orderId: newLedger.orderId || `ORD-2023-${Math.floor(1000 + Math.random() * 9000)}`,
@@ -266,9 +272,7 @@ export default function LedgerScreen({
   };
 
   // Format currency
-  const formatMoney = (val: number) => {
-    return new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(val);
-  };
+  const formatMoney = (val: MoneyValue) => formatExactMoney(val);
 
   return (
     <div className="space-y-6">
@@ -276,7 +280,7 @@ export default function LedgerScreen({
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900 font-sans">项目台账总览</h1>
-          <p className="text-sm text-slate-500 font-sans mt-1">查看项目销售订单、含税采购金额、回款与应收应付汇总。</p>
+          <p className="text-sm text-slate-500 font-sans mt-1">查看项目销售订单、采购金额、回款与应收应付汇总。</p>
         </div>
         <div className="flex items-center gap-2 self-start sm:self-center">
           <button
@@ -294,6 +298,7 @@ export default function LedgerScreen({
             <FileOutput className="w-4 h-4 text-blue-600" />
             <span>导出台账</span>
           </button>
+          <button type="button" className="px-3 py-2 text-xs border rounded-lg" onClick={async () => { try { downloadBlob(await api.exportHistory(ledgerFiltersToQuery(submittedFilters)), '历史及期次明细.xlsx'); } catch(e) { alert(e instanceof Error ? e.message : '导出失败'); } }}>导出历史及全部期次</button>
         </div>
       </div>
 
@@ -340,6 +345,8 @@ export default function LedgerScreen({
               className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-xs text-slate-700"
             />
           </div>
+
+          <label className="flex items-center gap-2 text-xs text-slate-600"><input type="checkbox" checked={includeHistoryManager === 'true'} onChange={e => setIncludeHistoryManager(e.target.checked ? 'true' : '')} />包含历史负责人</label>
 
           {/* Client Unit */}
           <div className="space-y-1.5">
@@ -394,7 +401,7 @@ export default function LedgerScreen({
 
           {/* Date range selection */}
           <div className="md:col-span-2 space-y-1.5">
-            <label className="text-xs font-medium text-slate-500">订单日期</label>
+            <label className="text-xs font-medium text-slate-500">销售订单日期</label>
             <div className="flex items-center gap-2">
               <input 
                 type="date" 
@@ -461,27 +468,29 @@ export default function LedgerScreen({
       {/* Main Data Table */}
       <section className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
         <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse table-fixed min-w-[2260px]">
+          <table className="w-full text-left border-collapse table-fixed min-w-[2580px]">
             <thead>
               <tr className="bg-slate-50/75 border-b border-slate-200">
                 <th className="px-6 py-3 font-semibold text-xs text-slate-500 w-[140px]">项目编号</th>
                 <th className="px-6 py-3 font-semibold text-xs text-slate-500 w-[200px]">客户单位名称</th>
                 <th className="px-6 py-3 font-semibold text-xs text-slate-500 w-[240px]">项目名称</th>
                 <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[180px]">A销售订单金额</th>
-                <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[180px]">A含税采购金额</th>
-                <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[160px]">B交付价值</th>
+                <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[180px]">A采购金额</th>
+                <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[160px]">B交付收入</th>
                 <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[160px]">B交付成本</th>
                 <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[160px]">D回款金额</th>
                 <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[160px]">D付款金额</th>
                 <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[160px]">E发票金额</th>
                 <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[160px]">E收票金额</th>
+                <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[160px]">交付应收款</th>
+                <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-right w-[160px]">开票应收款</th>
                 <th className="px-6 py-3 font-semibold text-xs text-slate-500 text-center w-[132px]">操作</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {paginatedLedgers.length === 0 ? (
                 <tr>
-                  <td colSpan={12} className="px-6 py-10 text-center text-slate-400 text-sm">
+                  <td colSpan={14} className="px-6 py-10 text-center text-slate-400 text-sm">
                     没有符合条件的台账记录
                   </td>
                 </tr>
@@ -490,7 +499,7 @@ export default function LedgerScreen({
                     <tr key={item.id} className="hover:bg-slate-50 transition-colors group">
                       <td className="px-6 py-4 text-xs font-mono font-medium text-blue-600">{item.id}</td>
                       <td className="px-6 py-4 text-xs text-slate-600 truncate" title={item.clientUnit}>{item.clientUnit}</td>
-                      <td className="px-6 py-4 text-xs font-medium text-slate-900 truncate" title={item.projectName}>{item.projectName}</td>
+                      <td className="px-6 py-4 text-xs font-medium text-slate-900 truncate" title={item.projectName}>{item.projectName}<small className="block text-slate-500">现任：{item.manager}{matchedManagers(item, submittedFilters.manager, submittedFilters.includeHistoryManager) && ` · 历史命中：${matchedManagers(item, submittedFilters.manager, submittedFilters.includeHistoryManager)}`}</small></td>
                       <td className="px-6 py-4 text-xs text-right font-mono text-slate-950 font-medium">¥{formatMoney(item.orderAmount)}</td>
                       <td className="px-6 py-4 text-xs text-right font-mono text-slate-600">¥{formatMoney(item.purchaseAmount)}</td>
                       <td className="px-6 py-4 text-xs text-right font-mono text-slate-600">¥{formatMoney(item.deliveryValue || 0)}</td>
@@ -499,6 +508,8 @@ export default function LedgerScreen({
                       <td className="px-6 py-4 text-xs text-right font-mono text-slate-600">¥{formatMoney(item.totalPaid || 0)}</td>
                       <td className="px-6 py-4 text-xs text-right font-mono text-slate-600">¥{formatMoney(item.salesInvoiceAmount || 0)}</td>
                       <td className="px-6 py-4 text-xs text-right font-mono text-slate-600">¥{formatMoney(item.receivedInvoiceAmount || 0)}</td>
+                      <td className="px-6 py-4 text-xs text-right font-mono text-rose-600">¥{formatMoney(item.deliveryAccountsReceivable || 0)}</td>
+                      <td className="px-6 py-4 text-xs text-right font-mono text-rose-600">¥{formatMoney(item.invoiceAccountsReceivable || 0)}</td>
                       <td className="px-6 py-4 text-center">
                         <div className="inline-flex items-center justify-center gap-1">
                           <button
@@ -590,7 +601,7 @@ export default function LedgerScreen({
             <FileSpreadsheet className="w-5 h-5" />
           </div>
           <div>
-            <p className="text-xs font-medium text-slate-400" title="按所选订单日期和开票日期匹配明细，销售订单金额每条明细只计一次">销售订单金额合计</p>
+            <p className="text-xs font-medium text-slate-400" title="按所选销售订单日期和开票日期匹配明细，销售订单金额每条明细只计一次">销售订单金额合计</p>
             <p className="text-lg font-bold text-slate-900 mt-0.5">{formatMoney(stats.totalOrderVal)} 元</p>
           </div>
         </div>
@@ -661,9 +672,9 @@ export default function LedgerScreen({
                     ['客户经理', selectedLedger.manager],
                     ['订单状态', normalizeLedgerStatusLabel(selectedLedger.orderStatus)],
                     ['订单数量', selectedLedger.orderId],
-                    ['最近订单日期', selectedLedger.orderDate || '-'],
+                    ['最近销售订单日期', selectedLedger.orderDate || '-'],
                     ['销售订单金额', `¥${formatMoney(selectedLedger.orderAmount)}`],
-                    ['毛利润', `¥${formatMoney(selectedLedger.orderAmount - selectedLedger.purchaseAmount)}`],
+                    ['毛利润', `¥${formatMoney(differenceMoney(selectedLedger.orderAmount, selectedLedger.purchaseAmount))}`],
                   ].map(([label, value]) => (
                     <div key={label} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
                       <p className="text-[11px] font-medium text-slate-400">{label}</p>
@@ -678,13 +689,14 @@ export default function LedgerScreen({
                     {[
                       ['应付账款', selectedFinanceSummary.accountsPayable, 'text-slate-900'],
                       ['已付账款', selectedFinanceSummary.paidAmount, 'text-slate-900'],
-                      ['应收账款', selectedFinanceSummary.accountsReceivable, 'text-rose-600'],
+                      ['交付应收款', selectedFinanceSummary.deliveryAccountsReceivable, 'text-rose-600'],
+                      ['开票应收款', selectedFinanceSummary.invoiceAccountsReceivable, 'text-rose-600'],
                       ['已收账款', selectedFinanceSummary.receivedAmount, 'text-emerald-600'],
                     ].map(([label, value, color]) => (
                       <div key={label as string} className="rounded-lg border border-slate-200 bg-white px-3 py-2">
                         <p className="text-[11px] font-medium text-slate-400">{label as string}</p>
                         <p className={`mt-1 text-xs font-bold font-mono ${color as string}`}>
-                          ¥{formatMoney(value as number)}
+                          ¥{formatMoney(value as MoneyValue)}
                         </p>
                       </div>
                     ))}
@@ -778,7 +790,7 @@ export default function LedgerScreen({
                 </div>
 
                 <div className="space-y-1.5">
-                  <label className="text-xs font-semibold text-slate-600">含税采购金额 (元)</label>
+                  <label className="text-xs font-semibold text-slate-600">采购金额 (元)</label>
                   <input 
                     type="number" 
                     placeholder="0.00"

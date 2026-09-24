@@ -17,11 +17,11 @@ const sales = [
 function amount(filters: Partial<typeof emptyLedgerFilters>) {
   return getLedgerStats(projects, {orders, sales, filters: {...emptyLedgerFilters, ...filters}}).totalOrderVal;
 }
-assert.equal(amount({startDate: '2026-09-14', endDate: '2026-09-14'}), 100);
-assert.equal(amount({invoiceStartDate: '2026-09-14', invoiceEndDate: '2026-09-14'}), 200);
-assert.equal(amount({invoiceStartDate: '2026-09-16', invoiceEndDate: '2026-09-17'}), 100);
-assert.equal(amount({startDate: '2026-09-14', invoiceStartDate: '2026-09-14', invoiceEndDate: '2026-09-14'}), 200);
-assert.equal(amount({endDate: '2026-09-14', invoiceStartDate: '2026-09-14', invoiceEndDate: '2026-09-14'}), 0);
-assert.equal(amount({startDate: '2026-09-18'}), 0);
-assert.equal(amount({}), 600);
-assert.equal(getLedgerStats([], {orders, sales, filters: {...emptyLedgerFilters, startDate: '2026-09-14'}}).totalOrderVal, 0);
+assert.equal(amount({startDate: '2026-09-14', endDate: '2026-09-14'}), '100.00');
+assert.equal(amount({invoiceStartDate: '2026-09-14', invoiceEndDate: '2026-09-14'}), '200.00');
+assert.equal(amount({invoiceStartDate: '2026-09-16', invoiceEndDate: '2026-09-17'}), '100.00');
+assert.equal(amount({startDate: '2026-09-14', invoiceStartDate: '2026-09-14', invoiceEndDate: '2026-09-14'}), '200.00');
+assert.equal(amount({endDate: '2026-09-14', invoiceStartDate: '2026-09-14', invoiceEndDate: '2026-09-14'}), '0.00');
+assert.equal(amount({startDate: '2026-09-18'}), '0.00');
+assert.equal(amount({}), '600.00');
+assert.equal(getLedgerStats([], {orders, sales, filters: {...emptyLedgerFilters, startDate: '2026-09-14'}}).totalOrderVal, '0.00');

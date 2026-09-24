@@ -103,13 +103,13 @@ const orders: OrderRecord[] = [
 assert.deepEqual(getDashboardDepartments(orders), ['科贸部', '物流部']);
 
 assert.deepEqual(getDashboardSalesRanking(orders, ''), [
-  { label: '科贸部', amount: 1300 },
-  { label: '物流部', amount: 500 },
+  { label: '科贸部', amount: '1300.00' },
+  { label: '物流部', amount: '500.00' },
 ]);
 
 assert.deepEqual(getDashboardSalesRanking(orders, '科贸部'), [
-  { label: '商贸集成团队', amount: 1000 },
-  { label: '创新业务团队', amount: 300 },
+  { label: '商贸集成团队', amount: '1000.00' },
+  { label: '创新业务团队', amount: '300.00' },
 ]);
 
 const getDateFilteredSalesRanking = dashboardMetrics.getDashboardSalesRanking as (
@@ -117,27 +117,31 @@ const getDateFilteredSalesRanking = dashboardMetrics.getDashboardSalesRanking as
   department: string,
   startDate: string,
   endDate: string,
-) => Array<{ label: string; amount: number }>;
+) => Array<{ label: string; amount: string }>;
 
 assert.deepEqual(getDateFilteredSalesRanking(orders, '', '2026-02-02', '2026-02-02'), [
-  { label: '物流部', amount: 500 },
+  { label: '物流部', amount: '500.00' },
 ]);
 
 assert.deepEqual(getDashboardMetrics({ ledgers, orders, department: '' }), {
-  totalOrderAmount: 1800,
-  grossProfit: 1020,
+  totalOrderAmount: '1800.00',
+  grossProfit: '1020.00',
   orderCount: 3,
-  accountsReceivable: 1450,
-  accountsPayable: 430,
+  accountsReceivable: '1450.00',
+  deliveryAccountsReceivable: '-350.00',
+  invoiceAccountsReceivable: '0.00',
+  accountsPayable: '430.00',
   closedCount: 1,
 });
 
 assert.deepEqual(getDashboardMetrics({ ledgers, orders, department: '科贸部' }), {
-  totalOrderAmount: 1300,
-  grossProfit: 720,
+  totalOrderAmount: '1300.00',
+  grossProfit: '720.00',
   orderCount: 2,
-  accountsReceivable: 1050,
-  accountsPayable: 330,
+  accountsReceivable: '1050.00',
+  deliveryAccountsReceivable: '-250.00',
+  invoiceAccountsReceivable: '0.00',
+  accountsPayable: '330.00',
   closedCount: 1,
 });
 
@@ -150,11 +154,13 @@ assert.deepEqual(
     endDate: '2026-02-02',
   }),
   {
-    totalOrderAmount: 500,
-    grossProfit: 300,
+    totalOrderAmount: '500.00',
+    grossProfit: '300.00',
     orderCount: 1,
-    accountsReceivable: 400,
-    accountsPayable: 100,
+    accountsReceivable: '400.00',
+    deliveryAccountsReceivable: '-100.00',
+    invoiceAccountsReceivable: '0.00',
+    accountsPayable: '100.00',
     closedCount: 0,
   },
 );
@@ -208,11 +214,13 @@ assert.deepEqual(
     endDate: '2026-01-31',
   }),
   {
-    totalOrderAmount: 300,
-    grossProfit: 200,
+    totalOrderAmount: '300.00',
+    grossProfit: '200.00',
     orderCount: 1,
-    accountsReceivable: 250,
-    accountsPayable: 80,
+    accountsReceivable: '250.00',
+    deliveryAccountsReceivable: '-50.00',
+    invoiceAccountsReceivable: '0.00',
+    accountsPayable: '80.00',
     closedCount: 0,
   },
 );
@@ -220,7 +228,7 @@ assert.deepEqual(
 type TrendDataGetter = (
   items: ProjectLedger[],
   filters: { department: string; startDate?: string; endDate?: string },
-) => Array<{ month: string; orderAmount: number; profit: number }>;
+) => Array<{ month: string; orderAmount: string; profit: string }>;
 
 const getDashboardTrendData = (dashboardMetrics as typeof dashboardMetrics & {
   getDashboardTrendData?: TrendDataGetter;
@@ -228,9 +236,9 @@ const getDashboardTrendData = (dashboardMetrics as typeof dashboardMetrics & {
 
 assert.ok(getDashboardTrendData, '仪表盘应提供趋势数据汇总');
 assert.deepEqual(getDashboardTrendData(ledgers, { department: '' }), [
-  { month: '2026-01', orderAmount: 1000, profit: 600 },
-  { month: '2026-02', orderAmount: 500, profit: 300 },
-  { month: '2026-03', orderAmount: 300, profit: 120 },
+  { month: '2026-01', orderAmount: '1000.00', profit: '600.00' },
+  { month: '2026-02', orderAmount: '500.00', profit: '300.00' },
+  { month: '2026-03', orderAmount: '300.00', profit: '120.00' },
 ]);
 
 type LatestModificationGetter = (

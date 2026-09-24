@@ -69,7 +69,7 @@ def test_tax_rates_recalculate_unit_prices_and_amounts():
 
 
 def test_excel_tax_rate_is_normalized_to_percent_value():
-    assert _as_tax_rate(Decimal("0.13")) == Decimal("13.00")
+    assert _as_tax_rate(Decimal("0.13"), "0%") == Decimal("13.00")
     assert _as_tax_rate(Decimal("13")) == Decimal("13")
     assert _as_tax_rate(Decimal("0")) == Decimal("0")
 

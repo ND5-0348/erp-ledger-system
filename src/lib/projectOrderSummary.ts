@@ -1,4 +1,5 @@
 import { OrderRecord, PurchaseRecord, SalesRecord } from '../types';
+import { differenceMoney, moneyString, sumMoney } from './money';
 
 export interface ProjectOrderLineSummary {
   id: string;
@@ -7,27 +8,31 @@ export interface ProjectOrderLineSummary {
   specModel: string;
   quantity: string;
   supplier: string;
-  salesOrderAmount: number;
-  purchaseAmount: number;
-  deliveryValue: number;
-  deliveryCost: number;
-  receiptAmount: number;
-  paymentAmount: number;
-  invoiceAmount: number;
-  receivedInvoiceAmount: number;
+  salesOrderAmount: string;
+  purchaseAmount: string;
+  deliveryValue: string;
+  deliveryCost: string;
+  receiptAmount: string;
+  paymentAmount: string;
+  invoiceAmount: string;
+  receivedInvoiceAmount: string;
+  deliveryAccountsReceivable: string;
+  invoiceAccountsReceivable: string;
 }
 
 export interface ProjectOrderSummary {
   orderId: string;
   orderDate: string;
-  salesOrderAmount: number;
-  purchaseAmount: number;
-  deliveryValue: number;
-  deliveryCost: number;
-  receiptAmount: number;
-  paymentAmount: number;
-  invoiceAmount: number;
-  receivedInvoiceAmount: number;
+  salesOrderAmount: string;
+  purchaseAmount: string;
+  deliveryValue: string;
+  deliveryCost: string;
+  receiptAmount: string;
+  paymentAmount: string;
+  invoiceAmount: string;
+  receivedInvoiceAmount: string;
+  deliveryAccountsReceivable: string;
+  invoiceAccountsReceivable: string;
   lines: ProjectOrderLineSummary[];
 }
 
@@ -38,8 +43,8 @@ function addToMap<T>(map: Map<number, T[]>, id: number | undefined, item: T) {
   map.set(id, current);
 }
 
-function sumBy<T>(items: T[], getValue: (item: T) => number | undefined) {
-  return items.reduce((total, item) => total + Number(getValue(item) || 0), 0);
+function sumBy<T>(items: T[], getValue: (item: T) => string | number | undefined) {
+  return sumMoney(...items.map(getValue));
 }
 
 export function buildProjectOrderSummaries(
@@ -64,37 +69,43 @@ export function buildProjectOrderSummaries(
       specModel: order.specModel || '-',
       quantity: order.quantity || '-',
       supplier: order.supplierName || relatedPurchases.find((item) => item.supplier)?.supplier || '-',
-      salesOrderAmount: Number(order.orderValue || 0),
-      purchaseAmount: Number(order.purchaseAmount || 0),
-      deliveryValue: Number(order.deliveryValue || 0),
-      deliveryCost: Number(order.deliveryCost || 0),
+      salesOrderAmount: moneyString(order.orderValue),
+      purchaseAmount: moneyString(order.purchaseAmount),
+      deliveryValue: moneyString(order.deliveryValue),
+      deliveryCost: moneyString(order.deliveryCost),
       receiptAmount: sumBy(relatedSales, (item) => item.totalReceived),
       paymentAmount: sumBy(relatedPurchases, (item) => item.paymentAmount),
       invoiceAmount: sumBy(relatedSales, (item) => item.invoiceAmount),
       receivedInvoiceAmount: sumBy(relatedPurchases, (item) => item.invoiceAmount),
+      deliveryAccountsReceivable: moneyString(order.deliveryAccountsReceivable ?? differenceMoney(order.deliveryValue, order.totalReceived)),
+      invoiceAccountsReceivable: moneyString(order.invoiceAccountsReceivable ?? sumBy(relatedSales, (item) => item.invoiceAccountsReceivable)),
     };
     const summary = summaries.get(order.orderId) || {
       orderId: order.orderId,
       orderDate: order.orderDate || '-',
-      salesOrderAmount: 0,
-      purchaseAmount: 0,
-      deliveryValue: 0,
-      deliveryCost: 0,
-      receiptAmount: 0,
-      paymentAmount: 0,
-      invoiceAmount: 0,
-      receivedInvoiceAmount: 0,
+      salesOrderAmount: '0.00',
+      purchaseAmount: '0.00',
+      deliveryValue: '0.00',
+      deliveryCost: '0.00',
+      receiptAmount: '0.00',
+      paymentAmount: '0.00',
+      invoiceAmount: '0.00',
+      receivedInvoiceAmount: '0.00',
+      deliveryAccountsReceivable: '0.00',
+      invoiceAccountsReceivable: '0.00',
       lines: [],
     };
 
-    summary.salesOrderAmount += line.salesOrderAmount;
-    summary.purchaseAmount += line.purchaseAmount;
-    summary.deliveryValue += line.deliveryValue;
-    summary.deliveryCost += line.deliveryCost;
-    summary.receiptAmount += line.receiptAmount;
-    summary.paymentAmount += line.paymentAmount;
-    summary.invoiceAmount += line.invoiceAmount;
-    summary.receivedInvoiceAmount += line.receivedInvoiceAmount;
+    summary.salesOrderAmount = sumMoney(summary.salesOrderAmount, line.salesOrderAmount);
+    summary.purchaseAmount = sumMoney(summary.purchaseAmount, line.purchaseAmount);
+    summary.deliveryValue = sumMoney(summary.deliveryValue, line.deliveryValue);
+    summary.deliveryCost = sumMoney(summary.deliveryCost, line.deliveryCost);
+    summary.receiptAmount = sumMoney(summary.receiptAmount, line.receiptAmount);
+    summary.paymentAmount = sumMoney(summary.paymentAmount, line.paymentAmount);
+    summary.invoiceAmount = sumMoney(summary.invoiceAmount, line.invoiceAmount);
+    summary.receivedInvoiceAmount = sumMoney(summary.receivedInvoiceAmount, line.receivedInvoiceAmount);
+    summary.deliveryAccountsReceivable = sumMoney(summary.deliveryAccountsReceivable, line.deliveryAccountsReceivable);
+    summary.invoiceAccountsReceivable = sumMoney(summary.invoiceAccountsReceivable, line.invoiceAccountsReceivable);
     summary.lines.push(line);
     summaries.set(order.orderId, summary);
   });

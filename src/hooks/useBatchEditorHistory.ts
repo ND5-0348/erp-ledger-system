@@ -6,6 +6,7 @@ import {
   useRef,
 } from 'react';
 import { BackendBatchEditorRow } from '../api';
+import { recalculateEditorRows } from '../lib/editorFormulas';
 
 const MAX_UNDO_STEPS = 100;
 
@@ -39,8 +40,9 @@ export function useBatchEditorHistory(
     coalesceKey?: string,
   ) => {
     const current = rowsRef.current;
-    const next = updater(current);
-    if (next === current) return;
+    const edited = updater(current);
+    if (edited === current) return;
+    const next = recalculateEditorRows(current, edited);
 
     if (!coalesceKey || activeEditKeyRef.current !== coalesceKey) {
       undoStackRef.current.push(cloneRows(current));

@@ -1,4 +1,30 @@
+export interface EditContext { data_epoch: number; projects: Record<string,number> }
+export function combineEditContexts(contexts: Array<EditContext | undefined>): EditContext | undefined {
+  const available=contexts.filter((c): c is EditContext => Boolean(c));
+  if (!available.length || available.length!==contexts.length) return undefined;
+  const result: EditContext={data_epoch:available[0].data_epoch,projects:{}};
+  for (const c of available) {
+    if(c.data_epoch!==result.data_epoch) throw new Error('数据已恢复或替换，请重新打开编辑界面');
+    for(const [id,version] of Object.entries(c.projects)) {
+      if(result.projects[id]!==undefined && result.projects[id]!==version) throw new Error('项目版本不一致，请重新打开编辑界面');
+      result.projects[id]=version;
+    }
+  }
+  return result;
+}
+export interface BackendHistory { edit_context?: EditContext; order_number_history?: string[]; manager_history?: string[] }
+export interface HistoryContext {
+  edit_context?: EditContext;
+  current: { order_line_id: number; sales_order_id: number; project_id: number; project_code: string; order_no: string; account_manager: string | null; department: string | null; branch_company: string | null; team_level3_name: string | null };
+  order_numbers: Array<{ order_no: string; history_order: number; source: string }>;
+  managers: Array<{ manager_name: string; history_order: number; effective_from: string | null; source: string }>;
+  affected_lines: number;
+}
 const API_BASE = ((import.meta as ImportMeta & { env?: Record<string, string> }).env?.VITE_API_BASE_URL) || '/api';
+import type { PreviewCreated, PreviewPage, PreviewResult, PreviewSummary, RowResolution } from './lib/legacyImportPreview';
+import type { SourceImportResult, ImportBatch, ImportBatchDetail } from './lib/importReview';
+import type { MoneyValue } from './lib/money';
+
 export const UNAUTHORIZED_EVENT = 'erp:unauthorized';
 
 let authToken = '';
@@ -9,6 +35,8 @@ export function setApiToken(token: string) {
 
 export class ApiError extends Error {
   status: number;
+  code?: string;
+  report?: {total_rows: number; valid_rows: number; skipped_rows: number; error_count: number; errors: import('./lib/importReport').ImportIssue[]};
 
   constructor(status: number, message: string) {
     super(message);
@@ -25,20 +53,22 @@ export interface BackendHealth {
 }
 
 export interface BackendDashboardSummary {
-  orderAmount: number;
-  grossProfit: number;
+  orderAmount: MoneyValue;
+  grossProfit: MoneyValue;
   orderCount: number;
-  accountsReceivable: number;
-  accountsPayable: number;
+  accountsReceivable: MoneyValue;
+  deliveryAccountsReceivable: MoneyValue;
+  invoiceAccountsReceivable: MoneyValue;
+  accountsPayable: MoneyValue;
   closedCount: number;
 }
 
-export interface BackendProjectLedger {
-  delivery_value?: number;
-  delivery_cost?: number;
-  total_paid?: number;
-  sales_invoice_amount?: number;
-  received_invoice_amount?: number;
+export interface BackendProjectLedger extends BackendHistory {
+  delivery_value?: MoneyValue;
+  delivery_cost?: MoneyValue;
+  total_paid?: MoneyValue;
+  sales_invoice_amount?: MoneyValue;
+  received_invoice_amount?: MoneyValue;
   project_code: string;
   project_name: string | null;
   department: string | null;
@@ -48,16 +78,18 @@ export interface BackendProjectLedger {
   first_order_date: string | null;
   last_order_date: string | null;
   order_count: number;
-  order_amount: number;
-  purchase_amount: number;
-  total_received: number;
-  accounts_receivable: number;
-  accounts_payable: number;
-  gross_profit: number;
+  order_amount: MoneyValue;
+  purchase_amount: MoneyValue;
+  total_received: MoneyValue;
+  delivery_accounts_receivable?: MoneyValue | null;
+  invoice_accounts_receivable?: MoneyValue | null;
+  accounts_receivable: MoneyValue;
+  accounts_payable: MoneyValue;
+  gross_profit: MoneyValue;
   computed_close_status: string;
 }
 
-export interface BackendOrderRecord {
+export interface BackendOrderRecord extends BackendHistory {
   order_line_id?: number;
   amount_type?: string | null;
   project_code: string;
@@ -73,40 +105,42 @@ export interface BackendOrderRecord {
   goods_name: string | null;
   spec_model?: string | null;
   unit_name: string | null;
-  quantity: number | null;
+  quantity: MoneyValue | null;
   sales_tax_rate?: number | null;
-  net_unit_price?: number | null;
-  unit_price?: number | null;
-  net_revenue?: number | null;
-  order_value: number | null;
-  sales_tax_amount?: number | null;
-  delivery_quantity: number | null;
+  net_unit_price?: MoneyValue | null;
+  unit_price?: MoneyValue | null;
+  net_revenue?: MoneyValue | null;
+  order_value: MoneyValue | null;
+  sales_tax_amount?: MoneyValue | null;
+  delivery_quantity: MoneyValue | null;
   business_type: string | null;
   customer_unit_name: string | null;
   user_name?: string | null;
   regional_platform?: string | null;
   supplier_name?: string | null;
   purchase_tax_rate?: number | null;
-  purchase_unit_price_no_tax?: number | null;
-  purchase_unit_price?: number | null;
-  cost_no_tax?: number | null;
-  purchase_amount?: number | null;
-  purchase_tax_amount?: number | null;
-  labor_cost?: number | null;
-  other_cost?: number | null;
+  purchase_unit_price_no_tax?: MoneyValue | null;
+  purchase_unit_price?: MoneyValue | null;
+  cost_no_tax?: MoneyValue | null;
+  purchase_amount?: MoneyValue | null;
+  purchase_tax_amount?: MoneyValue | null;
+  labor_cost?: MoneyValue | null;
+  other_cost?: MoneyValue | null;
   delivery_date?: string | null;
-  delivery_revenue_no_tax?: number | null;
-  delivery_value?: number | null;
-  delivery_cost_no_tax?: number | null;
-  delivery_cost?: number | null;
-  pending_delivery_quantity?: number | null;
-  pending_delivery_amount_no_tax?: number | null;
-  pending_delivery_amount?: number | null;
-  total_received?: number | null;
-  total_paid?: number | null;
-  accounts_receivable?: number | null;
-  accounts_payable?: number | null;
-  gross_profit?: number | null;
+  delivery_revenue_no_tax?: MoneyValue | null;
+  delivery_value?: MoneyValue | null;
+  delivery_cost_no_tax?: MoneyValue | null;
+  delivery_cost?: MoneyValue | null;
+  pending_delivery_quantity?: MoneyValue | null;
+  pending_delivery_amount_no_tax?: MoneyValue | null;
+  pending_delivery_amount?: MoneyValue | null;
+  total_received?: MoneyValue | null;
+  total_paid?: MoneyValue | null;
+  delivery_accounts_receivable?: MoneyValue | null;
+  invoice_accounts_receivable?: MoneyValue | null;
+  accounts_receivable?: MoneyValue | null;
+  accounts_payable?: MoneyValue | null;
+  gross_profit?: MoneyValue | null;
   close_status?: string | null;
 }
 
@@ -122,6 +156,7 @@ export interface BackendBatchEditorColumn {
 }
 
 export interface BackendBatchEditorRow {
+  edit_context?: EditContext;
   order_line_id: number;
   values: BatchEditorValue[];
 }
@@ -134,7 +169,8 @@ export interface BackendBatchEditorResponse {
   rows?: BackendBatchEditorRow[];
 }
 
-export interface BackendPurchaseRecord {
+export interface BackendPurchaseRecord extends BackendHistory {
+  payment_phases?: Array<{date: string | null; amount: number | null}>;
   order_line_id: number;
   project_code: string;
   order_no: string;
@@ -142,11 +178,11 @@ export interface BackendPurchaseRecord {
   department: string | null;
   supplier_name: string | null;
   purchase_contract_no: string | null;
-  purchase_contract_signed_amount: number | null;
-  purchase_amount: number | null;
-  received_invoice_amount: number | null;
-  total_paid: number | null;
-  accounts_payable: number | null;
+  purchase_contract_signed_amount: MoneyValue | null;
+  purchase_amount: MoneyValue | null;
+  received_invoice_amount: MoneyValue | null;
+  total_paid: MoneyValue | null;
+  accounts_payable: MoneyValue | null;
   latest_payment_date?: string | null;
 }
 
@@ -155,8 +191,8 @@ export interface BackendPurchaseContract {
   purchase_contract_no: string | null;
   payment_terms: string | null;
   performance_period: string | null;
-  signed_amount: number | null;
-  unsigned_amount: number | null;
+  signed_amount: MoneyValue | null;
+  unsigned_amount: MoneyValue | null;
 }
 
 export interface BackendPurchaseInvoice {
@@ -165,7 +201,7 @@ export interface BackendPurchaseInvoice {
   received_invoice_date: string | null;
   received_invoice_date_text: string | null;
   invoice_no: string | null;
-  invoice_amount: number | null;
+  invoice_amount: MoneyValue | null;
 }
 
 export interface BackendPurchasePayment {
@@ -175,7 +211,7 @@ export interface BackendPurchasePayment {
   payment_date: string | null;
   payment_date_text: string | null;
   payment_voucher_no: string | null;
-  payment_amount: number | null;
+  payment_amount: MoneyValue | null;
 }
 
 export interface BackendWarehouseEntry {
@@ -184,8 +220,8 @@ export interface BackendWarehouseEntry {
   warehouse_date: string | null;
   warehouse_date_text: string | null;
   voucher_no: string | null;
-  warehouse_amount: number | null;
-  warehouse_amount_no_tax: number | null;
+  warehouse_amount: MoneyValue | null;
+  warehouse_amount_no_tax: MoneyValue | null;
 }
 
 export interface BackendFinanceInvoiceCheck {
@@ -193,7 +229,7 @@ export interface BackendFinanceInvoiceCheck {
   phase_no: number;
   received_invoice_date: string | null;
   received_invoice_date_text: string | null;
-  received_invoice_amount: number | null;
+  received_invoice_amount: MoneyValue | null;
   voucher_code: string | null;
 }
 
@@ -203,10 +239,11 @@ export interface BackendFinancePayment {
   payment_date: string | null;
   payment_date_text: string | null;
   voucher_code: string | null;
-  booked_amount: number | null;
+  booked_amount: MoneyValue | null;
 }
 
 export interface BackendPurchaseDetail {
+  edit_context?: EditContext;
   summary: Record<string, string | number | null>;
   contracts: BackendPurchaseContract[];
   invoices: BackendPurchaseInvoice[];
@@ -216,7 +253,9 @@ export interface BackendPurchaseDetail {
   payments: BackendPurchasePayment[];
 }
 
-export interface BackendSalesRecord {
+export interface BackendSalesRecord extends BackendHistory {
+  receipt_phases?: Array<{date: string | null; amount: number | null}>;
+  invoice_phases?: Array<{date: string | null; amount: number | null}>;
   order_line_id: number;
   project_code: string;
   order_no: string;
@@ -224,10 +263,12 @@ export interface BackendSalesRecord {
   department: string | null;
   sales_contract_no: string | null;
   sales_contract_signed_date: string | null;
-  sales_contract_value: number | null;
-  sales_invoice_amount: number | null;
-  total_received: number | null;
-  accounts_receivable: number | null;
+  sales_contract_value: MoneyValue | null;
+  sales_invoice_amount: MoneyValue | null;
+  total_received: MoneyValue | null;
+  delivery_accounts_receivable?: MoneyValue | null;
+  invoice_accounts_receivable?: MoneyValue | null;
+  accounts_receivable: MoneyValue | null;
   supplier_name?: string | null;
   latest_receipt_date?: string | null;
   invoice_dates?: string | null;
@@ -238,34 +279,37 @@ export interface BackendSalesContract {
   contract_signed_date: string | null;
   contract_signed_date_text: string | null;
   sales_contract_no: string | null;
-  contract_value: number | null;
+  contract_value: MoneyValue | null;
   performance_period: string | null;
-  unsigned_contract_amount: number | null;
+  unsigned_contract_amount: MoneyValue | null;
 }
 
 export interface BackendSalesInvoice {
   id: number;
+  order_line_id?: number;
   phase_no: number;
   invoice_doc_no: string | null;
   invoice_date: string | null;
   invoice_date_text: string | null;
   invoice_no: string | null;
-  invoice_amount: number | null;
-  pending_invoice_amount: number | null;
-  delivered_not_invoiced_amount: number | null;
+  invoice_amount: MoneyValue | null;
+  pending_invoice_amount: MoneyValue | null;
+  delivered_not_invoiced_amount: MoneyValue | null;
 }
 
 export interface BackendSalesReceipt {
   id: number;
+  order_line_id?: number;
   phase_no: number;
   receipt_date: string | null;
   receipt_date_text: string | null;
   payment_notice_no: string | null;
-  receipt_amount: number | null;
+  receipt_amount: MoneyValue | null;
   receipt_ratio: number | null;
 }
 
 export interface BackendSalesDetail {
+  edit_context?: EditContext;
   summary: Record<string, string | number | null>;
   contracts: BackendSalesContract[];
   invoices: BackendSalesInvoice[];
@@ -331,8 +375,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers.Authorization = `Bearer ${authToken}`;
   }
   const response = await fetch(`${API_BASE}${path}`, {
-    headers,
     ...init,
+    headers: {...headers, ...init?.headers},
   });
   if (!response.ok) {
     const body = await response.text();
@@ -341,7 +385,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       authToken = '';
       window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
     }
-    throw new ApiError(response.status, message);
+    const error=new ApiError(response.status, message);
+    try { error.code=JSON.parse(body).detail?.code; } catch { /* Text errors have no code. */ }
+    if (response.status === 409 && error.code==='EDIT_CONFLICT') window.dispatchEvent(new CustomEvent('erp:edit-conflict'));
+    throw error;
   }
   return response.json() as Promise<T>;
 }
@@ -356,9 +403,10 @@ async function requestBlob(path: string): Promise<Blob> {
   return response.blob();
 }
 
-async function uploadExcel<T>(path: string, file: File): Promise<T> {
+async function uploadExcel<T>(path: string, file: File, extraHeaders?: Record<string, string>): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ...extraHeaders,
   };
   if (authToken) {
     headers.Authorization = `Bearer ${authToken}`;
@@ -380,7 +428,9 @@ async function ensureSuccessfulResponse(response: Response) {
     authToken = '';
     window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
   }
-  throw new ApiError(response.status, message);
+  const error = new ApiError(response.status, message);
+  try { error.report = JSON.parse(body).report; } catch { /* Plain errors remain readable. */ }
+  throw error;
 }
 
 export function parseErrorMessage(body: string) {
@@ -417,16 +467,31 @@ function query(params: Record<string, string | number | undefined>) {
   return value ? `?${value}` : '';
 }
 
-export const api = {
+export function editingApi(editContext?: EditContext) {
+  const editRequest = <T>(path: string, init?: RequestInit) => request<T>(path, {...init,headers:{...init?.headers,...(editContext ? {'X-Edit-Context':JSON.stringify(editContext)} : {})}});
+  return {
+  createLegacyPreview: (file: File) => uploadExcel<PreviewCreated>(`/orders/import-preview${query({ filename: file.name })}`, file),
+  importSource: (file: File, preview: boolean, duplicateToken?: string) => uploadExcel<SourceImportResult>(`/orders/source-import${query({ filename: file.name, preview: String(preview) })}`, file, duplicateToken ? { 'X-Duplicate-Confirmation': duplicateToken } : undefined),
+  importBatches: (offset = 0) => editRequest<{ total: number; items: ImportBatch[] }>(`/import-batches?offset=${offset}&limit=20`),
+  importBatch: (id: number) => editRequest<ImportBatchDetail>(`/import-batches/${id}`),
+  revertImportBatch: (id: number, token: string, confirmation: string) => editRequest<{ reverted_rows: number }>(`/import-batches/${id}/revert`, { method: 'POST', body: JSON.stringify({ token, confirmation }) }),
+  getLegacyPreview: (sessionId: string, offset = 0, limit = 20) =>
+    editRequest<PreviewPage>(`/orders/import-preview/${encodeURIComponent(sessionId)}${query({ offset, limit })}`),
+  resolveLegacyPreview: (sessionId: string, items: Array<{ excel_row_no: number; resolution: RowResolution }>) =>
+    editRequest<{ updated: number; summary: PreviewSummary }>(`/orders/import-preview/${encodeURIComponent(sessionId)}/resolutions`, {
+      method: 'PUT', body: JSON.stringify({ items }),
+    }),
+  commitLegacyPreview: (sessionId: string, file: File) =>
+    uploadExcel<PreviewResult>(`/orders/import-preview/${encodeURIComponent(sessionId)}/commit`, file),
   setToken: setApiToken,
   login: (data: { username: string; password: string }) =>
-    request<{ access_token: string; token_type: string; user: BackendAuthUser }>('/auth/login', {
+    editRequest<{ access_token: string; token_type: string; user: BackendAuthUser }>('/auth/login', {
       method: 'POST',
       body: JSON.stringify(data),
     }),
-  me: () => request<{ user: BackendAuthUser }>('/auth/me'),
+  me: () => editRequest<{ user: BackendAuthUser }>('/auth/me'),
   users: (status: 'active' | 'inactive' = 'active') =>
-    request<{ items: BackendUserRecord[] }>(`/auth/users${query({ status })}`),
+    editRequest<{ items: BackendUserRecord[] }>(`/auth/users${query({ status })}`),
   createUser: (data: {
     username: string;
     password: string;
@@ -438,7 +503,7 @@ export const api = {
     department_can_entry: boolean;
     department_all: boolean;
   }) =>
-    request<{ items: BackendUserRecord[] }>('/auth/users', { method: 'POST', body: JSON.stringify(data) }),
+    editRequest<{ items: BackendUserRecord[] }>('/auth/users', { method: 'POST', body: JSON.stringify(data) }),
   updateUserPermissions: (
     userId: number,
     data: {
@@ -449,45 +514,58 @@ export const api = {
       department_can_entry: boolean;
       department_all: boolean;
     },
-  ) => request<{ items: BackendUserRecord[] }>(`/auth/users/${userId}`, { method: 'PUT', body: JSON.stringify(data) }),
+  ) => editRequest<{ items: BackendUserRecord[] }>(`/auth/users/${userId}`, { method: 'PUT', body: JSON.stringify(data) }),
   resetUserPassword: (userId: number, password: string) =>
-    request<{ message: string }>(`/auth/users/${userId}/reset-password`, {
+    editRequest<{ message: string }>(`/auth/users/${userId}/reset-password`, {
       method: 'POST',
       body: JSON.stringify({ password }),
     }),
   deactivateUser: (userId: number) =>
-    request<{ items: BackendUserRecord[] }>(`/auth/users/${userId}`, { method: 'DELETE' }),
+    editRequest<{ items: BackendUserRecord[] }>(`/auth/users/${userId}`, { method: 'DELETE' }),
   restoreUser: (userId: number) =>
-    request<{ items: BackendUserRecord[] }>(`/auth/users/${userId}/restore`, { method: 'POST' }),
+    editRequest<{ items: BackendUserRecord[] }>(`/auth/users/${userId}/restore`, { method: 'POST' }),
   permanentlyDeleteUser: (userId: number) =>
-    request<{ items: BackendUserRecord[] }>(`/auth/users/${userId}/permanent`, { method: 'DELETE' }),
-  health: () => request<BackendHealth>('/health'),
-  importExcel: () => request<{ success_rows: number; failed_rows: number }>('/import/excel', { method: 'POST' }),
-  dashboardSummary: () => request<BackendDashboardSummary>('/dashboard/summary'),
+    editRequest<{ items: BackendUserRecord[] }>(`/auth/users/${userId}/permanent`, { method: 'DELETE' }),
+  history: (id: number) => editRequest<HistoryContext>(`/history/lines/${id}`),
+  renameOrders: (items: Array<{order_line_id: number; expected_order_no: string; order_no: string; reason: string}>) => editRequest<{updated: number}>('/history/rename-orders', {method:'POST',body:JSON.stringify({items})}),
+  transferProject: (data: unknown) => editRequest<{updated: boolean}>('/history/transfer-project', {method:'POST',body:JSON.stringify(data)}),
+  exportHistory: (params: Record<string,string | number | undefined> = {}) => requestBlob(`/history/export${query(params)}`),
+  health: () => editRequest<BackendHealth>('/health'),
+  importStatus: (sha256: string) => editRequest<{items: Array<{id:number;source_file_name:string;success_rows:number;uploaded_at:string}>; message:string}>(`/orders/import-status${query({sha256})}`),
+  maintenanceFiles: () => editRequest<{items: string[]}>('/import/files'),
+  previewMaintenance: (file_name: string) => editRequest<import('./lib/importReport').MaintenanceReport>('/import/preview', {method:'POST', body:JSON.stringify({file_name})}),
+  replaceMaintenance: async (file_name: string, token: string, confirmation: string) => {
+    try { return await editRequest<{success_rows: number; batch_id: number; backup_id: number}>('/import/excel', {method:'POST', body:JSON.stringify({file_name,token,confirmation})}); }
+    catch(error) {
+      if (error instanceof TypeError || (error instanceof ApiError && error.status>=500)) throw new Error('未能确认替换结果。请先刷新业务数据并核对操作日志中的替换批次，不要重复提交；必要时重新预检。');
+      throw error;
+    }
+  },
+  dashboardSummary: () => editRequest<BackendDashboardSummary>('/dashboard/summary'),
   ledgers: (params: Record<string, string | number | undefined> = {}) =>
-    request<PageResult<BackendProjectLedger>>(`/ledgers${query(params)}`),
+    editRequest<PageResult<BackendProjectLedger>>(`/ledgers${query(params)}`),
   orders: (params: Record<string, string | number | undefined> = {}) =>
-    request<PageResult<BackendOrderRecord>>(`/orders${query(params)}`),
+    editRequest<PageResult<BackendOrderRecord>>(`/orders${query(params)}`),
   createOrder: (data: Record<string, string | number | null>) =>
-    request<BackendOrderRecord>('/orders', { method: 'POST', body: JSON.stringify(data) }),
+    editRequest<BackendOrderRecord>('/orders', { method: 'POST', body: JSON.stringify(data) }),
   createOrdersBatch: (items: Array<Record<string, string | number | null>>) =>
-    request<{ created: number; order_line_ids: number[] }>('/orders/batch', {
+    editRequest<{ created: number; order_line_ids: number[] }>('/orders/batch', {
       method: 'POST',
       body: JSON.stringify({ items }),
     }),
-  batchOrderEditorSchema: () => request<BackendBatchEditorResponse>('/orders/batch-editor/schema'),
+  batchOrderEditorSchema: () => editRequest<BackendBatchEditorResponse>('/orders/batch-editor/schema'),
   batchOrderEditorRows: (orderLineIds: number[]) =>
-    request<BackendBatchEditorResponse>('/orders/batch-editor/rows', {
+    editRequest<BackendBatchEditorResponse>('/orders/batch-editor/rows', {
       method: 'POST',
       body: JSON.stringify({ order_line_ids: orderLineIds }),
     }),
   createBasicOrdersBatch: (items: Array<Record<string, string | number | null>>) =>
-    request<{ created: number; order_line_ids: number[] }>('/orders/batch-basic', {
+    editRequest<{ created: number; order_line_ids: number[] }>('/orders/batch-basic', {
       method: 'POST',
       body: JSON.stringify({ items }),
     }),
   updateBasicOrdersBatch: (items: Array<Record<string, string | number | null>>) =>
-    request<{ updated: number; order_line_ids: number[] }>('/orders/batch-basic', {
+    editRequest<{ updated: number; order_line_ids: number[] }>('/orders/batch-basic', {
       method: 'PUT',
       body: JSON.stringify({ items }),
     }),
@@ -501,100 +579,104 @@ export const api = {
       success_rows: number;
       failed_rows: number;
       skipped_rows: number;
+      source_sha256: string;
     }>(
       `/orders/import-excel${query({ filename: file.name })}`,
       file,
     ),
   updateOrder: (orderLineId: number, data: Record<string, string | number | null>) =>
-    request<BackendOrderRecord>(`/orders/${orderLineId}`, { method: 'PUT', body: JSON.stringify(data) }),
-  deleteOrder: (orderLineId: number) => request<{ deleted: boolean; order_line_id: number }>(`/orders/${orderLineId}`, { method: 'DELETE' }),
+    editRequest<BackendOrderRecord>(`/orders/${orderLineId}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteOrder: (orderLineId: number) => editRequest<{ deleted: boolean; order_line_id: number }>(`/orders/${orderLineId}`, { method: 'DELETE' }),
   purchases: (params: Record<string, string | number | undefined> = {}) =>
-    request<PageResult<BackendPurchaseRecord>>(`/purchases${query(params)}`),
+    editRequest<PageResult<BackendPurchaseRecord>>(`/purchases${query(params)}`),
   batchPurchaseEditorRows: (orderLineIds: number[]) =>
-    request<BackendBatchEditorResponse>('/purchases/batch-editor/rows', {
+    editRequest<BackendBatchEditorResponse>('/purchases/batch-editor/rows', {
       method: 'POST',
       body: JSON.stringify({ order_line_ids: orderLineIds }),
     }),
   updatePurchasesBatch: (items: Array<Record<string, string | number | null>>) =>
-    request<{ updated: number; order_line_ids: number[] }>('/purchases/batch', {
+    editRequest<{ updated: number; order_line_ids: number[] }>('/purchases/batch', {
       method: 'PUT',
       body: JSON.stringify({ items }),
     }),
-  purchaseDetail: (orderLineId: number) => request<BackendPurchaseDetail>(`/purchases/${orderLineId}`),
+  purchaseDetail: (orderLineId: number) => editRequest<BackendPurchaseDetail>(`/purchases/${orderLineId}`),
   updatePurchaseSummary: (orderLineId: number, data: Record<string, string | number | null>) =>
-    request<BackendPurchaseDetail>(`/purchases/${orderLineId}/summary`, { method: 'PUT', body: JSON.stringify(data) }),
+    editRequest<BackendPurchaseDetail>(`/purchases/${orderLineId}/summary`, { method: 'PUT', body: JSON.stringify(data) }),
   addPurchaseContract: (orderLineId: number, data: Record<string, string | number | null>) =>
-    request<BackendPurchaseDetail>(`/purchases/${orderLineId}/contracts`, { method: 'POST', body: JSON.stringify(data) }),
+    editRequest<BackendPurchaseDetail>(`/purchases/${orderLineId}/contracts`, { method: 'POST', body: JSON.stringify(data) }),
   updatePurchaseContract: (contractId: number, data: Record<string, string | number | null>) =>
-    request<BackendPurchaseDetail>(`/purchases/contracts/${contractId}`, { method: 'PUT', body: JSON.stringify(data) }),
+    editRequest<BackendPurchaseDetail>(`/purchases/contracts/${contractId}`, { method: 'PUT', body: JSON.stringify(data) }),
   deletePurchaseContract: (contractId: number) =>
-    request<BackendPurchaseDetail>(`/purchases/contracts/${contractId}`, { method: 'DELETE' }),
+    editRequest<BackendPurchaseDetail>(`/purchases/contracts/${contractId}`, { method: 'DELETE' }),
   addPurchaseInvoice: (orderLineId: number, data: Record<string, string | number | null>) =>
-    request<BackendPurchaseDetail>(`/purchases/${orderLineId}/invoices`, { method: 'POST', body: JSON.stringify(data) }),
+    editRequest<BackendPurchaseDetail>(`/purchases/${orderLineId}/invoices`, { method: 'POST', body: JSON.stringify(data) }),
   updatePurchaseInvoice: (invoiceId: number, data: Record<string, string | number | null>) =>
-    request<BackendPurchaseDetail>(`/purchases/invoices/${invoiceId}`, { method: 'PUT', body: JSON.stringify(data) }),
+    editRequest<BackendPurchaseDetail>(`/purchases/invoices/${invoiceId}`, { method: 'PUT', body: JSON.stringify(data) }),
   deletePurchaseInvoice: (invoiceId: number) =>
-    request<BackendPurchaseDetail>(`/purchases/invoices/${invoiceId}`, { method: 'DELETE' }),
+    editRequest<BackendPurchaseDetail>(`/purchases/invoices/${invoiceId}`, { method: 'DELETE' }),
   addWarehouseEntry: (orderLineId: number, data: Record<string, string | number | null>) =>
-    request<BackendPurchaseDetail>(`/purchases/${orderLineId}/warehouse-entries`, { method: 'POST', body: JSON.stringify(data) }),
+    editRequest<BackendPurchaseDetail>(`/purchases/${orderLineId}/warehouse-entries`, { method: 'POST', body: JSON.stringify(data) }),
   updateWarehouseEntry: (entryId: number, data: Record<string, string | number | null>) =>
-    request<BackendPurchaseDetail>(`/purchases/warehouse-entries/${entryId}`, { method: 'PUT', body: JSON.stringify(data) }),
+    editRequest<BackendPurchaseDetail>(`/purchases/warehouse-entries/${entryId}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteWarehouseEntry: (entryId: number) =>
-    request<BackendPurchaseDetail>(`/purchases/warehouse-entries/${entryId}`, { method: 'DELETE' }),
+    editRequest<BackendPurchaseDetail>(`/purchases/warehouse-entries/${entryId}`, { method: 'DELETE' }),
   addFinanceInvoiceCheck: (orderLineId: number, data: Record<string, string | number | null>) =>
-    request<BackendPurchaseDetail>(`/purchases/${orderLineId}/finance-invoice-checks`, { method: 'POST', body: JSON.stringify(data) }),
+    editRequest<BackendPurchaseDetail>(`/purchases/${orderLineId}/finance-invoice-checks`, { method: 'POST', body: JSON.stringify(data) }),
   updateFinanceInvoiceCheck: (checkId: number, data: Record<string, string | number | null>) =>
-    request<BackendPurchaseDetail>(`/purchases/finance-invoice-checks/${checkId}`, { method: 'PUT', body: JSON.stringify(data) }),
+    editRequest<BackendPurchaseDetail>(`/purchases/finance-invoice-checks/${checkId}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteFinanceInvoiceCheck: (checkId: number) =>
-    request<BackendPurchaseDetail>(`/purchases/finance-invoice-checks/${checkId}`, { method: 'DELETE' }),
+    editRequest<BackendPurchaseDetail>(`/purchases/finance-invoice-checks/${checkId}`, { method: 'DELETE' }),
   addFinancePayment: (orderLineId: number, data: Record<string, string | number | null>) =>
-    request<BackendPurchaseDetail>(`/purchases/${orderLineId}/finance-payments`, { method: 'POST', body: JSON.stringify(data) }),
+    editRequest<BackendPurchaseDetail>(`/purchases/${orderLineId}/finance-payments`, { method: 'POST', body: JSON.stringify(data) }),
   updateFinancePayment: (paymentId: number, data: Record<string, string | number | null>) =>
-    request<BackendPurchaseDetail>(`/purchases/finance-payments/${paymentId}`, { method: 'PUT', body: JSON.stringify(data) }),
+    editRequest<BackendPurchaseDetail>(`/purchases/finance-payments/${paymentId}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteFinancePayment: (paymentId: number) =>
-    request<BackendPurchaseDetail>(`/purchases/finance-payments/${paymentId}`, { method: 'DELETE' }),
+    editRequest<BackendPurchaseDetail>(`/purchases/finance-payments/${paymentId}`, { method: 'DELETE' }),
   addPurchasePayment: (orderLineId: number, data: Record<string, string | number | null>) =>
-    request<BackendPurchaseDetail>(`/purchases/${orderLineId}/payments`, { method: 'POST', body: JSON.stringify(data) }),
+    editRequest<BackendPurchaseDetail>(`/purchases/${orderLineId}/payments`, { method: 'POST', body: JSON.stringify(data) }),
   updatePurchasePayment: (paymentId: number, data: Record<string, string | number | null>) =>
-    request<BackendPurchaseDetail>(`/purchases/payments/${paymentId}`, { method: 'PUT', body: JSON.stringify(data) }),
+    editRequest<BackendPurchaseDetail>(`/purchases/payments/${paymentId}`, { method: 'PUT', body: JSON.stringify(data) }),
   deletePurchasePayment: (paymentId: number) =>
-    request<BackendPurchaseDetail>(`/purchases/payments/${paymentId}`, { method: 'DELETE' }),
+    editRequest<BackendPurchaseDetail>(`/purchases/payments/${paymentId}`, { method: 'DELETE' }),
   sales: (params: Record<string, string | number | undefined> = {}) =>
-    request<PageResult<BackendSalesRecord>>(`/sales${query(params)}`),
+    editRequest<PageResult<BackendSalesRecord>>(`/sales${query(params)}`),
   batchSalesEditorRows: (orderLineIds: number[]) =>
-    request<BackendBatchEditorResponse>('/sales/batch-editor/rows', {
+    editRequest<BackendBatchEditorResponse>('/sales/batch-editor/rows', {
       method: 'POST',
       body: JSON.stringify({ order_line_ids: orderLineIds }),
     }),
   updateSalesBatch: (items: Array<Record<string, string | number | null>>) =>
-    request<{ updated: number; order_line_ids: number[] }>('/sales/batch', {
+    editRequest<{ updated: number; order_line_ids: number[] }>('/sales/batch', {
       method: 'PUT',
       body: JSON.stringify({ items }),
     }),
-  salesDetail: (orderLineId: number) => request<BackendSalesDetail>(`/sales/${orderLineId}`),
+  salesDetail: (orderLineId: number) => editRequest<BackendSalesDetail>(`/sales/${orderLineId}`),
   salesDetailByOrder: (projectId: string, orderId: string) =>
-    request<BackendSalesDetail>(`/sales/by-order${query({ project_id: projectId, order_id: orderId })}`),
+    editRequest<BackendSalesDetail>(`/sales/by-order${query({ project_id: projectId, order_id: orderId })}`),
   addSalesContract: (orderLineId: number, data: Record<string, string | number | null>) =>
-    request<BackendSalesDetail>(`/sales/${orderLineId}/contracts`, { method: 'POST', body: JSON.stringify(data) }),
+    editRequest<BackendSalesDetail>(`/sales/${orderLineId}/contracts`, { method: 'POST', body: JSON.stringify(data) }),
   updateSalesContract: (contractId: number, data: Record<string, string | number | null>) =>
-    request<BackendSalesDetail>(`/sales/contracts/${contractId}`, { method: 'PUT', body: JSON.stringify(data) }),
+    editRequest<BackendSalesDetail>(`/sales/contracts/${contractId}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteSalesContract: (contractId: number) =>
-    request<BackendSalesDetail>(`/sales/contracts/${contractId}`, { method: 'DELETE' }),
+    editRequest<BackendSalesDetail>(`/sales/contracts/${contractId}`, { method: 'DELETE' }),
   addSalesInvoice: (orderLineId: number, data: Record<string, string | number | null>) =>
-    request<BackendSalesDetail>(`/sales/${orderLineId}/invoices`, { method: 'POST', body: JSON.stringify(data) }),
+    editRequest<BackendSalesDetail>(`/sales/${orderLineId}/invoices`, { method: 'POST', body: JSON.stringify(data) }),
   updateSalesInvoice: (invoiceId: number, data: Record<string, string | number | null>) =>
-    request<BackendSalesDetail>(`/sales/invoices/${invoiceId}`, { method: 'PUT', body: JSON.stringify(data) }),
+    editRequest<BackendSalesDetail>(`/sales/invoices/${invoiceId}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteSalesInvoice: (invoiceId: number) =>
-    request<BackendSalesDetail>(`/sales/invoices/${invoiceId}`, { method: 'DELETE' }),
+    editRequest<BackendSalesDetail>(`/sales/invoices/${invoiceId}`, { method: 'DELETE' }),
   addSalesReceipt: (orderLineId: number, data: Record<string, string | number | null>) =>
-    request<BackendSalesDetail>(`/sales/${orderLineId}/receipts`, { method: 'POST', body: JSON.stringify(data) }),
+    editRequest<BackendSalesDetail>(`/sales/${orderLineId}/receipts`, { method: 'POST', body: JSON.stringify(data) }),
   updateSalesReceipt: (receiptId: number, data: Record<string, string | number | null>) =>
-    request<BackendSalesDetail>(`/sales/receipts/${receiptId}`, { method: 'PUT', body: JSON.stringify(data) }),
+    editRequest<BackendSalesDetail>(`/sales/receipts/${receiptId}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteSalesReceipt: (receiptId: number) =>
-    request<BackendSalesDetail>(`/sales/receipts/${receiptId}`, { method: 'DELETE' }),
-  logs: () => request<PageResult<BackendOperationLog>>('/logs?limit=100'),
-  backups: () => request<PageResult<BackendBackupInfo>>('/backups?limit=100'),
-  createBackup: () => request<{ id: number; file_name: string; file_size_label: string }>('/backups', { method: 'POST' }),
+    editRequest<BackendSalesDetail>(`/sales/receipts/${receiptId}`, { method: 'DELETE' }),
+  logs: () => editRequest<PageResult<BackendOperationLog>>('/logs?limit=100'),
+  backups: () => editRequest<PageResult<BackendBackupInfo>>('/backups?limit=100'),
+  verifyBackup: (id: number) => editRequest<{verified: boolean; message: string}>(`/backups/${id}/verify`),
+  createBackup: () => editRequest<{ id: number; file_name: string; file_size_label: string }>('/backups', { method: 'POST' }),
   restoreBackup: (backupId: number) =>
-    request<{ restored: boolean; backup_id: number; restored_rows: number }>(`/backups/${backupId}/restore`, { method: 'POST' }),
+    editRequest<{ restored: boolean; backup_id: number; restored_rows: number }>(`/backups/${backupId}/restore`, { method: 'POST' }),
 };
+}
+export const api = editingApi();

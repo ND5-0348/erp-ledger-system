@@ -13,7 +13,8 @@ from sqlalchemy.engine import Connection
 
 from .audit import write_operation_log
 from .auth import CurrentUser
-from .config import BACKUP_DIR
+from .config import BACKUP_DIR, LEGACY_BACKUP_DIR, settings
+from .backup_integrity import read_payload, sha256
 
 
 # 业务备份表清单。顺序即恢复时的插入顺序，必须满足外键依赖：
@@ -39,6 +40,7 @@ BACKUP_TABLES = [
     "sales_contract",
     "sales_invoice",
     "sales_receipt",
+    "legacy_import_audit_source",
 ]
 
 
@@ -70,16 +72,24 @@ def create_backup(conn: Connection, user: CurrentUser, backup_type: str = "manua
         tables[table_name] = [dict(row) for row in rows]
 
     payload = {
-        "format": "erp-ledger-backup-v1",
+        "format": "erp-ledger-backup-v2",
+        "source_database": settings.mysql_database,
+        "schema_version": 2,
+        "row_counts": {name:len(rows) for name,rows in tables.items()},
         "created_at": datetime.now().isoformat(),
         "tables": tables,
     }
     try:
         with gzip.open(temporary, "wt", encoding="utf-8") as stream:
             json.dump(payload, stream, ensure_ascii=False, default=_json_default)
+        manifest_tmp = Path(str(temporary)+'.manifest.json')
+        manifest_tmp.write_text(json.dumps({'sha256':sha256(temporary),'size_bytes':temporary.stat().st_size}),encoding='utf-8')
+        read_payload(temporary,BACKUP_TABLES,settings.mysql_database)
         temporary.replace(target)
+        manifest_tmp.replace(Path(str(target)+'.manifest.json'))
     except Exception:
         temporary.unlink(missing_ok=True)
+        Path(str(temporary)+'.manifest.json').unlink(missing_ok=True)
         raise
 
     size_bytes = target.stat().st_size
@@ -109,10 +119,10 @@ def create_backup(conn: Connection, user: CurrentUser, backup_type: str = "manua
         f"创建数据备份 {file_name}",
         after={"backup_id": backup_id, "file_name": file_name, "size_bytes": size_bytes},
     )
-    return {"id": backup_id, "file_name": file_name, "file_size_label": size_label}
+    return {"id": backup_id, "file_name": file_name, "file_size_label": size_label, "verified": True}
 
 
-def restore_backup(conn: Connection, backup_id: int, user: CurrentUser) -> dict[str, Any]:
+def backup_payload(conn: Connection, backup_id: int, *, allow_source_mapping=False):
     record = conn.execute(
         text(
             """
@@ -127,21 +137,28 @@ def restore_backup(conn: Connection, backup_id: int, user: CurrentUser) -> dict[
         raise HTTPException(status_code=404, detail="备份记录不存在")
 
     backup_path = Path(str(record["storage_path"])).resolve()
-    backup_root = BACKUP_DIR.resolve()
-    if backup_root not in backup_path.parents or not backup_path.is_file():
-        raise HTTPException(status_code=400, detail="备份文件无效或已丢失")
+    roots = (BACKUP_DIR.resolve(),LEGACY_BACKUP_DIR.resolve())
+    if not (roots[0] in backup_path.parents or backup_path.parent==roots[1]) or not backup_path.is_file():
+        raise HTTPException(400,'备份文件无效或已丢失')
+    payload=read_payload(backup_path,BACKUP_TABLES,settings.mysql_database,allow_source_mapping=allow_source_mapping)
+    return record,payload
 
-    try:
-        with gzip.open(backup_path, "rt", encoding="utf-8") as stream:
-            payload = json.load(stream)
-    except (OSError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=400, detail="备份文件损坏") from exc
 
-    if payload.get("format") != "erp-ledger-backup-v1" or not isinstance(payload.get("tables"), dict):
-        raise HTTPException(status_code=400, detail="不支持的备份格式")
-    tables = payload["tables"]
-    if set(tables) != set(BACKUP_TABLES):
-        raise HTTPException(status_code=400, detail="备份内容不完整")
+def verify_backup(conn: Connection, backup_id: int):
+    record,payload=backup_payload(conn,backup_id)
+    verified=payload['format']=='erp-ledger-backup-v2'
+    return {'backup_id':backup_id,'verified':verified,'format':payload['format'],
+            'message':'已校验：摘要、来源、结构和行数一致' if verified else '旧版备份：内容可读取，但缺少摘要与来源元数据，不标记为已校验'}
+
+
+def restore_backup(conn: Connection, backup_id: int, user: CurrentUser, *, allow_source_mapping=False) -> dict[str, Any]:
+    record,payload=backup_payload(conn,backup_id,allow_source_mapping=allow_source_mapping)
+    tables=payload['tables']
+    # Validate every table and column before deleting anything.
+    for table_name,rows in tables.items():
+        allowed=set(_insertable_columns(conn,table_name))
+        if any(not row or set(row)-allowed for row in rows):
+            raise HTTPException(400,f'备份表 {table_name} 字段不符合当前结构')
 
     for table_name in reversed(BACKUP_TABLES):
         conn.execute(text(f"DELETE FROM `{table_name}`"))
@@ -153,13 +170,33 @@ def restore_backup(conn: Connection, backup_id: int, user: CurrentUser) -> dict[
             if not isinstance(raw_row, dict):
                 raise HTTPException(status_code=400, detail=f"备份表 {table_name} 数据格式错误")
             row = {key: value for key, value in raw_row.items() if key in allowed_columns}
-            if table_name == "ledger_raw_row" and isinstance(row.get("raw_json"), (dict, list)):
+            if table_name in ("ledger_raw_row", "legacy_import_audit_source") and isinstance(row.get("raw_json"), (dict, list)):
                 row["raw_json"] = json.dumps(row["raw_json"], ensure_ascii=False)
             columns = list(row)
             column_sql = ", ".join(f"`{column}`" for column in columns)
             value_sql = ", ".join(f":{column}" for column in columns)
             conn.execute(text(f"INSERT INTO `{table_name}` ({column_sql}) VALUES ({value_sql})"), row)
             restored_rows += 1
+
+    if payload.get('legacy_history_missing'):
+        # Old v1 backups have no normalized subprojects/history: preserve known
+        # current values only. Never invent earlier names or effective dates.
+        conn.execute(text("""INSERT INTO sub_project (sales_order_id,name,customer_unit_name,end_user_name,regional_platform)
+          SELECT DISTINCT so.id, COALESCE(ol.project_name,p.project_name,''),p.customer_unit_name,p.end_user_name,p.regional_platform
+          FROM order_line ol JOIN sales_order so ON so.id=ol.sales_order_id JOIN project p ON p.id=so.project_id
+          WHERE ol.sub_project_id IS NULL"""))
+        conn.execute(text("""UPDATE order_line ol JOIN sales_order so ON so.id=ol.sales_order_id JOIN project p ON p.id=so.project_id
+          JOIN sub_project sp ON sp.sales_order_id=so.id AND sp.name=COALESCE(ol.project_name,p.project_name,'')
+          SET ol.sub_project_id=sp.id WHERE ol.sub_project_id IS NULL"""))
+        conn.execute(text("""INSERT INTO sales_order_number_history (sales_order_id,order_no,history_order,source)
+          SELECT so.id,so.order_no,1,'legacy_restore' FROM sales_order so
+          WHERE NOT EXISTS (SELECT 1 FROM sales_order_number_history h WHERE h.sales_order_id=so.id)"""))
+        conn.execute(text("""INSERT INTO project_manager_history (project_id,manager_name,history_order,source)
+          SELECT p.id,p.account_manager,1,'legacy_restore' FROM project p WHERE p.account_manager IS NOT NULL AND p.account_manager<>''
+          AND NOT EXISTS (SELECT 1 FROM project_manager_history h WHERE h.project_id=p.id)"""))
+
+    from .edit_versions import bump_epoch
+    bump_epoch(conn)
 
     write_operation_log(
         conn,
@@ -169,4 +206,4 @@ def restore_backup(conn: Connection, backup_id: int, user: CurrentUser) -> dict[
         f"从备份 {record['file_name']} 恢复业务数据",
         after={"backup_id": backup_id, "restored_rows": restored_rows},
     )
-    return {"restored": True, "backup_id": backup_id, "restored_rows": restored_rows}
+    return {"restored": True, "backup_id": backup_id, "restored_rows": restored_rows, "legacy_history_missing": bool(payload.get("legacy_history_missing"))}

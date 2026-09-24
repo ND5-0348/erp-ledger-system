@@ -1,6 +1,7 @@
 import React from 'react';
 import { ChevronRight, Pencil, Trash2 } from 'lucide-react';
 import { ProjectOrderSummary } from '../lib/projectOrderSummary';
+import { formatMoney as formatExactMoney } from '../lib/money';
 
 interface OrderOperatingSummarySectionProps {
   title: string;
@@ -17,38 +18,39 @@ interface OrderOperatingSummarySectionProps {
 const columnsByVariant = {
   all: [
     { key: 'salesOrderAmount', label: 'A销售订单金额' },
-    { key: 'purchaseAmount', label: 'A含税采购金额' },
-    { key: 'deliveryValue', label: 'B交付价值' },
+    { key: 'purchaseAmount', label: 'A采购金额' },
+    { key: 'deliveryValue', label: 'B交付收入' },
     { key: 'deliveryCost', label: 'B交付成本' },
     { key: 'receiptAmount', label: 'D回款金额' },
     { key: 'paymentAmount', label: 'D付款金额' },
     { key: 'invoiceAmount', label: 'E发票金额' },
+    { key: 'deliveryAccountsReceivable', label: '交付应收款' },
+    { key: 'invoiceAccountsReceivable', label: '开票应收款' },
     { key: 'receivedInvoiceAmount', label: 'E收票金额' },
   ],
   sales: [
     { key: 'salesOrderAmount', label: 'A销售订单金额' },
-    { key: 'deliveryValue', label: 'B交付价值' },
+    { key: 'deliveryValue', label: 'B交付收入' },
     { key: 'receiptAmount', label: 'D回款金额' },
     { key: 'invoiceAmount', label: 'E发票金额' },
+    { key: 'deliveryAccountsReceivable', label: '交付应收款' },
+    { key: 'invoiceAccountsReceivable', label: '开票应收款' },
   ],
   purchase: [
-    { key: 'purchaseAmount', label: 'A含税采购金额' },
+    { key: 'purchaseAmount', label: 'A采购金额' },
     { key: 'deliveryCost', label: 'B交付成本' },
     { key: 'paymentAmount', label: 'D付款金额' },
     { key: 'receivedInvoiceAmount', label: 'E收票金额' },
   ],
   payments: [
+    { key: 'deliveryAccountsReceivable', label: '交付应收款' },
+    { key: 'invoiceAccountsReceivable', label: '开票应收款' },
     { key: 'receiptAmount', label: 'D回款金额' },
     { key: 'paymentAmount', label: 'D付款金额' },
   ],
 } as const;
 
-function formatMoney(value: number) {
-  return new Intl.NumberFormat('zh-CN', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(Number(value || 0));
-}
+const formatMoney = formatExactMoney;
 
 export default function OrderOperatingSummarySection({
   title,
@@ -71,7 +73,7 @@ export default function OrderOperatingSummarySection({
           <thead className="bg-slate-50 text-xs text-slate-500">
             <tr>
               <th className="px-4 py-2 font-semibold w-[200px]">订单号</th>
-              <th className="px-4 py-2 font-semibold w-[130px]">订单日期</th>
+              <th className="px-4 py-2 font-semibold w-[130px]">销售订单日期</th>
               {amountColumns.map((column) => (
                 <th key={column.key} className="px-4 py-2 font-semibold text-right w-[190px]">
                   {column.label}

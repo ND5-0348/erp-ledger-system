@@ -31,8 +31,12 @@ def _split_sql(sql: str) -> list[str]:
 
 
 def initialize_schema() -> None:
+    if not re.fullmatch(r'[A-Za-z0-9_]+',settings.mysql_database):
+        raise ValueError('MYSQL_DATABASE 只能包含字母、数字和下划线')
     schema_path = DOCS_DIR / "erp_ledger_schema.sql"
-    statements = _split_sql(schema_path.read_text(encoding="utf-8"))
+    schema = schema_path.read_text(encoding="utf-8")
+    schema = schema.replace('CREATE DATABASE IF NOT EXISTS erp_ledger',f'CREATE DATABASE IF NOT EXISTS `{settings.mysql_database}`').replace('USE erp_ledger;',f'USE `{settings.mysql_database}`;')
+    statements = _split_sql(schema)
     view_statements = [statement for statement in statements if statement.lstrip().upper().startswith(("DROP VIEW", "CREATE VIEW"))]
     table_statements = [statement for statement in statements if statement not in view_statements]
     with server_engine.begin() as conn:
@@ -55,9 +59,24 @@ def apply_runtime_migrations() -> None:
         "sales_receipt",
     ]
     with engine.begin() as conn:
+        # A receipt may precede most invoices: its derived percentage can exceed
+        # 100%. Keep six decimals, with room for every supported monetary input.
+        ratio_precision = conn.execute(text(
+            "SELECT NUMERIC_PRECISION FROM information_schema.columns "
+            "WHERE table_schema=DATABASE() AND table_name='sales_receipt' AND column_name='receipt_ratio'"
+        )).scalar()
+        if ratio_precision is not None and int(ratio_precision) < 30:
+            conn.execute(text("ALTER TABLE sales_receipt MODIFY COLUMN receipt_ratio DECIMAL(30,6) NULL"))
         project_name_column_added = False
         additional_columns = {
+            "project": {"version": "BIGINT NOT NULL DEFAULT 1"},
+            "import_batch": {"source_sha256": "CHAR(64) NULL", "review_json": "JSON NULL", "baseline_sha256": "CHAR(64) NULL", "pre_import_backup_id": "BIGINT UNSIGNED NULL"},
             "order_line": {
+                "source_preserved": "TINYINT NOT NULL DEFAULT 0",
+                "line_department": "VARCHAR(64) NULL",
+                "line_branch_company": "VARCHAR(128) NULL",
+                "line_account_manager": "VARCHAR(255) NULL",
+                "line_team_level3_name": "VARCHAR(128) NULL",
                 "project_name": "VARCHAR(255) NULL",
                 "sales_tax_rate": "DECIMAL(10,6) NULL",
             },
@@ -308,6 +327,7 @@ PREVIEW_DDL: tuple[tuple[str, str], ...] = (
           source_file_name VARCHAR(255) NOT NULL,
           source_sha256 CHAR(64) NOT NULL,
           parser_version VARCHAR(32) NOT NULL,
+          edit_context JSON NULL,
           status VARCHAR(32) NOT NULL DEFAULT 'pending',
           summary_json JSON NULL,
           result_json JSON NULL,
@@ -346,6 +366,8 @@ def _ensure_history_storage(conn) -> None:
     for table_name, ddl in HISTORY_DDL + PREVIEW_DDL:
         if not _table_exists(conn, table_name):
             conn.execute(text(ddl))
+    if not _column_exists(conn,'legacy_import_session','edit_context'):
+        conn.execute(text('ALTER TABLE legacy_import_session ADD COLUMN edit_context JSON NULL'))
 
 
 def purge_expired_preview_sessions(conn, *, older_than_hours: int = 24) -> int:

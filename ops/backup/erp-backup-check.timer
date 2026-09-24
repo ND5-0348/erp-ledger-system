@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly ERP backup health check
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=erp-backup-check.service
+
+[Install]
+WantedBy=timers.target

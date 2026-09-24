@@ -1,24 +1,29 @@
 import { isClosedStatus } from './ledgerStats';
+import { compareMoney, decimalMoney, differenceMoney, moneyString, sumMoney, type MoneyValue } from './money';
 type ReceiptLike = { phase_no?: number | null };
 
 type SalesDraftSource = {
-  contractValue: number;
-  invoiceAmount: number;
+  contractValue: MoneyValue;
+  invoiceAmount: MoneyValue;
 };
 
 type SalesOrderRow = Record<string, string | number | null | undefined>;
 
 type LedgerLike = {
-  orderAmount: number;
-  purchaseAmount: number;
-  totalReceived: number;
+  orderAmount: MoneyValue;
+  purchaseAmount: MoneyValue;
+  totalReceived: MoneyValue;
+  deliveryAccountsReceivable?: MoneyValue;
+  invoiceAccountsReceivable?: MoneyValue;
+  deliveryValue?: MoneyValue;
+  salesInvoiceAmount?: MoneyValue;
 };
 
 type DetailOrderLike = {
   projectId: string;
   orderId: string;
   goodsName: string;
-  orderValue: number;
+  orderValue: MoneyValue;
 };
 
 type DetailPurchaseLike = {
@@ -27,9 +32,9 @@ type DetailPurchaseLike = {
   orderId: string;
   contractNo: string;
   supplier: string;
-  contractAmount: number;
-  invoiceAmount: number;
-  paymentAmount: number;
+  contractAmount: MoneyValue;
+  invoiceAmount: MoneyValue;
+  paymentAmount: MoneyValue;
 };
 
 type DetailSaleLike = {
@@ -38,9 +43,11 @@ type DetailSaleLike = {
   orderId: string;
   contractNo: string;
   contractDate: string;
-  contractValue: number;
-  totalReceived?: number;
-  accountsReceivable?: number;
+  contractValue: MoneyValue;
+  totalReceived?: MoneyValue;
+  accountsReceivable?: MoneyValue;
+  deliveryAccountsReceivable?: MoneyValue;
+  invoiceAccountsReceivable?: MoneyValue;
 };
 
 const aggregateAmountKeys = [
@@ -52,6 +59,8 @@ const aggregateAmountKeys = [
   'sales_invoice_amount',
   'total_received',
   'accounts_receivable',
+  'delivery_accounts_receivable',
+  'invoice_accounts_receivable',
   'gross_profit',
 ];
 
@@ -60,13 +69,14 @@ export function getNextReceiptPhase(receipts: ReceiptLike[]) {
 }
 
 export function buildSalesInvoiceDraft(source: SalesDraftSource) {
-  const pendingAmount = Math.max(0, Number(source.contractValue || 0) - Number(source.invoiceAmount || 0));
+  const pendingAmount = compareMoney(source.contractValue, source.invoiceAmount) > 0
+    ? differenceMoney(source.contractValue, source.invoiceAmount) : '0.00';
   return {
     invoice_doc_no: '',
     invoice_date: '',
     invoice_no: '',
-    invoice_amount: String(Number(source.invoiceAmount || 0)),
-    pending_invoice_amount: String(pendingAmount),
+    invoice_amount: moneyString(source.invoiceAmount),
+    pending_invoice_amount: pendingAmount,
     delivered_not_invoiced_amount: '',
   };
 }
@@ -82,7 +92,7 @@ export function aggregateSalesOrderRows(rows: SalesOrderRow[]) {
   aggregateAmountKeys
     .filter((key) => rows.some((row) => Object.prototype.hasOwnProperty.call(row, key)))
     .forEach((key) => {
-      aggregate[key] = rows.reduce((total, row) => total + Number(row[key] || 0), 0);
+      aggregate[key] = sumMoney(...rows.map(row => row[key]));
     });
 
   rows.forEach((row) => {
@@ -110,16 +120,18 @@ export function getLedgerFinanceSummary(
   sales: DetailSaleLike[],
 ) {
   return {
-    accountsPayable: Number(ledger.purchaseAmount || 0),
-    paidAmount: purchases.reduce((total, item) => total + Number(item.paymentAmount || 0), 0),
+    accountsPayable: moneyString(ledger.purchaseAmount),
+    deliveryAccountsReceivable: moneyString(ledger.deliveryAccountsReceivable ?? differenceMoney(ledger.deliveryValue, ledger.totalReceived)),
+    invoiceAccountsReceivable: moneyString(ledger.invoiceAccountsReceivable ?? differenceMoney(ledger.salesInvoiceAmount, ledger.totalReceived)),
+    paidAmount: sumMoney(...purchases.map(item => item.paymentAmount)),
     accountsReceivable:
       sales.length > 0
-        ? sales.reduce((total, item) => total + Number(item.accountsReceivable || 0), 0)
-        : Math.max(0, Number(ledger.orderAmount || 0) - Number(ledger.totalReceived || 0)),
+        ? sumMoney(...sales.map(item => item.accountsReceivable))
+        : compareMoney(ledger.orderAmount, ledger.totalReceived) > 0 ? differenceMoney(ledger.orderAmount, ledger.totalReceived) : '0.00',
     receivedAmount:
       sales.length > 0
-        ? sales.reduce((total, item) => total + Number(item.totalReceived || 0), 0)
-        : Number(ledger.totalReceived || 0),
+        ? sumMoney(...sales.map(item => item.totalReceived))
+        : moneyString(ledger.totalReceived),
   };
 }
 
@@ -158,10 +170,10 @@ export function buildLedgerContractRows(
       goodsName: order.goodsName,
       purchaseContractNo: purchase?.contractNo || '-',
       supplier: purchase?.supplier || '-',
-      purchaseContractAmount: Number(purchase?.contractAmount || 0),
+      purchaseContractAmount: moneyString(purchase?.contractAmount),
       salesContractNo: sale?.contractNo || '-',
       salesContractDate: sale?.contractDate || '-',
-      salesContractValue: Number(sale?.contractValue || 0),
+      salesContractValue: moneyString(sale?.contractValue),
     };
   });
 }
@@ -180,21 +192,22 @@ export function buildLedgerPaymentRows(
     const matchingSale = sales.find((item) => item.projectId === order.projectId && item.orderId === order.orderId) || null;
     const purchase = matchingPurchase?.orderLineId ? purchaseByLine.get(lineKey(matchingPurchase)) : matchingPurchase;
     const sale = matchingSale?.orderLineId ? saleByLine.get(lineKey(matchingSale)) : matchingSale;
-    const purchasePayableBase = Number(purchase?.contractAmount || purchase?.invoiceAmount || 0);
-    const purchasePaymentAmount = Number(purchase?.paymentAmount || 0);
-    const receiptAmount = Number(sale?.totalReceived || 0);
-    const accountsReceivable = Number(sale?.accountsReceivable ?? Math.max(0, order.orderValue - receiptAmount));
-    const grossProfit = Number(order.orderValue || 0) - purchasePayableBase;
-    const grossProfitRate = order.orderValue ? (grossProfit / Number(order.orderValue)) * 100 : 0;
+    const purchasePayableBase = moneyString(purchase?.contractAmount || purchase?.invoiceAmount);
+    const purchasePaymentAmount = moneyString(purchase?.paymentAmount);
+    const receiptAmount = moneyString(sale?.totalReceived);
+    const accountsReceivable = moneyString(sale?.accountsReceivable ??
+      (compareMoney(order.orderValue, receiptAmount) > 0 ? differenceMoney(order.orderValue, receiptAmount) : '0.00'));
+    const grossProfit = differenceMoney(order.orderValue, purchasePayableBase);
+    const grossProfitRate = compareMoney(order.orderValue, 0) !== 0 ? decimalMoney(grossProfit).div(order.orderValue).times(100).toNumber() : 0;
 
     return {
       orderId: order.orderId,
       goodsName: order.goodsName,
       purchasePaymentAmount,
-      accountsPayable: Math.max(0, purchasePayableBase - purchasePaymentAmount),
+      accountsPayable: compareMoney(purchasePayableBase, purchasePaymentAmount) > 0 ? differenceMoney(purchasePayableBase, purchasePaymentAmount) : '0.00',
       salesReceiptDate: '-',
       receiptAmount,
-      receiptRatio: order.orderValue ? (receiptAmount / Number(order.orderValue)) * 100 : 0,
+      receiptRatio: compareMoney(order.orderValue, 0) !== 0 ? decimalMoney(receiptAmount).div(order.orderValue).times(100).toNumber() : 0,
       accountsReceivable,
       grossProfit,
       grossProfitRate,

@@ -19,6 +19,7 @@ import {
   getDashboardSalesRanking,
   getDashboardTrendData,
 } from '../lib/dashboardMetrics';
+import { approximateMoney, decimalMoney, formatMoney as formatExactMoney, type MoneyValue } from '../lib/money';
 
 interface DashboardScreenProps {
   logs: OperationLog[];
@@ -32,19 +33,11 @@ interface TrendPoint {
   y: number;
 }
 
-function money(value: number) {
-  return new Intl.NumberFormat('zh-CN', {
-    style: 'currency',
-    currency: 'CNY',
-    maximumFractionDigits: 0,
-  }).format(value);
-}
-
-function compactMoney(value: number) {
-  if (Math.abs(value) >= 10000) {
-    return `${(value / 10000).toFixed(2)} 万元`;
+function compactMoney(value: MoneyValue) {
+  if (decimalMoney(value).abs().gte(10000)) {
+    return `${decimalMoney(value).div(10000).toFixed(2)} 万元`;
   }
-  return `${value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} 元`;
+  return `${formatExactMoney(value)} 元`;
 }
 
 function smoothPath(points: TrendPoint[]) {
@@ -72,10 +65,10 @@ export default function DashboardScreen({ logs, ledgers, orders, onNavigate }: D
   const recentLogs = logs.slice(0, 5);
   const trendData = getDashboardTrendData(orders, dashboardFilters);
   const latestModifiedAt = getDashboardLatestModifiedAt(orders, dashboardFilters);
-  const maxTrendValue = Math.max(...trendData.flatMap((item) => [item.orderAmount, item.profit]), 1);
-  const toPoint = (value: number, index: number): TrendPoint => ({
+  const maxTrendValue = Math.max(...trendData.flatMap((item) => [approximateMoney(item.orderAmount), approximateMoney(item.profit)]), 1);
+  const toPoint = (value: MoneyValue, index: number): TrendPoint => ({
     x: trendData.length === 1 ? 300 : (index / (trendData.length - 1)) * 600,
-    y: 180 - (Math.max(value, 0) / maxTrendValue) * 150,
+    y: 180 - (Math.max(approximateMoney(value), 0) / maxTrendValue) * 150,
   });
   const orderPoints = trendData.map((item, index) => toPoint(item.orderAmount, index));
   const profitPoints = trendData.map((item, index) => toPoint(item.profit, index));
@@ -89,13 +82,14 @@ export default function DashboardScreen({ logs, ledgers, orders, onNavigate }: D
   const tooltipX = hoveredPoint ? Math.min(Math.max(hoveredPoint.x, 88), 512) : 0;
   const tooltipY = hoveredPoint ? Math.max(hoveredPoint.y - 54, 8) : 0;
 
-  const maxRankingAmount = Math.max(...salesRanking.map((item) => item.amount), 1);
+  const maxRankingAmount = Math.max(...salesRanking.map((item) => approximateMoney(item.amount)), 1);
 
   const metrics = [
     { label: '销售订单总金额', value: compactMoney(dashboardMetrics.totalOrderAmount), icon: Wallet },
     { label: '毛利润', value: compactMoney(dashboardMetrics.grossProfit), icon: TrendingUp },
     { label: '订单总数', value: `${dashboardMetrics.orderCount.toLocaleString('zh-CN')} 个`, icon: ShoppingCart },
-    { label: '应收账款', value: compactMoney(dashboardMetrics.accountsReceivable), icon: ArrowDownLeft },
+    { label: '交付应收款', value: compactMoney(dashboardMetrics.deliveryAccountsReceivable), icon: ArrowDownLeft },
+    { label: '开票应收款', value: compactMoney(dashboardMetrics.invoiceAccountsReceivable), icon: ArrowDownLeft },
     { label: '应付账款', value: compactMoney(dashboardMetrics.accountsPayable), icon: ArrowUpRight },
     { label: '已关闭订单', value: `${dashboardMetrics.closedCount.toLocaleString('zh-CN')} 个`, icon: CheckCircle2 },
   ] as const;
@@ -127,14 +121,14 @@ export default function DashboardScreen({ logs, ledgers, orders, onNavigate }: D
           </label>
           <div className="flex items-center gap-2 px-3 py-1.5 bg-white border border-slate-200 text-slate-700 rounded-lg shadow-sm text-xs">
             <Calendar className="w-4 h-4 text-slate-400" />
-            <span className="font-medium text-slate-500">订单日期</span>
+            <span className="font-medium text-slate-500">销售订单日期</span>
             <input
               type="date"
               value={startDate}
               onChange={(event) => setStartDate(event.target.value)}
               max={endDate || undefined}
               className="w-[116px] bg-transparent outline-none text-slate-800 font-medium cursor-pointer"
-              aria-label="订单日期开始日期"
+              aria-label="销售订单日期开始日期"
             />
             <span className="text-slate-400">至</span>
             <input
@@ -143,7 +137,7 @@ export default function DashboardScreen({ logs, ledgers, orders, onNavigate }: D
               onChange={(event) => setEndDate(event.target.value)}
               min={startDate || undefined}
               className="w-[116px] bg-transparent outline-none text-slate-800 font-medium cursor-pointer"
-              aria-label="订单日期结束日期"
+              aria-label="销售订单日期结束日期"
             />
           </div>
           <div className="flex items-center gap-2 px-3 py-1.5 bg-white border border-slate-200 text-slate-700 rounded-lg shadow-sm text-xs font-mono" title="当前筛选结果中的数据最新修改时间">
@@ -266,7 +260,7 @@ export default function DashboardScreen({ logs, ledgers, orders, onNavigate }: D
                   <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
                     <div
                       className="bg-blue-600 h-full rounded-full transition-all duration-500"
-                      style={{ width: `${Math.max((item.amount / maxRankingAmount) * 100, 4)}%` }}
+                      style={{ width: `${Math.max((approximateMoney(item.amount) / maxRankingAmount) * 100, 4)}%` }}
                     />
                   </div>
                 </div>

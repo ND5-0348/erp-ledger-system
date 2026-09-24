@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from io import BytesIO
@@ -22,8 +23,25 @@ from .ledger_history import (
 )
 from .legacy_ledger_parser import parse_name_sequence
 from .line_identity import find_duplicate_line
-from .ledger_excel import SAMPLE_ORDER_NO, SAMPLE_PROJECT_CODE, TEMPLATE_HEADERS, is_template_sample_row
-from .validation import validate_business_date
+from .financial_calculations import refresh_line
+from .ledger_excel import SAMPLE_ORDER_NO, SAMPLE_PROJECT_CODE, TEMPLATE_HEADERS, is_template_sample_row, standard_template_version
+from .validation import validate_business_date, Money, PreciseNumber
+from pydantic import TypeAdapter, ValidationError
+
+_MONEY_INPUT = TypeAdapter(Money)
+_PRECISE_INPUT = TypeAdapter(PreciseNumber)
+
+
+def validate_template_numbers(row, headers):
+    """Input fields share web-form bounds; derived totals are ignored."""
+    precise={18,20,21,26,27,31}
+    version = standard_template_version(headers)
+    money={23,29,42,46,49,52,57,60,70,76,81,85} | ({91,92} if version == 92 else {90,91})
+    for column in precise | money:
+        if len(row)<column or row[column-1] in (None,''):continue
+        try:(_PRECISE_INPUT if column in precise else _MONEY_INPUT).validate_python(_as_decimal(row[column-1]))
+        except (ValidationError,ValueError) as exc:
+            raise ValueError(f'{headers[column-1]}格式错误：须为非负数，金额最多2位、数量和单价最多6位小数') from exc
 
 
 BUSINESS_SHEET_INDEX = 2
@@ -73,11 +91,18 @@ def _as_decimal(value: Any) -> Decimal | None:
         return None
 
 
-def _as_tax_rate(value: Any) -> Decimal | None:
-    rate = _as_decimal(value)
+def _as_tax_rate(value: Any, number_format: str = "General") -> Decimal | None:
+    text_percent = isinstance(value, str) and value.strip().endswith("%")
+    raw = value.strip()[:-1] if text_percent else value
+    rate = _as_decimal(raw)
     if rate is None:
+        if value not in (None, ""):
+            raise ValueError("税率必须为有效数字或百分比")
         return None
-    if Decimal("0") < rate <= Decimal("1"):
+    # Excel stores percentage-formatted numbers as fractions; plain numbers
+    # and explicit text such as '0.5%' are already API percentage points.
+    unquoted = re.sub(r'"[^"]*"', '', number_format or "")
+    if not text_percent and re.search(r"(?<!\\)%", unquoted):
         rate *= Decimal("100")
     if rate < 0 or rate > 100:
         raise ValueError("税率必须在0到100之间")
@@ -165,7 +190,7 @@ def _detect_business_header_row(worksheet, *, max_scan_rows: int = 10) -> int:
         start=1,
     ):
         names = {str(value or "").strip() for value in row}
-        if REQUIRED_BUSINESS_HEADERS.issubset(names):
+        if {"项目编号", "项目名称"}.issubset(names) and names & {"订单号", "销售订单号"}:
             return row_no
     raise ValueError("Excel 前10行中未找到项目编号、订单号、项目名称等业务表头")
 
@@ -182,31 +207,9 @@ def _execute_scalar(conn: Connection, sql: str, params: dict[str, Any]) -> int:
 
 
 def _reset_business_data(conn: Connection) -> None:
-    tables = [
-        "sales_receipt",
-        "sales_invoice",
-        "sales_contract",
-        "purchase_payment",
-        "finance_payment_entry",
-        "finance_invoice_check",
-        "warehouse_entry",
-        "purchase_invoice",
-        "purchase_contract",
-        "delivery_record",
-        "purchase_info",
-        "order_line",
-        "sub_project",
-        "sales_order_number_history",
-        "sales_order",
-        "project_manager_history",
-        "project",
-        "ledger_raw_row",
-        "import_batch",
-    ]
-    conn.execute(text("SET FOREIGN_KEY_CHECKS=0"))
-    for table in tables:
-        conn.execute(text(f"TRUNCATE TABLE {table}"))
-    conn.execute(text("SET FOREIGN_KEY_CHECKS=1"))
+    from .backup import BACKUP_TABLES
+    for table in reversed(BACKUP_TABLES):
+        conn.execute(text(f"DELETE FROM `{table}`"))
 
 
 def _diff_row_against_stored(
@@ -318,6 +321,7 @@ def import_excel(
     user: CurrentUser | None = None,
     strict_template: bool = False,
     line_id_map: dict[int, int] | None = None,
+    preserve_source: bool = False,
 ) -> dict[str, Any]:
     workbook_path: Path | None = None
     if workbook_bytes is None:
@@ -336,8 +340,6 @@ def import_excel(
         sheet_index = 0
         header_row = 2 if strict_template else 0
         data_start_row = 3 if strict_template else 0
-    if reset:
-        _reset_business_data(conn)
 
     workbook = load_workbook(workbook_source, read_only=True, data_only=True)
     if len(workbook.worksheets) <= sheet_index:
@@ -348,24 +350,31 @@ def import_excel(
         data_start_row = header_row + 1
     headers = list(next(worksheet.iter_rows(min_row=header_row, max_row=header_row, values_only=True)))
     normalized_headers = [str(header or "").strip() for header in headers]
-    if strict_template and normalized_headers != TEMPLATE_HEADERS:
+    while normalized_headers and not normalized_headers[-1]:
+        normalized_headers.pop()
+    template_version = standard_template_version(normalized_headers)
+    if template_version is None and (strict_template or len(normalized_headers) in (91, 92)):
         raise ValueError("Excel 表头与“市场部业务台账模板”不一致，请重新下载模板后填写")
-    template_layout = strict_template and normalized_headers == TEMPLATE_HEADERS
+    template_layout = template_version is not None
     latest_layout = _is_latest_layout(headers)
 
     def position(latest: int, legacy: int | None = None) -> int:
         return _column_position(latest_layout, latest, legacy)
 
+    if reset:
+        _reset_business_data(conn)
+
     batch_id = _execute_scalar(
         conn,
         """
         INSERT INTO import_batch
-          (source_file_name, source_sheet_name, header_row_no, data_start_row_no, status, uploaded_by)
+          (source_file_name, source_sha256, source_sheet_name, header_row_no, data_start_row_no, status, uploaded_by)
         VALUES
-          (:file_name, :sheet_name, :header_row_no, :data_start_row_no, 'parsing', :uploaded_by)
+          (:file_name, :source_sha256, :sheet_name, :header_row_no, :data_start_row_no, 'parsing', :uploaded_by)
         """,
         {
             "file_name": source_file_name,
+            "source_sha256": hashlib.sha256(workbook_bytes if workbook_bytes is not None else workbook_path.read_bytes()).hexdigest(),
             "sheet_name": worksheet.title,
             "header_row_no": header_row,
             "data_start_row_no": data_start_row,
@@ -381,10 +390,11 @@ def import_excel(
     registered_orders: set[int] = set()
     registered_projects: set[int] = set()
 
-    for excel_row_no, row in enumerate(
-        worksheet.iter_rows(min_row=data_start_row, values_only=True),
+    for excel_row_no, row_cells in enumerate(
+        worksheet.iter_rows(min_row=data_start_row),
         start=data_start_row,
     ):
+        row = tuple(cell.value for cell in row_cells)
         if strict_template and is_template_sample_row(row):
             continue
         project_code = _as_text(_row_value(row, position(2, 2)))
@@ -399,21 +409,16 @@ def import_excel(
             # 内容，没有订单号）。这类行没有任何业务载荷，按非业务行跳过并计数；
             # 有业务载荷却缺编号的属于用户漏填，仍整批报错提示修改。
             if strict_template and _has_business_payload(row):
-                raise ValueError(message)
+                failed_rows += 1
+                error_messages.append(message)
+                continue
             skipped_rows += 1
             continue
 
         # 多值（甲/乙 或 A/B/C）属于改号与交接历史，普通追加导入不解析、也不
         # 允许把拼接字符串当成一个正常编号存库：必须走预检会话人工确认。
-        _reject_multi_value_chain(
-            order_no, excel_row_no, label="订单号", column="订单号"
-        )
-        _reject_multi_value_chain(
-            _as_text(_row_value(row, position(5, 5))),
-            excel_row_no,
-            label="客户经理",
-            column="客户经理",
-        )
+        if success_rows + failed_rows >= 20000:
+            raise ValueError('单次导入最多20000条业务行，请按完整项目分批')
 
         row_dict = {
             str(headers[i] or f"column_{i + 1}"): _json_default(value)
@@ -421,8 +426,15 @@ def import_excel(
         }
         raw_json = json.dumps(row_dict, ensure_ascii=False, default=_json_default)
         row_hash = hashlib.sha256(raw_json.encode("utf-8")).hexdigest()
+        if preserve_source:
+            row_hash = hashlib.sha256((str(excel_row_no)+':'+raw_json).encode('utf-8')).hexdigest()
 
         try:
+            if not preserve_source:
+                _reject_multi_value_chain(order_no, excel_row_no, label="订单号", column="订单号")
+            if template_layout and not preserve_source:validate_template_numbers(row,headers)
+            if not preserve_source:
+                _reject_multi_value_chain(_as_text(_row_value(row, position(5, 5))),excel_row_no,label="客户经理",column="客户经理")
             department = _as_text(_row_value(row, position(3, 3)))
             if user and not can_access_department(user, department, require_entry=True):
                 raise PermissionError(f"无权向部门“{department or '空'}”导入数据")
@@ -449,7 +461,7 @@ def import_excel(
             existing_project_id, conflicts = _find_shared_field_conflicts(
                 conn, project_code, row, position, user
             )
-            if conflicts:
+            if conflicts and not preserve_source:
                 raise ValueError(
                     f"第 {excel_row_no} 行项目 {project_code} 已在台账中，"
                     "以下项目级共享字段与台账不一致，普通导入只能追加明细、不能修改它们："
@@ -494,7 +506,7 @@ def import_excel(
                 ),
                 {"project_id": project_id, "order_no": order_no},
             ).scalar()
-            if exact_order_id is None:
+            if exact_order_id is None and not preserve_source:
                 conflicts = conflicts_in_project(conn, project_id, [order_no])
                 if conflicts:
                     raise ValueError(
@@ -528,17 +540,17 @@ def import_excel(
                     "order_date": _as_date(_row_value(row, position(6, 6))),
                     "business_type": _as_text(_row_value(row, position(7, 7))),
                     "statistic_category": _as_text(_row_value(row, position(8, 8))),
-                    "close_status": _as_text(_row_value(row, 89 if template_layout else position(96, 87))),
+                    "close_status": _as_text(_row_value(row, (90 if template_version == 92 else 89) if template_layout else position(96, 87))),
                 },
             )
 
             # 订单号与负责人的历史登记：普通导入只在还没有历史时登记当前值，
             # 绝不虚构历史、也不覆盖已确认的别名或交接链——改变当前订单号或现任
             # 负责人属于改号/交接流程，必须走预检确认（H3）后执行。
-            if sales_order_id not in registered_orders:
+            if sales_order_id not in registered_orders and not preserve_source:
                 register_current_number(conn, sales_order_id, order_no)
                 registered_orders.add(sales_order_id)
-            if project_id not in registered_projects:
+            if project_id not in registered_projects and not preserve_source:
                 register_current_manager(
                     conn, project_id, _as_text(_row_value(row, position(5, 5))) or ""
                 )
@@ -558,18 +570,18 @@ def import_excel(
                 )
 
             quantity = _as_decimal(_row_value(row, position(18, 18)))
-            sales_tax_rate = _as_tax_rate(_row_value(row, position(19))) if latest_layout else None
+            sales_tax_rate = _as_tax_rate(_row_value(row, position(19)), row_cells[position(19) - 1].number_format) if latest_layout else None
             sales_unit_price_no_tax = _as_decimal(_row_value(row, position(20, 19)))
             sales_unit_price = _as_decimal(_row_value(row, position(21, 20)))
             sales_unit_price, revenue_no_tax, order_value = _calculated_prices(
                 quantity, sales_tax_rate, sales_unit_price_no_tax, sales_unit_price
             )
-            revenue_no_tax = revenue_no_tax or _as_decimal(_row_value(row, position(22, 21)))
-            order_value = order_value or _as_decimal(_row_value(row, position(23, 22)))
+            revenue_no_tax = revenue_no_tax if revenue_no_tax is not None else _as_decimal(_row_value(row, position(22, 21)))
+            order_value = order_value if order_value is not None else _as_decimal(_row_value(row, position(23, 22)))
 
             # 判重限定在同一子项目内：物资名称、规格、销售单价、数量、采购厂商五项组合唯一。
             # 跨子项目、跨订单、跨框架允许五项完全相同。
-            if strict_template and _order_line_exists(
+            if strict_template and not preserve_source and _order_line_exists(
                 conn,
                 sub_project_id,
                 _as_text(_row_value(row, position(15, 15))),
@@ -613,14 +625,14 @@ def import_excel(
                 },
             )
 
-            purchase_tax_rate = _as_tax_rate(_row_value(row, position(25))) if latest_layout else None
+            purchase_tax_rate = _as_tax_rate(_row_value(row, position(25)), row_cells[position(25) - 1].number_format) if latest_layout else None
             purchase_unit_price_no_tax = _as_decimal(_row_value(row, position(26, 24)))
             purchase_unit_price = _as_decimal(_row_value(row, position(27, 25)))
             purchase_unit_price, cost_no_tax, purchase_amount = _calculated_prices(
                 quantity, purchase_tax_rate, purchase_unit_price_no_tax, purchase_unit_price
             )
-            cost_no_tax = cost_no_tax or _as_decimal(_row_value(row, position(28, 26)))
-            purchase_amount = purchase_amount or _as_decimal(_row_value(row, position(29, 27)))
+            cost_no_tax = cost_no_tax if cost_no_tax is not None else _as_decimal(_row_value(row, position(28, 26)))
+            purchase_amount = purchase_amount if purchase_amount is not None else _as_decimal(_row_value(row, position(29, 27)))
 
             conn.execute(
                 text(
@@ -641,8 +653,8 @@ def import_excel(
                     "purchase_unit_price": purchase_unit_price,
                     "cost_no_tax": cost_no_tax,
                     "purchase_amount": purchase_amount,
-                    "labor_cost": _as_decimal(_row_value(row, 90)) if template_layout else None,
-                    "other_cost": _as_decimal(_row_value(row, 91)) if template_layout else None,
+                    "labor_cost": _as_decimal(_row_value(row, 91 if template_version == 92 else 90)) if template_layout else None,
+                    "other_cost": _as_decimal(_row_value(row, 92 if template_version == 92 else 91)) if template_layout else None,
                 },
             )
 
@@ -673,24 +685,25 @@ def import_excel(
                 },
             )
 
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO purchase_contract
-                      (order_line_id, purchase_contract_no, payment_terms, performance_period, signed_amount, unsigned_amount)
-                    VALUES
-                      (:order_line_id, :purchase_contract_no, :payment_terms, :performance_period, :signed_amount, :unsigned_amount)
-                    """
-                ),
-                {
-                    "order_line_id": order_line_id,
-                    "purchase_contract_no": _as_text(_row_value(row, position(39, 37))),
-                    "payment_terms": _as_text(_row_value(row, position(40, 38))),
-                    "performance_period": _as_text(_row_value(row, position(41, 39))),
-                    "signed_amount": _as_decimal(_row_value(row, position(42, 40))),
-                    "unsigned_amount": _as_decimal(_row_value(row, position(43, 41))),
-                },
-            )
+            if any(_row_value(row, position(col, col - 2)) not in (None, "") for col in (39, 40, 41, 42)):
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO purchase_contract
+                          (order_line_id, purchase_contract_no, payment_terms, performance_period, signed_amount, unsigned_amount)
+                        VALUES
+                          (:order_line_id, :purchase_contract_no, :payment_terms, :performance_period, :signed_amount, :unsigned_amount)
+                        """
+                    ),
+                    {
+                        "order_line_id": order_line_id,
+                        "purchase_contract_no": _as_text(_row_value(row, position(39, 37))),
+                        "payment_terms": _as_text(_row_value(row, position(40, 38))),
+                        "performance_period": _as_text(_row_value(row, position(41, 39))),
+                        "signed_amount": _as_decimal(_row_value(row, position(42, 40))),
+                        "unsigned_amount": None,
+                    },
+                )
 
             _insert_phase(conn, "purchase_invoice", order_line_id, 1, row, position(44, 42), position(45, 43), position(46, 44))
             _insert_warehouse(
@@ -758,9 +771,9 @@ def import_excel(
             # 开票列全空时不写空记录：与收票/入库/付款的处理保持一致，
             # 否则没有开票数据的行也会留下一条金额为空的开票期次。
             invoice_source_columns = (
-                (73, 74, 76)
+                (73, 74, 75, 76)
                 if template_layout
-                else (position(80, 71), position(81, 72), position(83, 74))
+                else (position(80, 71), position(81, 72), position(82, 73), position(83, 74))
             )
             if any(
                 _row_value(row, column) not in (None, "") for column in invoice_source_columns
@@ -783,8 +796,8 @@ def import_excel(
                         "invoice_date_text": _as_text(_row_value(row, 74 if template_layout else position(81, 72))),
                         "invoice_no": _as_text(_row_value(row, 75 if template_layout else position(82, 73))),
                         "invoice_amount": _as_decimal(_row_value(row, 76 if template_layout else position(83, 74))),
-                        "pending_invoice_amount": _as_decimal(_row_value(row, 77 if template_layout else position(84, 75))),
-                        "delivered_not_invoiced_amount": _as_decimal(_row_value(row, 78 if template_layout else position(85, 76))),
+                        "pending_invoice_amount": None,
+                        "delivered_not_invoiced_amount": None,
                     },
                 )
 
@@ -812,6 +825,11 @@ def import_excel(
             if line_id_map is not None:
                 # 预检提交需要把 Excel 行号映射到明细 id，才能补写第 3 期及以后的财务。
                 line_id_map[excel_row_no] = order_line_id
+            if preserve_source:
+                conn.execute(text('UPDATE order_line SET source_preserved=1, line_department=:department, line_branch_company=:branch, line_account_manager=:manager, line_team_level3_name=:team WHERE id=:id'),
+                             {'id':order_line_id,'department':department,'branch':_as_text(row[3]),'manager':_as_text(row[4]),'team':_as_text(row[8])})
+            else:
+                refresh_line(conn, order_line_id)
             success_rows += 1
         except PermissionError:
             raise
@@ -892,7 +910,9 @@ def import_excel(
         "success_rows": success_rows,
         "failed_rows": failed_rows,
         "skipped_rows": skipped_rows,
-        "errors": error_messages[:20],
+        "errors": error_messages,
+        "total_rows": success_rows + failed_rows + skipped_rows,
+        "source_sha256": hashlib.sha256(workbook_bytes if workbook_bytes is not None else workbook_path.read_bytes()).hexdigest(),
     }
 
 
@@ -1119,6 +1139,6 @@ def _insert_receipt(conn: Connection, order_line_id: int, phase_no: int, row: tu
             "receipt_date_text": _as_text(_row_value(row, date_pos)),
             "payment_notice_no": _as_text(_row_value(row, notice_pos)),
             "receipt_amount": amount,
-            "receipt_ratio": _as_decimal(_row_value(row, ratio_pos)),
+            "receipt_ratio": None,
         },
     )

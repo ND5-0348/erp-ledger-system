@@ -338,7 +338,9 @@ def test_maintenance_import_uses_the_same_lock(
 
     with business_write() as conn:
         conn.execute(text("SELECT 1"))
-        response = client.post("/api/import/excel", headers=headers)
+        response = client.post("/api/import/excel", headers=headers, json={
+            "file_name": maintenance_source_file.name, "token": "lock-test",
+            "confirmation": "替换全部业务数据"})
 
     assert response.status_code == 409, response.text
     assert response.json()["detail"]["code"] == BUSY_ERROR_CODE
@@ -359,6 +361,7 @@ def test_restore_uses_the_same_lock(client: TestClient, headers: dict[str, str])
 
 # POST 但只读的端点：查看编辑数据不算业务写入。
 READ_ONLY_ENDPOINTS = {
+    ("system.py", "preview_maintenance"),
     ("orders.py", "get_batch_editor_schema"),
     ("orders.py", "get_batch_editor_rows"),
     ("purchases.py", "get_purchase_batch_editor_rows"),
@@ -368,7 +371,9 @@ READ_ONLY_ENDPOINTS = {
 # 自身不直接取锁、但把写入交给已取锁的 helper 完成的端点。
 # 值是该 helper 的函数名，测试会核对它确实出现在端点函数体里。
 VIA_GUARDED_HELPER = {
+    ("sales.py", "delete_sales_receipt"): "_soft_delete_detail",
     ("orders.py", "import_orders_excel"): "_run_order_import",
+    ("orders.py", "source_import_excel"): "_run_source_import",
     ("orders.py", "create_import_preview"): "_create_import_preview",
     ("orders.py", "commit_import_preview"): "_commit_import_preview",
     ("purchases.py", "delete_purchase_contract"): "_soft_delete_detail",
@@ -388,13 +393,13 @@ def test_every_business_write_endpoint_goes_through_the_guard() -> None:
     """源码级覆盖清单：路由文件里每个写端点都必须直接或间接走 business_write。"""
     missing: list[str] = []
     checked = 0
-    for file_name in ("orders.py", "purchases.py", "sales.py", "system.py"):
+    for file_name in ("orders.py", "purchases.py", "sales.py", "system.py", "history.py"):
         source = (ROUTERS_DIR / file_name).read_text(encoding="utf-8")
         tree = ast.parse(source)
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            decorators = [ast.unparse(decorator) for decorator in node.decorator_list]
+            decorators = [ast.get_source_segment(source, decorator) or "" for decorator in node.decorator_list]
             if not any(WRITE_DECORATOR.match(decorator) for decorator in decorators):
                 continue
             key = (file_name, node.name)

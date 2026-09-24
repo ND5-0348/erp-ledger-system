@@ -727,7 +727,9 @@ def test_commit_rechecks_aliases_against_current_database_state(
     _seed_via_preview(client, headers, [_row({13: "SO-X/SO-B", 15: "交换机"})])
 
     commit = _commit(client, headers, session_id, content)
-    assert commit.status_code == 422, commit.text
+    # Version protection now rejects the stale preview before alias validation.
+    assert commit.status_code == 409, commit.text
+    assert '预检后已变化' in commit.json()['detail']
     assert _count("order_line") == 1, "被拒绝的批次不得写入明细"
 
 

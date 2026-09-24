@@ -1,3 +1,5 @@
+import { editingApi } from '../api';
+import { matchedManagers } from '../lib/historyQuery';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Search,
@@ -19,6 +21,7 @@ import { OrderRecord, SalesRecord } from '../types';
 import { buildSalesInvoiceDraft, getNextReceiptPhase } from '../lib/salesDetailModel';
 import { applySalesFilters, emptySalesFilters, getDepartmentOptions, submitQueryFilters } from '../lib/queryFilterModel';
 import BatchSalesEditor from './BatchSalesEditor';
+import { compareMoney, decimalMoney, differenceMoney, formatMoney as formatExactMoney, sumMoney, type MoneyValue } from '../lib/money';
 
 interface SalesScreenProps {
   sales: SalesRecord[];
@@ -33,7 +36,6 @@ type EntryMode = 'contract' | 'invoice' | 'receipt';
 type EditingRecord = { mode: EntryMode; id: number } | null;
 type DetailIntent = 'view' | 'edit' | 'delete';
 
-const moneyFormatter = new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2 });
 
 function getPaginationItems(totalPages: number): Array<number | 'ellipsis'> {
   if (totalPages <= 4) {
@@ -42,8 +44,8 @@ function getPaginationItems(totalPages: number): Array<number | 'ellipsis'> {
   return [1, 2, 'ellipsis', totalPages - 1, totalPages];
 }
 
-function formatMoney(value?: number | null) {
-  return `¥${moneyFormatter.format(Number(value || 0))}`;
+function formatMoney(value?: MoneyValue | null) {
+  return `¥${formatExactMoney(value)}`;
 }
 
 function textValue(value: unknown) {
@@ -51,20 +53,19 @@ function textValue(value: unknown) {
 }
 
 function parseAmount(value: string) {
-  return value === '' ? null : Number(value);
+  return value.trim() === '' ? null : value.trim();
 }
 
-function formatRatio(value?: number | null) {
+function formatRatio(value?: MoneyValue | null) {
   if (value === null || value === undefined) return '-';
-  const numeric = Number(value);
-  const percent = numeric > 1 ? numeric : numeric * 100;
-  return `${moneyFormatter.format(percent)}%`;
+  return `${decimalMoney(value).toFixed(2)}%`;
 }
 
 export default function SalesScreen({ sales, orders, canEnterSales, canEditSales, canDeleteSales, onRefresh }: SalesScreenProps) {
   const [projectId, setProjectId] = useState('');
   const [orderId, setOrderId] = useState('');
   const [manager, setManager] = useState('');
+  const [includeHistoryManager, setIncludeHistoryManager] = useState('');
   const [department, setDepartment] = useState('');
   const [supplier, setSupplier] = useState('');
   const [contractNo, setContractNo] = useState('');
@@ -75,6 +76,7 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
   const [selectedSale, setSelectedSale] = useState<SalesRecord | null>(null);
   const [detailIntent, setDetailIntent] = useState<DetailIntent>('view');
   const [detail, setDetail] = useState<BackendSalesDetail | null>(null);
+  const editApi = editingApi(detail?.edit_context);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState('');
   const [entryMode, setEntryMode] = useState<EntryMode | null>(null);
@@ -128,6 +130,19 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
     && filteredSalesOrderLineIds.every((orderLineId) => selectedBatchOrderIds.has(orderLineId));
   const summary = detail?.summary;
   const activeOrderLineId = selectedSale?.orderLineId || Number(summary?.primary_order_line_id || 0);
+  const formulaLineId = (editingRecord?.mode === 'invoice'
+    ? detail?.invoices.find((item) => item.id === editingRecord.id)?.order_line_id
+    : editingRecord?.mode === 'receipt'
+      ? detail?.receipts.find((item) => item.id === editingRecord.id)?.order_line_id
+      : undefined) || activeOrderLineId;
+  const formulaOrder = orders.find((item) => item.orderLineId === formulaLineId);
+  const lineInvoices = (detail?.invoices || []).filter((item) => !item.order_line_id || item.order_line_id === formulaLineId);
+  const invoiceTotal = sumMoney(...lineInvoices.map(item => item.invoice_amount));
+  const draftInvoiceTotal = sumMoney(differenceMoney(invoiceTotal,
+    lineInvoices.find(item => editingRecord?.mode === 'invoice' && item.id === editingRecord.id)?.invoice_amount), invoiceForm.invoice_amount);
+  const pendingInvoice = differenceMoney(formulaOrder?.orderValue ?? summary?.order_value, draftInvoiceTotal);
+  const deliveredNotInvoiced = differenceMoney(formulaOrder?.deliveryValue ?? summary?.delivery_value, draftInvoiceTotal);
+  const receiptRatio = compareMoney(invoiceTotal, 0) === 0 ? null : decimalMoney(receiptForm.receipt_amount).div(invoiceTotal).times(100).toFixed(6);
   const departmentOptions = useMemo(() => getDepartmentOptions(sales), [sales]);
   const orderIndex = useMemo(() => {
     const byLineId = new Map<number, OrderRecord>();
@@ -150,6 +165,7 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
     setProjectId('');
     setOrderId('');
     setManager('');
+    setIncludeHistoryManager('');
     setDepartment('');
     setSupplier('');
     setContractNo('');
@@ -165,6 +181,7 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
         projectId,
         orderId,
         manager,
+        includeHistoryManager,
         department,
         supplier,
         contractNo,
@@ -311,10 +328,10 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
     setDetailError('');
     try {
       const updated = mode === 'contract'
-        ? await api.deleteSalesContract(id)
+        ? await editApi.deleteSalesContract(id)
         : mode === 'invoice'
-          ? await api.deleteSalesInvoice(id)
-          : await api.deleteSalesReceipt(id);
+          ? await editApi.deleteSalesInvoice(id)
+          : await editApi.deleteSalesReceipt(id);
       setDetail(updated);
     } catch (error) {
       setDetailError(error instanceof Error ? error.message : '删除失败');
@@ -339,30 +356,27 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
           unsigned_contract_amount: parseAmount(contractForm.unsigned_contract_amount),
         };
         updated = editingRecord
-          ? await api.updateSalesContract(editingRecord.id, data)
-          : await api.addSalesContract(activeOrderLineId, data);
+          ? await editApi.updateSalesContract(editingRecord.id, data)
+          : await editApi.addSalesContract(activeOrderLineId, data);
       } else if (entryMode === 'invoice') {
         const data = {
           invoice_doc_no: invoiceForm.invoice_doc_no || null,
           invoice_date: invoiceForm.invoice_date || null,
           invoice_no: invoiceForm.invoice_no || null,
           invoice_amount: parseAmount(invoiceForm.invoice_amount),
-          pending_invoice_amount: parseAmount(invoiceForm.pending_invoice_amount),
-          delivered_not_invoiced_amount: parseAmount(invoiceForm.delivered_not_invoiced_amount),
         };
         updated = editingRecord
-          ? await api.updateSalesInvoice(editingRecord.id, data)
-          : await api.addSalesInvoice(activeOrderLineId, data);
+          ? await editApi.updateSalesInvoice(editingRecord.id, data)
+          : await editApi.addSalesInvoice(activeOrderLineId, data);
       } else {
         const data = {
           receipt_date: receiptForm.receipt_date || null,
           payment_notice_no: receiptForm.payment_notice_no || null,
           receipt_amount: parseAmount(receiptForm.receipt_amount),
-          receipt_ratio: parseAmount(receiptForm.receipt_ratio),
         };
         updated = editingRecord
-          ? await api.updateSalesReceipt(editingRecord.id, data)
-          : await api.addSalesReceipt(activeOrderLineId, data);
+          ? await editApi.updateSalesReceipt(editingRecord.id, data)
+          : await editApi.addSalesReceipt(activeOrderLineId, data);
       }
       setDetail(updated);
       setEntryMode(null);
@@ -410,8 +424,9 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
           <FilterInput label="项目编号" placeholder="输入项目编号" value={projectId} onChange={setProjectId} />
           <FilterInput label="销售订单号" placeholder="输入销售订单号" value={orderId} onChange={setOrderId} />
           <FilterInput label="客户经理" placeholder="请输入客户经理姓名" value={manager} onChange={setManager} />
+          <label className="flex items-center gap-2 text-xs text-slate-600"><input type="checkbox" checked={includeHistoryManager === 'true'} onChange={e => setIncludeHistoryManager(e.target.checked ? 'true' : '')} />包含历史负责人</label>
           <FilterInput label="采购厂商" placeholder="输入采购厂商" value={supplier} onChange={setSupplier} />
-          <FilterInput label="公司合同号" placeholder="输入公司合同号" value={contractNo} onChange={setContractNo} />
+          <FilterInput label="翔云合同号" placeholder="输入翔云合同号" value={contractNo} onChange={setContractNo} />
           <div className="space-y-1.5 md:col-span-2">
             <label className="text-xs font-medium text-slate-500">回款时间</label>
             <div className="flex items-center gap-2">
@@ -466,7 +481,7 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
         </div>
 
         <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse table-fixed min-w-[1848px]">
+          <table className="w-full text-left border-collapse table-fixed min-w-[2128px]">
             <thead>
               <tr className="bg-slate-50/75 border-b border-slate-200">
                 <th className="w-[56px] px-4 py-3.5 text-center">
@@ -485,18 +500,20 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
                 <TableHeader className="w-[120px]">客户经理</TableHeader>
                 <TableHeader className="w-[160px]">用户</TableHeader>
                 <TableHeader className="w-[220px]">项目名称</TableHeader>
-                <TableHeader className="w-[120px]">订单日期</TableHeader>
+                <TableHeader className="w-[120px]">销售订单日期</TableHeader>
                 <TableHeader className="text-right w-[140px]">合同金额</TableHeader>
-                <TableHeader className="text-right w-[140px]">交付金额</TableHeader>
+                <TableHeader className="text-right w-[140px]">交付收入</TableHeader>
                 <TableHeader className="text-right w-[140px]">开票金额</TableHeader>
                 <TableHeader className="text-right w-[140px]">回款金额</TableHeader>
+                <TableHeader className="text-right w-[140px]">交付应收款</TableHeader>
+                <TableHeader className="text-right w-[140px]">开票应收款</TableHeader>
                 <TableHeader className="text-center w-[132px]">操作</TableHeader>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {paginatedSales.length === 0 ? (
                 <tr>
-                  <td colSpan={12} className="px-6 py-10 text-center text-slate-400 text-sm">暂无符合条件的销售记录</td>
+                  <td colSpan={14} className="px-6 py-10 text-center text-slate-400 text-sm">暂无符合条件的销售记录</td>
                 </tr>
               ) : (
                 paginatedSales.map((item, index) => {
@@ -515,7 +532,7 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
                       </td>
                       <td className="px-6 py-4 text-xs font-mono text-slate-500">{item.projectId}</td>
                       <td className="px-6 py-4 text-xs font-mono text-slate-500 truncate" title={item.orderId}>{item.orderId}</td>
-                      <td className="px-6 py-4 text-xs text-slate-700 font-medium">{item.manager}</td>
+                      <td className="px-6 py-4 text-xs text-slate-700 font-medium">{item.manager}{matchedManagers(item, submittedFilters.manager, submittedFilters.includeHistoryManager) && <small className="block text-amber-700">历史：{matchedManagers(item, submittedFilters.manager, submittedFilters.includeHistoryManager)}</small>}</td>
                       <td className="px-6 py-4 text-xs text-slate-700 truncate" title={order?.userName || ''}>{order?.userName || '-'}</td>
                       <td className="px-6 py-4 text-xs text-slate-700 truncate" title={order?.projectName || ''}>{order?.projectName || '-'}</td>
                       <td className="px-6 py-4 text-xs text-slate-600 font-mono">{order?.orderDate || '-'}</td>
@@ -523,6 +540,8 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
                       <td className="px-6 py-4 text-xs text-right font-mono text-slate-700">{formatMoney(order?.deliveryValue)}</td>
                       <td className="px-6 py-4 text-xs text-right font-mono text-emerald-600 font-medium">{formatMoney(item.invoiceAmount)}</td>
                       <td className="px-6 py-4 text-xs text-right font-mono text-blue-600 font-medium">{formatMoney(item.totalReceived)}</td>
+                      <td className="px-6 py-4 text-xs text-right font-mono text-rose-600">{formatMoney(item.deliveryAccountsReceivable)}</td>
+                      <td className="px-6 py-4 text-xs text-right font-mono text-rose-600">{formatMoney(item.invoiceAccountsReceivable)}</td>
                       <td className="px-6 py-4 text-center">
                         <div className="inline-flex items-center justify-center gap-1">
                           <button type="button" onClick={() => loadDetail(item, 'view')} title="查看销售信息" aria-label={`查看销售 ${item.orderId} 的信息`} className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-blue-100 bg-blue-50 text-blue-600 hover:bg-blue-100 hover:border-blue-200 transition-colors">
@@ -622,36 +641,38 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
                     ['项目编号', summary?.project_code ?? selectedSale.projectId],
                     ['项目名称', summary?.project_name],
                     ['销售订单号', summary?.order_no ?? selectedSale.orderId],
-                    ['订单日期', summary?.order_date],
+                    ['销售订单日期', summary?.order_date],
                     ['客户单位名称', summary?.customer_unit_name],
                     ['客户经理', summary?.account_manager ?? selectedSale.manager],
                     ['部门', summary?.department ?? selectedSale.department],
                     ['物资/服务名称', summary?.goods_name],
                     ['规格型号', summary?.specification_model],
                     ['销售税率', `${Number(summary?.sales_tax_rate || 0)}%`],
-                    ['不含税销售单价', formatMoney(Number(summary?.sales_unit_price_no_tax || 0))],
-                    ['销售单价', formatMoney(Number(summary?.sales_unit_price || 0))],
-                    ['不含税订单金额', formatMoney(Number(summary?.revenue_no_tax || 0))],
-                    ['销售税金', formatMoney(Number(summary?.sales_tax_amount || 0))],
-                    ['销售订单金额', formatMoney(Number(summary?.order_value || 0))],
+                    ['不含税销售单价', formatMoney(summary?.sales_unit_price_no_tax)],
+                    ['销售单价', formatMoney(summary?.sales_unit_price)],
+                    ['不含税订单金额', formatMoney(summary?.revenue_no_tax)],
+                    ['销售税金', formatMoney(summary?.sales_tax_amount)],
+                    ['销售订单金额', formatMoney(summary?.order_value)],
                     ['明细行数', summary?.matched_line_count],
                   ]} />
 
                   <InfoSection title="采购信息" items={[
                     ['采购厂商', summary?.supplier_name],
                     ['采购合同号', summary?.purchase_contract_no],
-                    ['采购合同金额', formatMoney(Number(summary?.purchase_contract_signed_amount || 0))],
-                    ['含税采购金额', formatMoney(Number(summary?.purchase_amount || 0))],
+                    ['采购合同金额', formatMoney(summary?.purchase_contract_signed_amount)],
+                    ['采购金额', formatMoney(summary?.purchase_amount)],
                     ['交付数量', summary?.delivery_quantity],
-                    ['交付价值', formatMoney(Number(summary?.delivery_value || 0))],
-                    ['毛利润', formatMoney(Number(summary?.gross_profit || 0))],
+                    ['交付收入', formatMoney(summary?.delivery_value)],
+                    ['交付应收款', formatMoney(summary?.delivery_accounts_receivable ?? selectedSale.deliveryAccountsReceivable)],
+                    ['开票应收款', formatMoney(summary?.invoice_accounts_receivable ?? selectedSale.invoiceAccountsReceivable)],
+                    ['毛利润', formatMoney(summary?.gross_profit)],
                   ]} />
 
                   <DataBlock title="销售合同" emptyText="暂无销售合同记录">
                     {detail?.contracts.map((item) => (
                       <RecordRow key={item.id} values={[
                         ['合同签订日期', item.contract_signed_date_text || item.contract_signed_date],
-                        ['公司合同号', item.sales_contract_no],
+                        ['翔云合同号', item.sales_contract_no],
                         ['合同金额', formatMoney(item.contract_value)],
                         ['履行期限', item.performance_period],
                         ['待签合同金额', formatMoney(item.unsigned_contract_amount)],
@@ -729,7 +750,7 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
                   {entryMode === 'contract' && (
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <FormInput label="合同签订日期" type="date" value={contractForm.contract_signed_date} onChange={(value) => setContractForm({ ...contractForm, contract_signed_date: value })} />
-                      <FormInput label="公司合同号" value={contractForm.sales_contract_no} onChange={(value) => setContractForm({ ...contractForm, sales_contract_no: value })} />
+                      <FormInput label="翔云合同号" value={contractForm.sales_contract_no} onChange={(value) => setContractForm({ ...contractForm, sales_contract_no: value })} />
                       <FormInput label="合同金额" type="number" value={contractForm.contract_value} onChange={(value) => setContractForm({ ...contractForm, contract_value: value })} />
                       <FormInput label="履行期限" value={contractForm.performance_period} onChange={(value) => setContractForm({ ...contractForm, performance_period: value })} />
                       <FormInput label="待签合同金额" type="number" value={contractForm.unsigned_contract_amount} onChange={(value) => setContractForm({ ...contractForm, unsigned_contract_amount: value })} className="sm:col-span-2" />
@@ -741,8 +762,8 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
                       <FormInput label="开票日期" type="date" value={invoiceForm.invoice_date} onChange={(value) => setInvoiceForm({ ...invoiceForm, invoice_date: value })} />
                       <FormInput label="发票号" value={invoiceForm.invoice_no} onChange={(value) => setInvoiceForm({ ...invoiceForm, invoice_no: value })} />
                       <FormInput label="发票金额" type="number" value={invoiceForm.invoice_amount} onChange={(value) => setInvoiceForm({ ...invoiceForm, invoice_amount: value })} />
-                      <FormInput label="待开发票金额" type="number" value={invoiceForm.pending_invoice_amount} onChange={(value) => setInvoiceForm({ ...invoiceForm, pending_invoice_amount: value })} />
-                      <FormInput label="已交付未开票" type="number" value={invoiceForm.delivered_not_invoiced_amount} onChange={(value) => setInvoiceForm({ ...invoiceForm, delivered_not_invoiced_amount: value })} />
+                      <FormInput label="待开发票金额（自动计算）" readOnly value={pendingInvoice} />
+                      <FormInput label="已交付未开票（自动计算）" readOnly value={deliveredNotInvoiced} />
                     </div>
                   )}
                   {entryMode === 'receipt' && (
@@ -750,7 +771,7 @@ export default function SalesScreen({ sales, orders, canEnterSales, canEditSales
                       <FormInput label="回款日期" type="date" value={receiptForm.receipt_date} onChange={(value) => setReceiptForm({ ...receiptForm, receipt_date: value })} />
                       <FormInput label="缴款单号" value={receiptForm.payment_notice_no} onChange={(value) => setReceiptForm({ ...receiptForm, payment_notice_no: value })} />
                       <FormInput label="回款金额" type="number" value={receiptForm.receipt_amount} onChange={(value) => setReceiptForm({ ...receiptForm, receipt_amount: value })} />
-                      <FormInput label="回款占比" type="number" value={receiptForm.receipt_ratio} onChange={(value) => setReceiptForm({ ...receiptForm, receipt_ratio: value })} />
+                      <FormInput label="回款占比（自动计算）" readOnly value={formatRatio(receiptRatio)} />
                     </div>
                   )}
                 </div>
@@ -859,11 +880,11 @@ function EntryButton({ icon, label, onClick }: { icon: React.ReactNode; label: s
   );
 }
 
-function FormInput({ label, value, onChange, type = 'text', className = '' }: { label: string; value: string; onChange: (value: string) => void; type?: string; className?: string }) {
+function FormInput({ label, value, onChange, readOnly = false, type = 'text', className = '' }: { label: string; value: string; onChange?: (value: string) => void; readOnly?: boolean; type?: string; className?: string }) {
   return (
     <label className={`space-y-1 ${className}`}>
       <span className="block text-xs font-semibold text-slate-600">{label}</span>
-      <input type={type} lang={type === 'date' ? 'zh-CN' : undefined} value={value} onChange={(e) => onChange(e.target.value)} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" />
+      <input type={type} lang={type === 'date' ? 'zh-CN' : undefined} value={value} readOnly={readOnly} aria-readonly={readOnly} onChange={(e) => onChange?.(e.target.value)} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" />
     </label>
   );
 }

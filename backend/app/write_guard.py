@@ -85,8 +85,12 @@ def business_write() -> Iterator[Connection]:
         _state.connection = connection
         try:
             with connection.begin():
+                from .edit_versions import start_write, finish_write
+                start_write(connection)
                 yield connection
+                finish_write(connection)
         finally:
+            connection.info.pop("edit_touched", None)
             _state.depth = 0
             _state.connection = None
     finally:

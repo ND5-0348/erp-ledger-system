@@ -21,9 +21,10 @@ import {
   RotateCcw,
   KeyRound,
 } from 'lucide-react';
-import { BackendUserRecord } from '../api';
+import { api, BackendUserRecord } from '../api';
 import { Permission, RoleCode, SYSTEM_PERMISSION_OPTIONS, permissionRoleLabel } from '../lib/permissions';
 import { OperationLog, BackupInfo } from '../types';
+import MaintenanceImport from './MaintenanceImport';
 
 export interface CreateUserPayload {
   username: string;
@@ -158,6 +159,7 @@ export default function SystemScreen({
   const [showResetConfirmPassword, setShowResetConfirmPassword] = useState(false);
   const [resetPasswordBusy, setResetPasswordBusy] = useState(false);
   const [backupBusy, setBackupBusy] = useState(false);
+  const [backupChecks, setBackupChecks] = useState<Record<string,string>>({});
 
   // Filter logs & backups to show only 5 items per page
   const paginatedLogs = useMemo(() => {
@@ -189,7 +191,7 @@ export default function SystemScreen({
   };
 
   const handleSystemRestore = async (backupId: number, fileName: string) => {
-    const confirm = window.confirm(`您确定要使用备份文件 "${fileName}" 恢复系统数据库吗？此操作不可逆。`);
+    const confirm = window.confirm(`确认使用业务备份“${fileName}”替换当前业务数据？系统将先创建恢复前备份；账号与操作日志保留。恢复成功后，已打开的编辑页面需要重新加载。`);
     if (!confirm) return;
     setBackupBusy(true);
     try {
@@ -454,6 +456,7 @@ export default function SystemScreen({
         </div>
       </div>
 
+      {canManageUsers && <MaintenanceImport onRefresh={onRefresh} />}
       {canManageUsers && (
         <section className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
           <div className="p-5 border-b border-slate-200 flex items-center justify-between">
@@ -1116,7 +1119,7 @@ export default function SystemScreen({
         <div className="p-5 border-b border-slate-200 flex flex-col sm:flex-row gap-4 sm:items-center justify-between">
           <h3 className="font-semibold text-slate-900 text-sm flex items-center gap-1.5">
             <Database className="w-4 h-4 text-blue-600" />
-            <span>备份信息</span>
+            <span>应用业务备份（不包含账号和日志；服务器全库备份请查运维记录）</span>
           </h3>
           {canManageUsers && (
             <div className="flex items-center gap-2 self-start sm:self-auto">
@@ -1152,6 +1155,12 @@ export default function SystemScreen({
                   <td className="px-6 py-3.5 text-xs text-right font-mono text-slate-600">{bk.size}</td>
                   <td className="px-6 py-3.5 text-xs text-center font-mono text-slate-400">{bk.backupTime}</td>
                   <td className="px-6 py-3.5 text-center">
+                    <button className="text-xs text-blue-600 mr-3 disabled:opacity-40" disabled={backupBusy} onClick={async () => {
+                      setBackupBusy(true);
+                      try { const check = await api.verifyBackup(Number(bk.id)); setBackupChecks(previous => ({...previous,[bk.id]:check.message})); }
+                      catch (error) { setBackupChecks(previous => ({...previous,[bk.id]:error instanceof Error ? error.message : '校验失败'})); }
+                      finally { setBackupBusy(false); }
+                    }}>校验</button>
                     <button 
                       onClick={() => handleSystemRestore(Number(bk.id), bk.fileName)}
                       disabled={backupBusy}
@@ -1159,6 +1168,7 @@ export default function SystemScreen({
                     >
                       恢复
                     </button>
+                    {backupChecks[bk.id] && <p role="status" className="mt-1 text-xs text-slate-600">{backupChecks[bk.id]}</p>}
                   </td>
                 </tr>
               ))}

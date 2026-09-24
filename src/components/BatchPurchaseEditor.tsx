@@ -1,3 +1,4 @@
+import { editingApi } from '../api';
 import React, { useEffect, useMemo, useState } from 'react';
 import { Eye, LoaderCircle, Save, X } from 'lucide-react';
 import {
@@ -131,7 +132,7 @@ export default function BatchPurchaseEditor({
   const financialColumns = useMemo(
     () => indexedColumns.filter(({ index }) => (
       mode === 'sales'
-        ? index >= 67 && index <= 90
+        ? index >= 67 && index <= 91
         : index >= 23 && index <= 66
     )),
     [indexedColumns, mode],
@@ -271,8 +272,8 @@ export default function BatchPurchaseEditor({
         }
       });
       const result = mode === 'sales'
-        ? await api.updateSalesBatch(items)
-        : await api.updatePurchasesBatch(items);
+        ? await editingApi(initialRows[0]?.edit_context).updateSalesBatch(items)
+        : await editingApi(initialRows[0]?.edit_context).updatePurchasesBatch(items);
       await onSaved(result.updated);
     } catch (submitError) {
       setError(submitError instanceof Error
@@ -295,7 +296,7 @@ export default function BatchPurchaseEditor({
             </h2>
             <p className="mt-1 text-xs text-slate-500">
               {mode === 'sales'
-                ? 'BP–CM 列按上传台账顺序展示；蓝色字段可编辑，CI–CJ 自动汇总列只读。'
+                ? 'BP–CN 列按上传台账顺序展示；蓝色字段可编辑，CI–CL 汇总和状态列只读。'
                 : 'X–BO 列按上传台账顺序展示；蓝色字段可编辑，自动汇总与利润列只读。'}
             </p>
           </div>

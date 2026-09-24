@@ -1,3 +1,5 @@
+import EditConflictDialog from './components/EditConflictDialog';
+import { editingApi } from './api';
 import React, { useEffect, useState } from 'react';
 import {
   LayoutDashboard,
@@ -38,6 +40,7 @@ import {
 } from './lib/operationLogDisplay';
 import { formatDatabaseUtcTime } from './lib/dateTime';
 import { loadAllPages } from './lib/loadAllPages';
+import { rawAmount, optionalAmount } from './lib/money';
 
 import DashboardScreen from './components/DashboardScreen';
 import LedgerScreen from './components/LedgerScreen';
@@ -59,17 +62,22 @@ function optionalNumber(value: number | null | undefined) {
 
 function mapLedger(item: BackendProjectLedger): ProjectLedger {
   return {
-    deliveryValue: Number(item.delivery_value || 0),
-    deliveryCost: Number(item.delivery_cost || 0),
-    totalPaid: Number(item.total_paid || 0),
-    salesInvoiceAmount: Number(item.sales_invoice_amount || 0),
-    receivedInvoiceAmount: Number(item.received_invoice_amount || 0),
+    editContext: item.edit_context,
+    orderNumberHistory: item.order_number_history,
+    managerHistory: item.manager_history,
+    deliveryValue: rawAmount(item.delivery_value),
+    deliveryCost: rawAmount(item.delivery_cost),
+    totalPaid: rawAmount(item.total_paid),
+    salesInvoiceAmount: rawAmount(item.sales_invoice_amount),
+    receivedInvoiceAmount: rawAmount(item.received_invoice_amount),
+    deliveryAccountsReceivable: optionalAmount(item.delivery_accounts_receivable),
+    invoiceAccountsReceivable: optionalAmount(item.invoice_accounts_receivable),
     id: item.project_code,
     clientUnit: item.customer_unit_name || fallbackText,
     projectName: item.project_name || fallbackText,
-    orderAmount: Number(item.order_amount || 0),
-    purchaseAmount: Number(item.purchase_amount || 0),
-    totalReceived: Number(item.total_received || 0),
+    orderAmount: rawAmount(item.order_amount),
+    purchaseAmount: rawAmount(item.purchase_amount),
+    totalReceived: rawAmount(item.total_received),
     department: item.department || fallbackText,
     manager: item.account_manager || fallbackText,
     orderId: `${item.order_count || 0} 个订单`,
@@ -80,6 +88,9 @@ function mapLedger(item: BackendProjectLedger): ProjectLedger {
 
 function mapOrder(item: BackendOrderRecord): OrderRecord {
   return {
+    editContext: item.edit_context,
+    orderNumberHistory: item.order_number_history,
+    managerHistory: item.manager_history,
     orderLineId: item.order_line_id,
     amountType: item.amount_type || '',
     projectId: item.project_code,
@@ -91,11 +102,13 @@ function mapOrder(item: BackendOrderRecord): OrderRecord {
     orderDate: dateOnly(item.order_date),
     updatedAt: formatDatabaseUtcTime(item.last_modified_at),
     orderStatus: item.close_status || '',
-    totalReceived: optionalNumber(item.total_received),
-    totalPaid: optionalNumber(item.total_paid),
-    accountsReceivable: optionalNumber(item.accounts_receivable),
-    accountsPayable: optionalNumber(item.accounts_payable),
-    grossProfit: optionalNumber(item.gross_profit),
+    totalReceived: optionalAmount(item.total_received),
+    totalPaid: optionalAmount(item.total_paid),
+    deliveryAccountsReceivable: optionalAmount(item.delivery_accounts_receivable),
+    invoiceAccountsReceivable: optionalAmount(item.invoice_accounts_receivable),
+    accountsReceivable: optionalAmount(item.accounts_receivable),
+    accountsPayable: optionalAmount(item.accounts_payable),
+    grossProfit: optionalAmount(item.gross_profit),
     statisticalCategory: item.statistical_category || '',
     teamName: item.team_name || '',
     goodsName: item.goods_name || fallbackText,
@@ -103,54 +116,61 @@ function mapOrder(item: BackendOrderRecord): OrderRecord {
     regionalPlatform: item.regional_platform || '',
     specModel: item.spec_model || '',
     unitName: item.unit_name || '',
-    quantity: `${Number(item.quantity || 0)} ${item.unit_name || ''}`.trim(),
+    quantity: `${item.quantity ?? 0} ${item.unit_name || ''}`.trim(),
     salesTaxRate: optionalNumber(item.sales_tax_rate),
-    netUnitPrice: optionalNumber(item.net_unit_price),
-    unitPrice: optionalNumber(item.unit_price),
-    netRevenue: optionalNumber(item.net_revenue),
-    orderValue: Number(item.order_value || 0),
-    salesTaxAmount: optionalNumber(item.sales_tax_amount),
-    deliveredQty: Number(item.delivery_quantity || 0),
+    netUnitPrice: optionalAmount(item.net_unit_price),
+    unitPrice: optionalAmount(item.unit_price),
+    netRevenue: optionalAmount(item.net_revenue),
+    orderValue: rawAmount(item.order_value),
+    salesTaxAmount: optionalAmount(item.sales_tax_amount),
+    deliveredQty: rawAmount(item.delivery_quantity),
     businessType: item.business_type || fallbackText,
     clientUnit: item.customer_unit_name || fallbackText,
     supplierName: item.supplier_name || '',
     purchaseTaxRate: optionalNumber(item.purchase_tax_rate),
-    purchaseUnitPriceNoTax: optionalNumber(item.purchase_unit_price_no_tax),
-    purchaseUnitPrice: optionalNumber(item.purchase_unit_price),
-    costNoTax: optionalNumber(item.cost_no_tax),
-    purchaseAmount: optionalNumber(item.purchase_amount),
-    purchaseTaxAmount: optionalNumber(item.purchase_tax_amount),
-    laborCost: optionalNumber(item.labor_cost),
-    otherCost: optionalNumber(item.other_cost),
+    purchaseUnitPriceNoTax: optionalAmount(item.purchase_unit_price_no_tax),
+    purchaseUnitPrice: optionalAmount(item.purchase_unit_price),
+    costNoTax: optionalAmount(item.cost_no_tax),
+    purchaseAmount: optionalAmount(item.purchase_amount),
+    purchaseTaxAmount: optionalAmount(item.purchase_tax_amount),
+    laborCost: optionalAmount(item.labor_cost),
+    otherCost: optionalAmount(item.other_cost),
     deliveryDate: dateOnly(item.delivery_date),
-    deliveryRevenueNoTax: optionalNumber(item.delivery_revenue_no_tax),
-    deliveryValue: optionalNumber(item.delivery_value),
-    deliveryCostNoTax: optionalNumber(item.delivery_cost_no_tax),
-    deliveryCost: optionalNumber(item.delivery_cost),
-    pendingDeliveryQuantity: optionalNumber(item.pending_delivery_quantity),
-    pendingDeliveryAmountNoTax: optionalNumber(item.pending_delivery_amount_no_tax),
-    pendingDeliveryAmount: optionalNumber(item.pending_delivery_amount),
+    deliveryRevenueNoTax: optionalAmount(item.delivery_revenue_no_tax),
+    deliveryValue: optionalAmount(item.delivery_value),
+    deliveryCostNoTax: optionalAmount(item.delivery_cost_no_tax),
+    deliveryCost: optionalAmount(item.delivery_cost),
+    pendingDeliveryQuantity: optionalAmount(item.pending_delivery_quantity),
+    pendingDeliveryAmountNoTax: optionalAmount(item.pending_delivery_amount_no_tax),
+    pendingDeliveryAmount: optionalAmount(item.pending_delivery_amount),
   };
 }
 
 function mapPurchase(item: BackendPurchaseRecord): PurchaseRecord {
   return {
+    editContext: item.edit_context,
+    orderNumberHistory: item.order_number_history,
+    managerHistory: item.manager_history,
     orderLineId: item.order_line_id,
     projectId: item.project_code,
     orderId: item.order_no,
     manager: item.account_manager || fallbackText,
     department: item.department || fallbackText,
     contractNo: item.purchase_contract_no || fallbackText,
-    contractAmount: Number(item.purchase_contract_signed_amount || 0),
-    invoiceAmount: Number(item.received_invoice_amount || 0),
-    paymentAmount: Number(item.total_paid || 0),
+    contractAmount: rawAmount(item.purchase_contract_signed_amount),
+    invoiceAmount: rawAmount(item.received_invoice_amount),
+    paymentAmount: rawAmount(item.total_paid),
     supplier: item.supplier_name || fallbackText,
     paymentDate: dateOnly(item.latest_payment_date),
+    paymentPhases: item.payment_phases,
   };
 }
 
 function mapSale(item: BackendSalesRecord): SalesRecord {
   return {
+    editContext: item.edit_context,
+    orderNumberHistory: item.order_number_history,
+    managerHistory: item.manager_history,
     orderLineId: item.order_line_id,
     projectId: item.project_code,
     orderId: item.order_no,
@@ -158,13 +178,16 @@ function mapSale(item: BackendSalesRecord): SalesRecord {
     department: item.department || fallbackText,
     contractNo: item.sales_contract_no || fallbackText,
     contractDate: dateOnly(item.sales_contract_signed_date),
-    contractValue: Number(item.sales_contract_value || 0),
-    invoiceAmount: Number(item.sales_invoice_amount || 0),
-    totalReceived: Number(item.total_received || 0),
-    accountsReceivable: Number(item.accounts_receivable || 0),
+    contractValue: rawAmount(item.sales_contract_value),
+    invoiceAmount: rawAmount(item.sales_invoice_amount),
+    totalReceived: rawAmount(item.total_received),
+    deliveryAccountsReceivable: optionalAmount(item.delivery_accounts_receivable),
+    invoiceAccountsReceivable: optionalAmount(item.invoice_accounts_receivable),
+    accountsReceivable: rawAmount(item.accounts_receivable),
     supplierName: item.supplier_name || '',
     receiptDate: dateOnly(item.latest_receipt_date),
-    invoiceDates: (item.invoice_dates || '').split(',').map((value) => value.trim()).filter(Boolean),
+    receiptPhases: item.receipt_phases,
+    invoiceDates: item.invoice_phases?.map(p => p.date || '').filter(Boolean) || (item.invoice_dates || '').split(',').map((value) => value.trim()).filter(Boolean),
   };
 }
 
@@ -388,7 +411,7 @@ export default function App() {
 
   const handleUpdateOrder = async (target: OrderRecord, updatedItem: OrderRecord) => {
     if (target.orderLineId) {
-      await api.updateOrder(target.orderLineId, orderToPayload(updatedItem));
+      await editingApi(target.editContext).updateOrder(target.orderLineId, orderToPayload(updatedItem));
       await loadBackendData();
     } else {
       setOrders((prev) => prev.map((item) => (item === target ? updatedItem : item)));
@@ -398,7 +421,7 @@ export default function App() {
 
   const handleDeleteOrder = async (target: OrderRecord) => {
     if (target.orderLineId) {
-      await api.deleteOrder(target.orderLineId);
+      await editingApi(target.editContext).deleteOrder(target.orderLineId);
       await loadBackendData();
     } else {
       setOrders((prev) => prev.filter((item) => item !== target));
@@ -469,6 +492,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#F3F4F6] flex font-sans text-slate-900 select-none overflow-hidden">
+      <EditConflictDialog />
       <aside
         id="sidebar"
         className={`fixed left-0 top-0 h-full bg-[#0F172A] text-slate-300 border-r border-slate-800 z-[60] flex flex-col overflow-hidden transition-all duration-300 ${
@@ -656,7 +680,7 @@ export default function App() {
 
 function numericQuantity(value: string) {
   const match = String(value || '').match(/[\d.]+/);
-  return match ? Number(match[0]) : 0;
+  return match ? match[0] : '0';
 }
 
 function orderToPayload(item: OrderRecord) {

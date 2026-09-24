@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
@@ -10,8 +12,12 @@ from ..serializers import clean_rows
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 
+def _money_text(value: Decimal | int) -> str:
+    return format(Decimal(value), ".2f")
+
+
 @router.get("/summary")
-def summary(user: CurrentUser = Depends(get_current_user)) -> dict[str, float | int]:
+def summary(user: CurrentUser = Depends(get_current_user)) -> dict[str, str | int]:
     conditions = ["1=1"]
     params: dict[str, object] = {}
     apply_department_scope(conditions, params, user)
@@ -25,6 +31,8 @@ def summary(user: CurrentUser = Depends(get_current_user)) -> dict[str, float | 
                   COALESCE(SUM(gross_profit), 0) AS gross_profit,
                   COUNT(DISTINCT order_no) AS order_count,
                   COALESCE(SUM(accounts_receivable), 0) AS accounts_receivable,
+                  COALESCE(SUM(delivery_accounts_receivable), 0) AS delivery_accounts_receivable,
+                  COALESCE(SUM(invoice_accounts_receivable), 0) AS invoice_accounts_receivable,
                   COALESCE(SUM(accounts_payable), 0) AS accounts_payable,
                   SUM(CASE WHEN close_status = '关闭' OR accounts_receivable = 0 THEN 1 ELSE 0 END) AS closed_count
                 FROM v_order_line_finance
@@ -34,11 +42,13 @@ def summary(user: CurrentUser = Depends(get_current_user)) -> dict[str, float | 
             params,
         ).mappings().one()
     return {
-        "orderAmount": float(row["order_amount"]),
-        "grossProfit": float(row["gross_profit"]),
+        "orderAmount": _money_text(row["order_amount"]),
+        "grossProfit": _money_text(row["gross_profit"]),
         "orderCount": int(row["order_count"]),
-        "accountsReceivable": float(row["accounts_receivable"]),
-        "accountsPayable": float(row["accounts_payable"]),
+        "accountsReceivable": _money_text(row["accounts_receivable"]),
+        "deliveryAccountsReceivable": _money_text(row["delivery_accounts_receivable"]),
+        "invoiceAccountsReceivable": _money_text(row["invoice_accounts_receivable"]),
+        "accountsPayable": _money_text(row["accounts_payable"]),
         "closedCount": int(row["closed_count"] or 0),
     }
 

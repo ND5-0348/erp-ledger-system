@@ -1,4 +1,5 @@
 import { OrderRecord, ProjectLedger } from '../types';
+import { compareMoney, differenceMoney, sumMoney } from './money';
 
 export interface DashboardMetricsInput {
   ledgers: ProjectLedger[];
@@ -9,17 +10,19 @@ export interface DashboardMetricsInput {
 }
 
 export interface DashboardMetrics {
-  totalOrderAmount: number;
-  grossProfit: number;
+  totalOrderAmount: string;
+  grossProfit: string;
   orderCount: number;
-  accountsReceivable: number;
-  accountsPayable: number;
+  accountsReceivable: string;
+  deliveryAccountsReceivable: string;
+  invoiceAccountsReceivable: string;
+  accountsPayable: string;
   closedCount: number;
 }
 
 export interface DashboardRankingItem {
   label: string;
-  amount: number;
+  amount: string;
 }
 
 export interface DashboardFilters {
@@ -30,13 +33,13 @@ export interface DashboardFilters {
 
 export interface DashboardTrendItem {
   month: string;
-  orderAmount: number;
-  profit: number;
+  orderAmount: string;
+  profit: string;
 }
 
 function isClosedOrder(item: OrderRecord) {
   const status = item.orderStatus?.trim().toLowerCase() || '';
-  return ['closed', '已关闭', '关闭', '已闭合', '已结案'].includes(status) || item.accountsReceivable === 0;
+  return ['closed', '已关闭', '关闭', '已闭合', '已结案'].includes(status) || (item.accountsReceivable !== undefined && compareMoney(item.accountsReceivable, 0) === 0);
 }
 
 function hasOrderDateInRange(orderDate: string | undefined, startDate = '', endDate = '') {
@@ -65,35 +68,35 @@ export function getDashboardSalesRanking(
   startDate = '',
   endDate = '',
 ): DashboardRankingItem[] {
-  const totals = new Map<string, number>();
+  const totals = new Map<string, string>();
   orders.filter(belongsToDashboardScope(department, startDate, endDate)).forEach((item) => {
     const label = department
       ? item.teamName?.trim() || '未登记三级团队'
       : item.department?.trim() || '未登记部门';
-    totals.set(label, (totals.get(label) || 0) + Number(item.orderValue || 0));
+    totals.set(label, sumMoney(totals.get(label), item.orderValue));
   });
 
   return Array.from(totals.entries())
     .map(([label, amount]) => ({ label, amount }))
-    .filter((item) => item.amount > 0)
-    .sort((a, b) => b.amount - a.amount || a.label.localeCompare(b.label, 'zh-CN'))
+    .filter((item) => compareMoney(item.amount, 0) > 0)
+    .sort((a, b) => compareMoney(b.amount, a.amount) || a.label.localeCompare(b.label, 'zh-CN'))
     .slice(0, 5);
 }
 
 export function getDashboardTrendData(items: Array<ProjectLedger | OrderRecord>, filters: DashboardFilters): DashboardTrendItem[] {
-  const totals = new Map<string, { orderAmount: number; profit: number }>();
+  const totals = new Map<string, { orderAmount: string; profit: string }>();
   const dashboardScopeFilter = belongsToDashboardScope(filters.department, filters.startDate, filters.endDate);
 
   items.filter(dashboardScopeFilter).forEach((item) => {
     const month = item.orderDate.slice(0, 7);
     if (!month) return;
-    const current = totals.get(month) || { orderAmount: 0, profit: 0 };
+    const current = totals.get(month) || { orderAmount: '0.00', profit: '0.00' };
     const orderAmount = 'orderAmount' in item ? item.orderAmount : item.orderValue;
     const profit = 'orderAmount' in item
-      ? item.orderAmount - item.purchaseAmount
-      : Number(item.grossProfit ?? (item.orderValue - Number(item.purchaseAmount || 0)));
-    current.orderAmount += Number(orderAmount || 0);
-    current.profit += profit;
+      ? differenceMoney(item.orderAmount, item.purchaseAmount)
+      : item.grossProfit ?? differenceMoney(item.orderValue, item.purchaseAmount);
+    current.orderAmount = sumMoney(current.orderAmount, orderAmount);
+    current.profit = sumMoney(current.profit, profit);
     totals.set(month, current);
   });
 
@@ -122,20 +125,15 @@ export function getDashboardMetrics({ orders, department, startDate, endDate }: 
   });
 
   return {
-    totalOrderAmount: filteredOrders.reduce((sum, item) => sum + Number(item.orderValue || 0), 0),
-    grossProfit: filteredOrders.reduce(
-      (sum, item) => sum + Number(item.grossProfit ?? (item.orderValue - Number(item.purchaseAmount || 0))),
-      0,
-    ),
+    totalOrderAmount: sumMoney(...filteredOrders.map(item => item.orderValue)),
+    grossProfit: sumMoney(...filteredOrders.map(item => item.grossProfit ?? differenceMoney(item.orderValue, item.purchaseAmount))),
     orderCount: orderGroups.size,
-    accountsReceivable: filteredOrders.reduce(
-      (sum, item) => sum + Number(item.accountsReceivable ?? Math.max(item.orderValue - Number(item.totalReceived || 0), 0)),
-      0,
-    ),
-    accountsPayable: filteredOrders.reduce(
-      (sum, item) => sum + Number(item.accountsPayable ?? Math.max(Number(item.purchaseAmount || 0) - Number(item.totalPaid || 0), 0)),
-      0,
-    ),
+    accountsReceivable: sumMoney(...filteredOrders.map(item => item.accountsReceivable ??
+      (compareMoney(item.orderValue, item.totalReceived) > 0 ? differenceMoney(item.orderValue, item.totalReceived) : '0.00'))),
+    deliveryAccountsReceivable: sumMoney(...filteredOrders.map(item => item.deliveryAccountsReceivable ?? differenceMoney(item.deliveryValue, item.totalReceived))),
+    invoiceAccountsReceivable: sumMoney(...filteredOrders.map(item => item.invoiceAccountsReceivable)),
+    accountsPayable: sumMoney(...filteredOrders.map(item => item.accountsPayable ??
+      (compareMoney(item.purchaseAmount, item.totalPaid) > 0 ? differenceMoney(item.purchaseAmount, item.totalPaid) : '0.00'))),
     closedCount: [...orderGroups.values()].filter((lines) => lines.every(isClosedOrder)).length,
   };
 }

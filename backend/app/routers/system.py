@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
+from .. import maintenance_import
 from sqlalchemy import text
 
 from ..auth import CurrentUser, get_current_user, require_permission
-from ..backup import create_backup, restore_backup
+from ..backup import create_backup, restore_backup, verify_backup
 from ..config import DOCS_DIR
 from ..db import db
 from ..importer import import_excel
@@ -14,29 +16,30 @@ from ..write_guard import business_write
 router = APIRouter(tags=["system"], dependencies=[Depends(get_current_user)])
 
 
-@router.post("/api/import/excel")
-def run_import(user: CurrentUser = Depends(require_permission("system_admin"))) -> dict:
-    if not any(DOCS_DIR.glob("2026*.xlsx")):
-        raise HTTPException(status_code=400, detail="docs 目录中未找到 2026*.xlsx 业务台账文件")
-    try:
-        with business_write() as conn:
-            create_backup(conn, user, "pre_import")
-    except HTTPException:
-        # 写入忙（409）等已有语义的响应必须原样透出，不能被下面的兜底吞成 500。
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail="导入前自动备份失败，已取消导入") from exc
+class MaintenancePreview(BaseModel):
+    file_name: str = Field(min_length=1,max_length=255)
+
+
+class MaintenanceCommit(MaintenancePreview):
+    token: str = Field(min_length=1,max_length=4096)
+    confirmation: str
+
+
+@router.get('/api/import/files')
+def maintenance_files(user: CurrentUser = Depends(require_permission('system_admin'))):
+    return {'items':[p.name for p in DOCS_DIR.glob('*.xlsx') if p.is_file()]}
+
+
+@router.post('/api/import/preview')
+def preview_maintenance(payload: MaintenancePreview, user: CurrentUser = Depends(require_permission('system_admin'))):
+    with db() as conn:
+        return maintenance_import.preview(conn,user,payload.file_name)
+
+
+@router.post('/api/import/excel')
+def run_import(payload: MaintenanceCommit, user: CurrentUser = Depends(require_permission('system_admin'))):
     with business_write() as conn:
-        try:
-            result = import_excel(conn, reset=True, user=user)
-        except FileNotFoundError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if result["failed_rows"]:
-            raise HTTPException(
-                status_code=422,
-                detail=f"导入存在 {result['failed_rows']} 条错误数据，已整批回滚",
-            )
-        return result
+        return maintenance_import.replace(conn,user,payload.file_name,payload.token,payload.confirmation)
 
 
 @router.get("/api/logs")
@@ -89,6 +92,12 @@ def create_system_backup(user: CurrentUser = Depends(require_permission("system_
         return create_backup(conn, user)
 
 
+@router.get('/api/backups/{backup_id}/verify')
+def verify_system_backup(backup_id: int, user: CurrentUser = Depends(require_permission('system_admin'))):
+    with db() as conn:
+        return verify_backup(conn,backup_id)
+
+
 @router.post("/api/backups/{backup_id}/restore")
 def restore_system_backup(
     backup_id: int,
@@ -96,5 +105,4 @@ def restore_system_backup(
 ) -> dict:
     with business_write() as conn:
         create_backup(conn, user, "pre_restore")
-    with business_write() as conn:
         return restore_backup(conn, backup_id, user)

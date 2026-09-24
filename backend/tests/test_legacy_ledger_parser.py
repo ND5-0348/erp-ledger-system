@@ -94,7 +94,7 @@ def test_date_containing_slash_is_one_date_not_three() -> None:
     assert len(parsed.values) == 1
 
 
-@pytest.mark.parametrize("raw", ["2026/09/01/2026/09/15", "2026-09-01;2026-09-15", "2026/09/01\n2026/09/15"])
+@pytest.mark.parametrize("raw", ["2026/09/01/2026/09/15", "2026-09-01;2026-09-15", "2026/09/01\n2026/09/15", "2026/09/01，2026/09/15", "2026/09/01,2026/09/15", "2026/09/01、2026/09/15"])
 def test_two_dates_are_split_by_full_date_syntax(raw: str) -> None:
     parsed = parse_date_sequence(raw)
     assert parsed.values == [date(2026, 9, 1), date(2026, 9, 15)]

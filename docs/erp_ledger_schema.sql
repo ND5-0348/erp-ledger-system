@@ -14,6 +14,10 @@ SET NAMES utf8mb4;
 CREATE TABLE IF NOT EXISTS import_batch (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   source_file_name VARCHAR(255) NOT NULL,
+  source_sha256 CHAR(64) NULL,
+  review_json JSON NULL,
+  baseline_sha256 CHAR(64) NULL,
+  pre_import_backup_id BIGINT UNSIGNED NULL,
   source_sheet_name VARCHAR(128) NOT NULL,
   header_row_no INT NOT NULL DEFAULT 3,
   data_start_row_no INT NOT NULL DEFAULT 5,
@@ -105,6 +109,7 @@ CREATE TABLE IF NOT EXISTS backup_record (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 CREATE TABLE IF NOT EXISTS project (
+  version BIGINT NOT NULL DEFAULT 1,
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   project_code VARCHAR(64) NOT NULL,
   project_name VARCHAR(255) NULL,
@@ -159,6 +164,7 @@ CREATE TABLE IF NOT EXISTS legacy_import_session (
   source_file_name VARCHAR(255) NOT NULL,
   source_sha256 CHAR(64) NOT NULL,
   parser_version VARCHAR(32) NOT NULL,
+  edit_context JSON NULL,
   status VARCHAR(32) NOT NULL DEFAULT 'pending',
   summary_json JSON NULL,
   result_json JSON NULL,
@@ -235,6 +241,11 @@ CREATE TABLE IF NOT EXISTS order_line (
   sub_project_id BIGINT UNSIGNED NULL,
   raw_row_id BIGINT UNSIGNED NULL,
   source_excel_row_no INT NULL,
+  source_preserved TINYINT NOT NULL DEFAULT 0,
+  line_department VARCHAR(64) NULL,
+  line_branch_company VARCHAR(128) NULL,
+  line_account_manager VARCHAR(255) NULL,
+  line_team_level3_name VARCHAR(128) NULL,
   project_name VARCHAR(255) NULL,
   goods_name VARCHAR(255) NULL,
   specification_model VARCHAR(255) NULL,
@@ -470,7 +481,7 @@ CREATE TABLE IF NOT EXISTS sales_receipt (
   receipt_date_text VARCHAR(255) NULL,
   payment_notice_no VARCHAR(128) NULL,
   receipt_amount DECIMAL(18,2) NULL,
-  receipt_ratio DECIMAL(10,6) NULL,
+  receipt_ratio DECIMAL(30,6) NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   deleted_at DATETIME NULL,
@@ -489,10 +500,10 @@ SELECT
   p.project_code,
   so.order_no,
   so.gross_net_type,
-  p.department,
-  p.branch_company,
-  p.account_manager,
-  p.team_level3_name,
+  CASE WHEN ol.source_preserved = 1 THEN ol.line_department ELSE p.department END AS department,
+  CASE WHEN ol.source_preserved = 1 THEN ol.line_branch_company ELSE p.branch_company END AS branch_company,
+  CASE WHEN ol.source_preserved = 1 THEN ol.line_account_manager ELSE p.account_manager END AS account_manager,
+  CASE WHEN ol.source_preserved = 1 THEN ol.line_team_level3_name ELSE p.team_level3_name END AS team_level3_name,
   so.order_date,
   so.business_type,
   so.statistic_category,
@@ -516,6 +527,7 @@ SELECT
   ) AS last_modified_at,
   so.close_status,
   ol.id AS order_line_id,
+  ol.source_preserved,
   ol.goods_name,
   ol.specification_model,
   ol.unit_name,
@@ -555,6 +567,10 @@ SELECT
   COALESCE(sr_total.receipt_amount, 0) AS total_received,
   COALESCE(pay_total.payment_amount, 0) AS total_paid,
   COALESCE(ol.order_value, 0) - COALESCE(sr_total.receipt_amount, 0) AS accounts_receivable,
+  -- Legacy accounts_receivable remains order-based for existing consumers/status rules.
+  -- New balances derive from active source records; never store/import editable totals.
+  COALESCE(dr.delivery_value, 0) - COALESCE(sr_total.receipt_amount, 0) AS delivery_accounts_receivable,
+  COALESCE(si_total.invoice_amount, 0) - COALESCE(sr_total.receipt_amount, 0) AS invoice_accounts_receivable,
   COALESCE(pi.purchase_amount, 0) - COALESCE(pay_total.payment_amount, 0) AS accounts_payable,
   COALESCE(pi.purchase_amount, 0) - COALESCE(fpe_total.booked_amount, 0) AS financial_accounts_payable,
   COALESCE(ol.revenue_no_tax, 0) - COALESCE(pi.cost_no_tax, 0) AS gross_profit_no_tax,
@@ -651,6 +667,8 @@ SELECT
   SUM(COALESCE(v.financial_accounts_payable, 0)) AS financial_accounts_payable,
   SUM(COALESCE(v.total_received, 0)) AS total_received,
   SUM(COALESCE(v.accounts_receivable, 0)) AS accounts_receivable,
+  SUM(COALESCE(v.delivery_accounts_receivable, 0)) AS delivery_accounts_receivable,
+  SUM(COALESCE(v.invoice_accounts_receivable, 0)) AS invoice_accounts_receivable,
   SUM(COALESCE(v.accounts_payable, 0)) AS accounts_payable,
   SUM(COALESCE(v.gross_profit_no_tax, 0)) AS gross_profit_no_tax,
   SUM(COALESCE(v.gross_profit, 0)) AS gross_profit,
@@ -687,9 +705,24 @@ SELECT
   SUM(COALESCE(v.financial_accounts_payable, 0)) AS financial_accounts_payable,
   SUM(COALESCE(v.total_received, 0)) AS total_received,
   SUM(COALESCE(v.accounts_receivable, 0)) AS accounts_receivable,
+  SUM(COALESCE(v.delivery_accounts_receivable, 0)) AS delivery_accounts_receivable,
+  SUM(COALESCE(v.invoice_accounts_receivable, 0)) AS invoice_accounts_receivable,
   SUM(COALESCE(v.accounts_payable, 0)) AS accounts_payable,
   SUM(COALESCE(v.gross_profit_no_tax, 0)) AS gross_profit_no_tax,
   SUM(COALESCE(v.gross_profit, 0)) AS gross_profit
 FROM v_order_line_finance v
 GROUP BY v.project_code, v.order_no, v.department, v.branch_company, v.account_manager,
   v.order_date, v.business_type, v.statistic_category, v.close_status;
+
+CREATE TABLE IF NOT EXISTS business_state (id INT PRIMARY KEY, data_epoch BIGINT NOT NULL DEFAULT 1) ENGINE=InnoDB;
+INSERT IGNORE INTO business_state (id,data_epoch) VALUES (1,1);
+
+CREATE TABLE IF NOT EXISTS legacy_import_audit_source (
+ id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+ session_id VARCHAR(64) NOT NULL,
+ source_sha256 VARCHAR(64) NOT NULL,
+ excel_row_no INT NOT NULL,
+ raw_json JSON NOT NULL,
+ created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE KEY uk_legacy_audit_source (session_id,excel_row_no)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

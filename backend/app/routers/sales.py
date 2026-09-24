@@ -8,7 +8,10 @@ from sqlalchemy import text
 
 from ..audit import write_batch_operation_log, write_operation_log
 from ..auth import CurrentUser, apply_department_scope, can_access_department, get_current_user, require_permission
+from ..edit_versions import line_context
 from ..db import db
+from ..history_queries import order_match, manager_match, enrich_history, enrich_phases
+from ..financial_calculations import refresh_balances, sales_record_values
 from ..ledger_excel import (
     editor_changed_keys,
     editor_columns,
@@ -94,6 +97,8 @@ SUMMARY_AMOUNT_FIELDS = {
     "sales_invoice_amount",
     "total_received",
     "accounts_receivable",
+    "delivery_accounts_receivable",
+    "invoice_accounts_receivable",
     "gross_profit",
 }
 
@@ -103,10 +108,13 @@ def list_sales(
     project_id: str | None = None,
     order_id: str | None = None,
     manager: str | None = None,
+    include_history_manager: bool = False,
     department: str | None = None,
     supplier_name: str | None = None,
     contract_no: str | None = None,
     receipt_date: str | None = None,
+    receipt_start_date: BusinessDate | None = None,
+    receipt_end_date: BusinessDate | None = None,
     limit: int = Query(200, ge=1, le=500),
     offset: int = Query(0, ge=0),
     user: CurrentUser = Depends(get_current_user),
@@ -117,10 +125,10 @@ def list_sales(
         conditions.append("project_code LIKE :project_id")
         params["project_id"] = f"%{project_id}%"
     if order_id:
-        conditions.append("order_no LIKE :order_id")
+        conditions.append(order_match())
         params["order_id"] = f"%{order_id}%"
     if manager:
-        conditions.append("account_manager LIKE :manager")
+        conditions.append(manager_match() if include_history_manager else "account_manager LIKE :manager")
         params["manager"] = f"%{manager}%"
     if department:
         conditions.append("department = :department")
@@ -131,9 +139,18 @@ def list_sales(
     if contract_no:
         conditions.append("sales_contract_no LIKE :contract_no")
         params["contract_no"] = f"%{contract_no}%"
+    phase_conditions = ["hp.deleted_at IS NULL"]
     if receipt_date:
-        conditions.append("latest_receipt_date = :receipt_date")
-        params["receipt_date"] = receipt_date
+        phase_conditions.append("hp.receipt_date = :phase_date")
+        params["phase_date"] = receipt_date
+    if receipt_start_date:
+        phase_conditions.append("hp.receipt_date >= :phase_start")
+        params["phase_start"] = receipt_start_date
+    if receipt_end_date:
+        phase_conditions.append("hp.receipt_date <= :phase_end")
+        params["phase_end"] = receipt_end_date
+    if len(phase_conditions)>1:
+        conditions.append("order_line_id IN (SELECT hp.order_line_id FROM sales_receipt hp WHERE " + " AND ".join(phase_conditions) + ")")
     apply_department_scope(conditions, params, user)
     where_sql = " AND ".join(conditions)
     source_sql = """
@@ -160,7 +177,7 @@ def list_sales(
                 f"""
                 SELECT order_line_id, project_code, order_no, account_manager, department, supplier_name, sales_contract_no,
                        sales_contract_signed_date, sales_contract_value, sales_invoice_amount,
-                       total_received, accounts_receivable, latest_receipt_date, invoice_dates
+                       total_received, accounts_receivable, delivery_accounts_receivable, invoice_accounts_receivable, latest_receipt_date, invoice_dates
                 FROM ({source_sql}) sales_detail
                 WHERE {where_sql}
                 ORDER BY order_date DESC, project_code, order_line_id
@@ -169,7 +186,18 @@ def list_sales(
             ),
             params,
         ).mappings().all()
-    return {"total": int(total or 0), "items": clean_rows(rows)}
+        items = enrich_history(conn, rows)
+        enrich_phases(conn, items, "sales_receipt", "receipt_date", "receipt_amount", "receipt_phases")
+        if len(phase_conditions)>1:
+            for item in items:
+                matched = [p for p in item['receipt_phases'] if p['date'] and
+                    (not receipt_date or p['date']==receipt_date) and
+                    (not receipt_start_date or p['date']>=str(receipt_start_date)) and
+                    (not receipt_end_date or p['date']<=str(receipt_end_date))]
+                item['total_received'] = format(sum(Decimal(str(p['amount'] or 0)) for p in matched), 'f')
+
+        enrich_phases(conn, items, "sales_invoice", "invoice_date", "invoice_amount", "invoice_phases")
+    return {"total": int(total or 0), "items": items}
 
 
 @router.post("/batch-editor/rows")
@@ -184,7 +212,7 @@ def get_sales_batch_editor_rows(
         raise HTTPException(status_code=404, detail="部分订单明细不存在或当前账号无权访问")
     return {
         "editable_from": "BP",
-        "editable_through": "CM",
+        "editable_through": "CN",
         "fixed_columns": ["B", "C", "D", "E", "F", "G", "M", "N", "O"],
         "columns": editor_columns("sales"),
         "rows": rows,
@@ -230,11 +258,8 @@ def update_sales_batch(
         for order_line_id, _, data, _ in prepared:
             _save_sales_batch_item(conn, order_line_id, data)
 
-        for sales_order_id, close_status in close_status_by_order.items():
-            conn.execute(
-                text("UPDATE sales_order SET close_status = :close_status WHERE id = :sales_order_id"),
-                {"sales_order_id": sales_order_id, "close_status": close_status},
-            )
+        for order_line_id, _, _, _ in prepared:
+            refresh_balances(conn, order_line_id)
 
         audit_entries = [
             (before, editor_payload_snapshot(conn, user, order_line_id, "sales"))
@@ -274,7 +299,7 @@ def get_sales_detail_by_order(project_id: str, order_id: str, user: CurrentUser 
                        delivery_quantity, delivery_value,
                        purchase_contract_no, purchase_contract_signed_amount,
                        sales_contract_no, sales_contract_signed_date, sales_contract_value,
-                       sales_invoice_amount, total_received, accounts_receivable,
+                       sales_invoice_amount, total_received, accounts_receivable, delivery_accounts_receivable, invoice_accounts_receivable,
                        gross_profit_no_tax, gross_profit_margin_no_tax, gross_profit
                 FROM v_order_line_finance
                 WHERE project_code = :project_id AND order_no = :order_id
@@ -335,7 +360,10 @@ def get_sales_detail_by_order(project_id: str, order_id: str, user: CurrentUser 
             {"project_id": project_id, "order_id": order_id},
         ).mappings().all()
 
+        edit_context = line_context(conn,[r["order_line_id"] for r in summary_rows])
+    invoices, receipts = sales_record_values(summary_rows, invoices, receipts)
     return {
+        "edit_context":edit_context,
         "summary": clean_row(_aggregate_summary(summary_rows)),
         "contracts": clean_rows(contracts),
         "invoices": clean_rows(invoices),
@@ -356,7 +384,7 @@ def get_sales_detail(order_line_id: int, user: CurrentUser = Depends(get_current
                        supplier_name, purchase_amount, delivery_quantity, delivery_value,
                        purchase_contract_no, purchase_contract_signed_amount,
                        sales_contract_no, sales_contract_signed_date, sales_contract_value,
-                       sales_invoice_amount, total_received, accounts_receivable, gross_profit
+                       sales_invoice_amount, total_received, accounts_receivable, delivery_accounts_receivable, invoice_accounts_receivable, gross_profit
                 FROM v_order_line_finance
                 WHERE order_line_id = :order_line_id
                 """
@@ -406,7 +434,10 @@ def get_sales_detail(order_line_id: int, user: CurrentUser = Depends(get_current
             {"order_line_id": order_line_id},
         ).mappings().all()
 
+        edit_context = line_context(conn,[order_line_id])
+    invoices, receipts = sales_record_values([summary], invoices, receipts)
     return {
+        "edit_context":edit_context,
         "summary": clean_row(summary),
         "contracts": clean_rows(contracts),
         "invoices": clean_rows(invoices),
@@ -511,6 +542,7 @@ def add_sales_invoice(
             {"order_line_id": order_line_id, "phase_no": phase_no, **_payload_dict(payload)},
         )
         record_id = int(result.lastrowid or 0)
+        refresh_balances(conn, order_line_id)
         write_operation_log(
             conn, user, "销售管理", "create_sales_invoice", f"新增销售开票 {record_id}",
             after=_record_snapshot(conn, "sales_invoice", record_id),
@@ -543,6 +575,7 @@ def update_sales_invoice(
             ),
             {"invoice_id": invoice_id, **_payload_dict(payload)},
         )
+        refresh_balances(conn, order_line_id)
         write_operation_log(
             conn, user, "销售管理", "update_sales_invoice", f"修改销售开票 {invoice_id}",
             before=before, after=_record_snapshot(conn, "sales_invoice", invoice_id),
@@ -631,8 +664,6 @@ def delete_sales_receipt(
 ) -> dict:
     order_line_id = _ensure_detail_record("sales_receipt", receipt_id, user, require_entry=True)
     _soft_delete_detail("sales_receipt", receipt_id, user, "delete_sales_receipt", "销售回款")
-    with business_write() as conn:
-        _sync_close_status(conn, order_line_id)
     return get_sales_detail(order_line_id, user)
 
 
@@ -647,7 +678,8 @@ def _ensure_order_line_in_conn(
     row = conn.execute(
         text(
             """
-            SELECT ol.id AS order_line_id, ol.sales_order_id, ol.order_value, p.department
+            SELECT ol.id AS order_line_id, ol.sales_order_id, ol.order_value,
+                   CASE WHEN ol.source_preserved=1 THEN ol.line_department ELSE p.department END AS department
             FROM order_line ol
             JOIN sales_order so ON so.id = ol.sales_order_id AND so.deleted_at IS NULL
             JOIN project p ON p.id = so.project_id AND p.deleted_at IS NULL
@@ -905,9 +937,11 @@ def _ensure_order_line(order_line_id: int, user: CurrentUser, require_entry: boo
 
 
 def _payload_dict(payload: BaseModel) -> dict:
-    if hasattr(payload, "model_dump"):
-        return payload.model_dump()
-    return payload.dict()
+    data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+    for key in ('pending_invoice_amount', 'delivered_not_invoiced_amount', 'receipt_ratio', 'receipt1_ratio', 'receipt2_ratio', 'close_status'):
+        if key in data:
+            data[key] = None
+    return data
 
 
 def _ensure_detail_record(table_name: str, record_id: int, user: CurrentUser, require_entry: bool = False) -> int:
@@ -934,6 +968,7 @@ def _soft_delete_detail(table_name: str, record_id: int, user: CurrentUser, acti
     with business_write() as conn:
         before = _record_snapshot(conn, table_name, record_id)
         conn.execute(text(f"UPDATE {table_name} SET deleted_at = CURRENT_TIMESTAMP WHERE id = :record_id"), {"record_id": record_id})
+        refresh_balances(conn, int(before["order_line_id"]))
         write_operation_log(conn, user, "销售管理", action_name, f"删除{label} {record_id}", before=before)
 
 
@@ -954,7 +989,7 @@ def _next_phase(conn, table_name: str, order_line_id: int) -> int:
             f"""
             SELECT COALESCE(MAX(phase_no), 0) + 1
             FROM {table_name}
-            WHERE order_line_id = :order_line_id AND deleted_at IS NULL
+            WHERE order_line_id = :order_line_id
             """
         ),
         {"order_line_id": order_line_id},
@@ -1001,34 +1036,4 @@ def _aggregate_summary(rows) -> dict:
 
 
 def _sync_close_status(conn, order_line_id: int) -> None:
-    row = conn.execute(
-        text("SELECT sales_order_id FROM order_line WHERE id = :id"),
-        {"id": order_line_id},
-    ).mappings().first()
-    if row is None:
-        return
-    sales_order_id = int(row["sales_order_id"])
-    all_closed = conn.execute(
-        text(
-            """
-            SELECT NOT EXISTS (
-              SELECT 1 FROM v_order_line_finance v
-              WHERE v.order_line_id IN (
-                SELECT id FROM order_line WHERE sales_order_id = :so_id AND deleted_at IS NULL
-              )
-              AND v.accounts_receivable > 0
-            ) AS all_closed
-            """
-        ),
-        {"so_id": sales_order_id},
-    ).scalar()
-    if all_closed:
-        conn.execute(
-            text("UPDATE sales_order SET close_status = '关闭' WHERE id = :so_id"),
-            {"so_id": sales_order_id},
-        )
-    else:
-        conn.execute(
-            text("UPDATE sales_order SET close_status = NULL WHERE id = :so_id AND close_status = '关闭'"),
-            {"so_id": sales_order_id},
-        )
+    refresh_balances(conn, order_line_id)

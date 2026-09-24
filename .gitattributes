@@ -1,0 +1,4 @@
+ops/backup/*.sh text eol=lf
+ops/backup/*.py text eol=lf
+ops/backup/*.service text eol=lf
+ops/backup/*.timer text eol=lf

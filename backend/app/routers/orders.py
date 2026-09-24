@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,11 @@ from ..auth import (
     require_permission,
 )
 from ..backup import create_backup
+from ..edit_versions import line_context, touch_project
 from ..db import db
+from ..ledger_history import conflicts_in_project, register_current_number, register_current_manager
+from ..history_queries import order_match, manager_match, enrich_history, enrich_phases
+from ..financial_calculations import calculate_line, line_snapshot, refresh_line, refresh_balances
 from ..importer import import_excel
 from ..legacy_import_service import (
     apply_resolutions as apply_preview_resolutions,
@@ -165,7 +170,7 @@ def list_orders(
         conditions.append("project_code LIKE :project_id")
         params["project_id"] = f"%{project_id}%"
     if order_id:
-        conditions.append("order_no LIKE :order_id")
+        conditions.append(order_match())
         params["order_id"] = f"%{order_id}%"
     if business_type:
         conditions.append("business_type = :business_type")
@@ -235,7 +240,7 @@ def list_orders(
                        pending_delivery_amount,
                        total_received,
                        total_paid,
-                       accounts_receivable,
+                       accounts_receivable, delivery_accounts_receivable, invoice_accounts_receivable,
                        accounts_payable,
                        gross_profit,
                        close_status,
@@ -246,10 +251,10 @@ def list_orders(
                            ol.id AS order_line_id,
                            so.order_no,
                            so.gross_net_type,
-                           p.department,
-                           p.branch_company,
-                           p.account_manager,
-                           p.team_level3_name,
+                           finance.department,
+                           finance.branch_company,
+                           finance.account_manager,
+                           finance.team_level3_name,
                            sp.end_user_name,
                            sp.regional_platform,
                            so.order_date,
@@ -259,7 +264,7 @@ def list_orders(
                            COALESCE(ol.project_name, p.project_name) AS project_name,
                            finance.total_received,
                            finance.total_paid,
-                           finance.accounts_receivable,
+                           finance.accounts_receivable, finance.delivery_accounts_receivable, finance.invoice_accounts_receivable,
                            finance.accounts_payable,
                            finance.gross_profit,
                            finance.close_status,
@@ -308,7 +313,8 @@ def list_orders(
             ),
             params,
         ).mappings().all()
-    return {"total": int(total or 0), "items": clean_rows(rows)}
+        items = enrich_history(conn, rows)
+    return {"total": int(total or 0), "items": items}
 
 
 @router.post("")
@@ -378,6 +384,7 @@ def export_orders(
     project_id: str | None = Query(default=None, max_length=255),
     department: str | None = Query(default=None, max_length=255),
     manager: str | None = Query(default=None, max_length=255),
+    include_history_manager: bool = False,
     client_unit: str | None = Query(default=None, max_length=255),
     order_id: str | None = Query(default=None, max_length=255),
     order_status: str | None = Query(default=None, pattern="^(open|closed)$"),
@@ -396,6 +403,7 @@ def export_orders(
         "project_id": project_id,
         "department": department,
         "manager": manager,
+        "include_history_manager": include_history_manager,
         "client_unit": client_unit,
         "order_id": order_id,
         "order_status": order_status,
@@ -427,14 +435,10 @@ def _run_order_import(content: bytes, file_name: str, user: CurrentUser) -> dict
     """同步导入流程：解析工作簿、写库、导入前备份，全部在写入互斥内完成。"""
     try:
         with business_write() as conn:
-            create_backup(conn, user, "pre_import")
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail="导入前自动备份失败，已取消导入") from exc
-
-    try:
-        with business_write() as conn:
+            try:
+                backup = create_backup(conn, user, "pre_import")
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail="导入前自动备份失败，已取消导入") from exc
             result = import_excel(
                 conn,
                 reset=False,
@@ -444,11 +448,10 @@ def _run_order_import(content: bytes, file_name: str, user: CurrentUser) -> dict
                 strict_template=True,
             )
             if result["failed_rows"]:
-                message = "；".join(result.get("errors") or [])
-                detail = f"导入存在 {result['failed_rows']} 条错误数据，已整批回滚"
-                if message:
-                    detail = f"{detail}：{message}"
-                raise HTTPException(status_code=422, detail=detail)
+                from ..import_report import ImportReportError
+                raise ImportReportError(result)
+            from ..import_batches import record_review
+            record_review(conn,result,backup['id'])
             return result
     except HTTPException:
         raise
@@ -479,6 +482,55 @@ async def import_orders_excel(
     return await run_in_threadpool(_run_order_import, content, Path(filename).name, user)
 
 
+def _run_source_import(content, filename, user, preview, duplicate_confirmation=None):
+    from ..source_import import import_source
+    try:
+        with business_write() as conn:
+            if preview:
+                trial = conn.begin_nested()
+                try:
+                    result = import_source(conn, content, filename, user, preview=True)
+                finally:
+                    trial.rollback()
+                    conn.info.get('edit_touched', set()).clear()
+                return {**result, 'preview': True, 'batch_id': None}
+            backup = create_backup(conn, user, 'pre_source_import')
+            # Archive the exact original workbook separately from normalized cells.
+            from ..config import BACKUP_DIR
+            import hashlib
+            source_dir = BACKUP_DIR / 'source_workbooks'
+            source_dir.mkdir(parents=True, exist_ok=True)
+            source_path = source_dir / (hashlib.sha256(content).hexdigest() + '.xlsx')
+            if not source_path.exists():
+                with source_path.open('xb') as source_file:
+                    source_file.write(content)
+            if source_path.read_bytes() != content:
+                raise HTTPException(500, '原始文件归档校验失败，导入已取消')
+            result = import_source(conn, content, filename, user, duplicate_confirmation=duplicate_confirmation)
+            from ..import_batches import record_review
+            record_review(conn,result,backup['id'])
+            return {**result, 'preview': False}
+    except HTTPException:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except (ValueError, BadZipFile, InvalidFileException, KeyError) as exc:
+        raise HTTPException(422, f'Excel 导入失败：{exc}') from exc
+    except IntegrityError as exc:
+        raise HTTPException(409, '文件数据与现有记录冲突，整批未写入') from exc
+
+
+@router.post('/source-import')
+async def source_import_excel(request: Request, filename: str = Query('业务台账.xlsx', max_length=255),
+                              preview: bool = True, user: CurrentUser = Depends(require_permission('ledger_import'))):
+    content = await request.body()
+    if Path(filename).suffix.lower() != '.xlsx' or not content:
+        raise HTTPException(400, '请选择非空的 .xlsx 台账文件')
+    if len(content) > MAX_IMPORT_BYTES:
+        raise HTTPException(413, '上传文件不能超过 20 MB')
+    return await run_in_threadpool(_run_source_import, content, Path(filename).name, user, preview, request.headers.get('X-Duplicate-Confirmation'))
+
+
 class PreviewResolution(BaseModel):
     excel_row_no: int = Field(gt=0)
     resolution: dict[str, Any] = Field(default_factory=dict)
@@ -497,21 +549,30 @@ def _commit_import_preview(session_id: str, content: bytes, user: CurrentUser, i
     """预检提交：与普通导入同样先做导入前备份，备份失败就不写任何业务数据。"""
     try:
         with business_write() as conn:
-            create_backup(conn, user, "pre_legacy_commit")
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail="导入前自动备份失败，已取消提交") from exc
-
-    try:
-        with business_write() as conn:
-            return commit_preview_session(
+            try:
+                backup = create_backup(conn, user, "pre_legacy_commit")
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail="导入前自动备份失败，已取消提交") from exc
+            result = commit_preview_session(
                 conn, session_id=session_id, user=user, content=content, is_admin=is_admin
             )
+            if not result.get('already_committed'):
+                from ..import_batches import record_review
+                record_review(conn,result,backup['id'])
+            return result
     except HTTPException:
         raise
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.get('/import-status')
+def import_status(sha256: str = Query(pattern=r'^[a-f0-9]{64}$'), user: CurrentUser = Depends(require_permission('ledger_import'))):
+    with db() as conn:
+        rows=conn.execute(text('''SELECT id,source_file_name,success_rows,status,uploaded_at FROM import_batch
+          WHERE source_sha256=:sha AND uploaded_by=:user AND status='completed'
+          ORDER BY id DESC LIMIT 20'''),{'sha':sha256,'user':user.id}).mappings().all()
+    return {'items':clean_rows(rows),'message':'只列出当前账号已提交成功的匹配批次。没有结果时，原请求可能仍在处理，请稍后再次核对。'}
 
 
 @router.post("/import-preview")
@@ -551,6 +612,7 @@ def read_import_preview(
             "source_sha256": session["source_sha256"],
             "expires_at": session["expires_at"].isoformat() if session["expires_at"] else None,
             "parser_version": session["parser_version"],
+            "result": json.loads(session["result_json"]) if isinstance(session["result_json"], str) else session["result_json"],
         },
         "summary": summary,
         "rows": rows,
@@ -660,8 +722,9 @@ def update_basic_order_lines_batch(
             for item in payload.items:
                 ids = _ensure_order_line_in_conn(conn, item.order_line_id, user, require_entry=True, lock=True)
                 order_payload = _basic_order_update(item)
-                _validate_create_payload(order_payload, user)
-                data = _calculated_payload_data(order_payload)
+                _validate_create_payload(order_payload, user, source_preserved=bool(ids.get('source_preserved')))
+                data = _calculated_payload_data(order_payload, line_snapshot(conn, item.order_line_id))
+                _guard_identity_change(conn, ids, data)
                 current = editor_payload_snapshot(conn, user, item.order_line_id, "basic")
                 if editor_changed_keys("basic", current, data):
                     prepared.append((ids, order_payload, data, current))
@@ -701,63 +764,66 @@ def update_order_line(
     payload: OrderUpdate,
     user: CurrentUser = Depends(require_permission("order_edit")),
 ) -> dict:
-    _validate_create_payload(payload, user)
     ids = _ensure_order_line(order_line_id, user, require_entry=True)
-    data = _calculated_payload_data(payload)
-    project_data = {
-        "project_code": data["project_code"],
-        "department": data["department"],
-        "branch_company": data["branch_company"],
-        "account_manager": data["account_manager"],
-        "team_level3_name": data["team_name"],
-    }
-    # 客户单位/最终用户/区域平台属于子项目，不属于框架项目。
-    sub_project_data = {
-        "customer_unit_name": data["customer_unit_name"],
-        "end_user_name": data["user_name"],
-        "regional_platform": data["regional_platform"],
-    }
-    order_data = {
-        "gross_net_type": data["amount_type"],
-        "order_no": data["order_no"],
-        "order_date": data["order_date"],
-        "business_type": data["business_type"],
-        "statistic_category": data["statistical_category"],
-    }
-    line_data = {
-        "project_name": data["project_name"],
-        "goods_name": data["goods_name"],
-        "specification_model": data["specification_model"],
-        "unit_name": data["unit_name"],
-        "quantity": data["quantity"],
-        "sales_tax_rate": data["sales_tax_rate"],
-        "sales_unit_price_no_tax": data["net_unit_price"],
-        "sales_unit_price": data["unit_price"],
-        "revenue_no_tax": data["net_revenue"],
-        "order_value": data["order_value"],
-    }
-    purchase_data = {
-        "supplier_name": data["supplier_name"],
-        "purchase_tax_rate": data["purchase_tax_rate"],
-        "purchase_unit_price_no_tax": data["purchase_unit_price_no_tax"],
-        "purchase_unit_price": data["purchase_unit_price"],
-        "cost_no_tax": data["cost_no_tax"],
-        "purchase_amount": data["purchase_amount"],
-        "labor_cost": data["labor_cost"],
-        "other_cost": data["other_cost"],
-    }
-    delivery_data = {
-        "delivery_date": data["delivery_date"],
-        "delivery_quantity": data["delivery_quantity"],
-        "delivery_revenue_no_tax": data["delivery_revenue_no_tax"],
-        "delivery_value": data["delivery_value"],
-        "delivery_cost_no_tax": data["delivery_cost_no_tax"],
-        "delivery_cost": data["delivery_cost"],
-        "pending_delivery_quantity": data["pending_delivery_quantity"],
-        "pending_delivery_amount_no_tax": data["pending_delivery_amount_no_tax"],
-        "pending_delivery_amount": data["pending_delivery_amount"],
-    }
+    _validate_create_payload(payload, user, source_preserved=bool(ids.get('source_preserved')))
     with business_write() as conn:
+        ids = _ensure_order_line_in_conn(conn, order_line_id, user, require_entry=True, lock=True)
+        previous = line_snapshot(conn, order_line_id)
+        data = _calculated_payload_data(payload, previous)
+        _guard_identity_change(conn, ids, data)
+        project_data = {
+            "project_code": data["project_code"],
+            "department": data["department"],
+            "branch_company": data["branch_company"],
+            "account_manager": data["account_manager"],
+            "team_level3_name": data["team_name"],
+        }
+        # 客户单位/最终用户/区域平台属于子项目，不属于框架项目。
+        sub_project_data = {
+            "customer_unit_name": data["customer_unit_name"],
+            "end_user_name": data["user_name"],
+            "regional_platform": data["regional_platform"],
+        }
+        order_data = {
+            "gross_net_type": data["amount_type"],
+            "order_no": data["order_no"],
+            "order_date": data["order_date"],
+            "business_type": data["business_type"],
+            "statistic_category": data["statistical_category"],
+        }
+        line_data = {
+            "project_name": data["project_name"],
+            "goods_name": data["goods_name"],
+            "specification_model": data["specification_model"],
+            "unit_name": data["unit_name"],
+            "quantity": data["quantity"],
+            "sales_tax_rate": data["sales_tax_rate"],
+            "sales_unit_price_no_tax": data["net_unit_price"],
+            "sales_unit_price": data["unit_price"],
+            "revenue_no_tax": data["net_revenue"],
+            "order_value": data["order_value"],
+        }
+        purchase_data = {
+            "supplier_name": data["supplier_name"],
+            "purchase_tax_rate": data["purchase_tax_rate"],
+            "purchase_unit_price_no_tax": data["purchase_unit_price_no_tax"],
+            "purchase_unit_price": data["purchase_unit_price"],
+            "cost_no_tax": data["cost_no_tax"],
+            "purchase_amount": data["purchase_amount"],
+            "labor_cost": data["labor_cost"],
+            "other_cost": data["other_cost"],
+        }
+        delivery_data = {
+            "delivery_date": data["delivery_date"],
+            "delivery_quantity": data["delivery_quantity"],
+            "delivery_revenue_no_tax": data["delivery_revenue_no_tax"],
+            "delivery_value": data["delivery_value"],
+            "delivery_cost_no_tax": data["delivery_cost_no_tax"],
+            "delivery_cost": data["delivery_cost"],
+            "pending_delivery_quantity": data["pending_delivery_quantity"],
+            "pending_delivery_amount_no_tax": data["pending_delivery_amount_no_tax"],
+            "pending_delivery_amount": data["pending_delivery_amount"],
+        }
         _validate_batch_update_targets(conn, [(ids, payload, data, {})])
         before = conn.execute(
             text("SELECT * FROM v_order_line_finance WHERE order_line_id = :order_line_id"),
@@ -775,7 +841,7 @@ def update_order_line(
                 WHERE id = :project_id
                 """
             ),
-            {"project_id": ids["project_id"], **project_data},
+            {"project_id": -1 if ids.get('source_preserved') else ids["project_id"], **project_data},
         )
         conn.execute(
             text(
@@ -818,6 +884,7 @@ def update_order_line(
         )
         _upsert_line_record(conn, "purchase_info", order_line_id, purchase_data)
         _upsert_line_record(conn, "delivery_record", order_line_id, delivery_data)
+        refresh_line(conn, order_line_id, sales=False, purchase=False)
         after = conn.execute(
             text("SELECT * FROM v_order_line_finance WHERE order_line_id = :order_line_id"),
             {"order_line_id": order_line_id},
@@ -875,11 +942,12 @@ def get_order_line(order_line_id: int, user: CurrentUser) -> dict:
             ),
             {"order_line_id": order_line_id},
         ).mappings().first()
+        version = line_context(conn,[order_line_id])
     if row is None:
         raise HTTPException(status_code=404, detail="Order line not found")
     if not can_access_department(user, str(row["department"]) if row["department"] is not None else None):
         raise HTTPException(status_code=403, detail="Department permission denied")
-    return clean_row(row)
+    return {**clean_row(row), "edit_context":version}
 
 
 def _ensure_order_line(order_line_id: int, user: CurrentUser, require_entry: bool = False) -> dict:
@@ -899,7 +967,8 @@ def _ensure_order_line_in_conn(
     row = conn.execute(
         text(
             """
-            SELECT ol.id AS order_line_id, ol.sales_order_id, so.project_id, p.department
+            SELECT ol.id AS order_line_id, ol.sales_order_id, so.project_id, ol.source_preserved,
+                   CASE WHEN ol.source_preserved=1 THEN ol.line_department ELSE p.department END AS department
             FROM order_line ol
             JOIN sales_order so ON so.id = ol.sales_order_id AND so.deleted_at IS NULL
             JOIN project p ON p.id = so.project_id AND p.deleted_at IS NULL
@@ -929,7 +998,7 @@ def _basic_order_update(payload: BasicOrderFields) -> OrderUpdate:
     return OrderUpdate(**data)
 
 
-def _validate_create_payload(payload: OrderUpdate, user: CurrentUser) -> None:
+def _validate_create_payload(payload: OrderUpdate, user: CurrentUser, *, source_preserved=False) -> None:
     data = _calculated_payload_data(payload)
     required = {
         "project_code": data["project_code"],
@@ -937,6 +1006,9 @@ def _validate_create_payload(payload: OrderUpdate, user: CurrentUser) -> None:
         "goods_name": data["goods_name"],
         "customer_unit_name": data["customer_unit_name"],
     }
+    for field in ('order_no','account_manager'):
+        if not source_preserved and any(c in str(data.get(field) or '') for c in '/／;；\n\r'):
+            raise HTTPException(422, '请填写单个当前订单号或客户经理；历史请通过预检或正式变更操作维护')
     missing = [name for name, value in required.items() if not str(value or "").strip()]
     if data["order_value"] is None:
         missing.append("order_value")
@@ -976,6 +1048,8 @@ def _validate_batch_update_targets(
             data[key]
             for key in ("amount_type", "order_no", "order_date", "business_type", "statistical_category")
         )
+        if ids.get('source_preserved'):
+            project_id = -order_line_id
         if project_id in project_targets and project_targets[project_id] != project_target:
             raise HTTPException(status_code=422, detail="同一项目的项目级字段必须保持一致，请统一修改后再提交")
         if sales_order_id in order_targets and order_targets[sales_order_id] != order_target:
@@ -996,7 +1070,7 @@ def _validate_batch_update_targets(
         existing_lines = conn.execute(
             text(
                 """
-                SELECT ol.id, ol.project_name, ol.goods_name, ol.specification_model,
+                SELECT ol.id, ol.source_preserved, ol.project_name, ol.goods_name, ol.specification_model,
                        ol.quantity, ol.sales_unit_price, pi.supplier_name
                 FROM order_line ol
                 LEFT JOIN purchase_info pi ON pi.order_line_id = ol.id AND pi.deleted_at IS NULL
@@ -1007,6 +1081,8 @@ def _validate_batch_update_targets(
         ).mappings().all()
         seen: set[tuple[str, str, str, Decimal, Decimal, str]] = set()
         for row in existing_lines:
+            if row['source_preserved']:
+                continue  # Source rows are separately recorded transactions, even when identical.
             identity = line_targets.get(
                 int(row["id"]),
                 (
@@ -1094,7 +1170,7 @@ def _update_basic_order_line_in_conn(
             """
         ),
         {
-            "project_id": ids["project_id"],
+            "project_id": -1 if ids.get('source_preserved') else ids["project_id"],
             "project_code": data["project_code"],
             "department": data["department"],
             "branch_company": data["branch_company"],
@@ -1166,10 +1242,13 @@ def _update_basic_order_line_in_conn(
             "order_value": data["order_value"],
         },
     )
+
+    refresh_line(conn, order_line_id, sales=False)
+
 def _create_order_line(conn, payload: OrderUpdate) -> int:
     data = _calculated_payload_data(payload)
     project = conn.execute(
-        text("SELECT id FROM project WHERE project_code = :project_code LIMIT 1"),
+        text("SELECT * FROM project WHERE project_code = :project_code LIMIT 1"),
         {"project_code": data["project_code"]},
     ).mappings().first()
     # 框架项目只承载框架级字段：客户经理、分公司、部门、三级团队。
@@ -1182,6 +1261,10 @@ def _create_order_line(conn, payload: OrderUpdate) -> int:
     }
     if project:
         project_id = int(project["id"])
+        if not project.get('deleted_at'):
+            for key, value in project_values.items():
+                if (project[key] or '') != (value or ''):
+                    raise HTTPException(409, '框架归属不一致，请先通过框架整体交接确认')
         assignments = ", ".join(f"{key} = :{key}" for key in project_values if key != "project_code")
         conn.execute(
             text(f"UPDATE project SET {assignments}, deleted_at = NULL WHERE id = :project_id"),
@@ -1208,6 +1291,8 @@ def _create_order_line(conn, payload: OrderUpdate) -> int:
         text("SELECT id FROM sales_order WHERE project_id = :project_id AND order_no = :order_no LIMIT 1"),
         {"project_id": project_id, "order_no": data["order_no"]},
     ).mappings().first()
+    if not sales_order and conflicts_in_project(conn, project_id, [data['order_no']]):
+        raise HTTPException(409, '该编号是已有订单的历史号，请使用当前订单号新增明细')
     order_values = {
         "project_id": project_id,
         "gross_net_type": data["amount_type"],
@@ -1243,6 +1328,10 @@ def _create_order_line(conn, payload: OrderUpdate) -> int:
             order_values,
         )
         sales_order_id = int(result.lastrowid or 0)
+
+    touch_project(conn, project_id)
+    register_current_number(conn, sales_order_id, data['order_no'], source='manual_entry')
+    register_current_manager(conn, project_id, data['account_manager'], source='manual_entry')
 
     # 子项目是订单下的独立层级：客户单位/最终用户/区域平台存在这里，
     # 同一订单下不同子项目可以有不同值。
@@ -1332,53 +1421,16 @@ def _create_order_line(conn, payload: OrderUpdate) -> int:
             "pending_delivery_amount": data["pending_delivery_amount"],
         },
     )
+    refresh_balances(conn, order_line_id)
     return order_line_id
 
 
-def _calculated_payload_data(payload: OrderUpdate) -> dict[str, object]:
+def _calculated_payload_data(payload: OrderUpdate, previous: dict | None = None) -> dict[str, object]:
     data = _payload_dict(payload)
-    quantity = _as_decimal(data["quantity"])
-
-    sales_rate = _as_decimal(data["sales_tax_rate"])
-    sales_unit_price_no_tax = _as_decimal(data["net_unit_price"])
-    sales_unit_price = _as_decimal(data["unit_price"])
-    if sales_rate is not None:
-        if sales_unit_price_no_tax is not None:
-            sales_unit_price = _price(sales_unit_price_no_tax * (Decimal("1") + sales_rate / Decimal("100")))
-            data["unit_price"] = sales_unit_price
-        if quantity is not None and sales_unit_price_no_tax is not None:
-            data["net_revenue"] = _money(quantity * sales_unit_price_no_tax)
-        if quantity is not None and sales_unit_price is not None:
-            data["order_value"] = _money(quantity * sales_unit_price)
-
-    purchase_rate = _as_decimal(data["purchase_tax_rate"])
-    purchase_unit_price_no_tax = _as_decimal(data["purchase_unit_price_no_tax"])
-    purchase_unit_price = _as_decimal(data["purchase_unit_price"])
-    if purchase_rate is not None:
-        if purchase_unit_price_no_tax is not None:
-            purchase_unit_price = _price(purchase_unit_price_no_tax * (Decimal("1") + purchase_rate / Decimal("100")))
-            data["purchase_unit_price"] = purchase_unit_price
-        if quantity is not None and purchase_unit_price_no_tax is not None:
-            data["cost_no_tax"] = _money(quantity * purchase_unit_price_no_tax)
-        if quantity is not None and purchase_unit_price is not None:
-            data["purchase_amount"] = _money(quantity * purchase_unit_price)
-
-    delivery_quantity = _as_decimal(data["delivery_quantity"])
-    if quantity is not None and delivery_quantity is not None:
-        if delivery_quantity > quantity:
-            raise HTTPException(status_code=422, detail="交付数量不能超过订单数量，数据有错误，请检查后重新提交。")
-        data["pending_delivery_quantity"] = quantity - delivery_quantity
-        if sales_rate is not None and sales_unit_price_no_tax is not None:
-            data["delivery_revenue_no_tax"] = _money(delivery_quantity * sales_unit_price_no_tax)
-            data["pending_delivery_amount_no_tax"] = _money((quantity - delivery_quantity) * sales_unit_price_no_tax)
-        if sales_rate is not None and sales_unit_price is not None:
-            data["delivery_value"] = _money(delivery_quantity * sales_unit_price)
-            data["pending_delivery_amount"] = _money((quantity - delivery_quantity) * sales_unit_price)
-        if purchase_rate is not None and purchase_unit_price_no_tax is not None:
-            data["delivery_cost_no_tax"] = _money(delivery_quantity * purchase_unit_price_no_tax)
-        if purchase_rate is not None and purchase_unit_price is not None:
-            data["delivery_cost"] = _money(delivery_quantity * purchase_unit_price)
-    return data
+    aliases = {"net_unit_price": "sales_unit_price_no_tax", "unit_price": "sales_unit_price", "net_revenue": "revenue_no_tax"}
+    values = {aliases.get(key, key): value for key, value in data.items()}
+    calculated = calculate_line(values, previous)
+    return {key: calculated.get(aliases.get(key, key), value) for key, value in data.items()}
 
 
 def _as_decimal(value: object) -> Decimal | None:
@@ -1460,3 +1512,12 @@ def _upsert_line_record(conn, table_name: str, order_line_id: int, data: dict[st
     columns = ", ".join(["order_line_id", *data.keys()])
     values = ", ".join([":order_line_id", *(f":{key}" for key in data)])
     conn.execute(text(f"INSERT INTO {table_name} ({columns}) VALUES ({values})"), params)
+
+
+def _guard_identity_change(conn, ids, data):
+    current = conn.execute(text("SELECT account_manager,department,branch_company,team_level3_name,order_no FROM v_order_line_finance WHERE order_line_id=:id"), {'id':ids['order_line_id']}).mappings().one()
+    if data.get('order_no') != current['order_no']:
+        raise HTTPException(409, '请使用“变更订单号”操作；普通编辑不能改号')
+    for key, field in [('account_manager','account_manager'),('department','department'),('branch_company','branch_company'),('team_name','team_level3_name')]:
+        if (data.get(key) or '') != (current[field] or ''):
+            raise HTTPException(409, '请使用“框架整体交接”操作修改归属；普通编辑不能交接')

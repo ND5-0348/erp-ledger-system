@@ -1,3 +1,5 @@
+import { editingApi } from '../api';
+import { matchedManagers } from '../lib/historyQuery';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Search,
@@ -18,6 +20,8 @@ import { api, BackendPurchaseDetail } from '../api';
 import { OrderRecord, PurchaseRecord } from '../types';
 import { applyPurchaseFilters, emptyPurchaseFilters, getDepartmentOptions, submitQueryFilters } from '../lib/queryFilterModel';
 import BatchPurchaseEditor from './BatchPurchaseEditor';
+import { calculateTaxAmounts, editableNumber } from '../lib/orderAmounts';
+import { differenceMoney, formatMoney as formatExactMoney, sumMoney, type MoneyValue } from '../lib/money';
 
 interface PurchasesScreenProps {
   purchases: PurchaseRecord[];
@@ -32,7 +36,6 @@ type EntryMode = 'contract' | 'invoice' | 'warehouse' | 'financeCheck' | 'financ
 type EditingRecord = { mode: EntryMode; id: number } | null;
 type DetailIntent = 'view' | 'edit' | 'delete';
 
-const moneyFormatter = new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2 });
 
 function getPaginationItems(totalPages: number): Array<number | 'ellipsis'> {
   if (totalPages <= 4) {
@@ -41,8 +44,8 @@ function getPaginationItems(totalPages: number): Array<number | 'ellipsis'> {
   return [1, 2, 'ellipsis', totalPages - 1, totalPages];
 }
 
-function formatMoney(value?: number | null) {
-  return `¥${moneyFormatter.format(Number(value || 0))}`;
+function formatMoney(value?: MoneyValue | null) {
+  return `¥${formatExactMoney(value)}`;
 }
 
 function textValue(value: unknown) {
@@ -50,13 +53,18 @@ function textValue(value: unknown) {
 }
 
 function parseAmount(value: string) {
-  return value === '' ? null : Number(value);
+  return value.trim() === '' ? null : value.trim();
+}
+
+function parseRate(value: string) {
+  return value.trim() === '' ? null : Number(value);
 }
 
 export default function PurchasesScreen({ purchases, orders, canEnterPurchases, canEditPurchases, canDeletePurchases, onRefresh }: PurchasesScreenProps) {
   const [projectId, setProjectId] = useState('');
   const [orderId, setOrderId] = useState('');
   const [manager, setManager] = useState('');
+  const [includeHistoryManager, setIncludeHistoryManager] = useState('');
   const [department, setDepartment] = useState('');
   const [supplier, setSupplier] = useState('');
   const [contractNo, setContractNo] = useState('');
@@ -67,6 +75,7 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
   const [selectedPurchase, setSelectedPurchase] = useState<PurchaseRecord | null>(null);
   const [detailIntent, setDetailIntent] = useState<DetailIntent>('view');
   const [detail, setDetail] = useState<BackendPurchaseDetail | null>(null);
+  const editApi = editingApi(detail?.edit_context);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState('');
   const [entryMode, setEntryMode] = useState<EntryMode | null>(null);
@@ -164,6 +173,7 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
     setProjectId('');
     setOrderId('');
     setManager('');
+    setIncludeHistoryManager('');
     setDepartment('');
     setSupplier('');
     setContractNo('');
@@ -179,6 +189,7 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
         projectId,
         orderId,
         manager,
+        includeHistoryManager,
         department,
         supplier,
         contractNo,
@@ -290,9 +301,9 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
     setSaving(true);
     setDetailError('');
     try {
-      const updated = await api.updatePurchaseSummary(selectedPurchase.orderLineId, {
+      const updated = await editApi.updatePurchaseSummary(selectedPurchase.orderLineId, {
         supplier_name: summaryForm.supplier_name.trim() || null,
-        purchase_tax_rate: parseAmount(summaryForm.purchase_tax_rate),
+        purchase_tax_rate: parseRate(summaryForm.purchase_tax_rate),
         purchase_unit_price_no_tax: parseAmount(summaryForm.purchase_unit_price_no_tax),
         purchase_unit_price: parseAmount(summaryForm.purchase_unit_price),
         cost_no_tax: parseAmount(summaryForm.cost_no_tax),
@@ -384,16 +395,16 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
     setDetailError('');
     try {
       const updated = mode === 'contract'
-        ? await api.deletePurchaseContract(id)
+        ? await editApi.deletePurchaseContract(id)
         : mode === 'invoice'
-          ? await api.deletePurchaseInvoice(id)
+          ? await editApi.deletePurchaseInvoice(id)
           : mode === 'warehouse'
-            ? await api.deleteWarehouseEntry(id)
+            ? await editApi.deleteWarehouseEntry(id)
             : mode === 'financeCheck'
-              ? await api.deleteFinanceInvoiceCheck(id)
+              ? await editApi.deleteFinanceInvoiceCheck(id)
               : mode === 'financePayment'
-                ? await api.deleteFinancePayment(id)
-                : await api.deletePurchasePayment(id);
+                ? await editApi.deleteFinancePayment(id)
+                : await editApi.deletePurchasePayment(id);
       setDetail(updated);
     } catch (error) {
       setDetailError(error instanceof Error ? error.message : '删除失败');
@@ -415,11 +426,10 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
           payment_terms: contractForm.payment_terms || null,
           performance_period: contractForm.performance_period || null,
           signed_amount: parseAmount(contractForm.signed_amount),
-          unsigned_amount: parseAmount(contractForm.unsigned_amount),
         };
         updated = editingRecord
-          ? await api.updatePurchaseContract(editingRecord.id, data)
-          : await api.addPurchaseContract(selectedPurchase.orderLineId, data);
+          ? await editApi.updatePurchaseContract(editingRecord.id, data)
+          : await editApi.addPurchaseContract(selectedPurchase.orderLineId, data);
       } else if (entryMode === 'invoice') {
         const data = {
           received_invoice_date: invoiceForm.received_invoice_date || null,
@@ -427,8 +437,8 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
           invoice_amount: parseAmount(invoiceForm.invoice_amount),
         };
         updated = editingRecord
-          ? await api.updatePurchaseInvoice(editingRecord.id, data)
-          : await api.addPurchaseInvoice(selectedPurchase.orderLineId, data);
+          ? await editApi.updatePurchaseInvoice(editingRecord.id, data)
+          : await editApi.addPurchaseInvoice(selectedPurchase.orderLineId, data);
       } else if (entryMode === 'warehouse') {
         const data = {
           warehouse_date: warehouseForm.warehouse_date || null,
@@ -437,8 +447,8 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
           warehouse_amount_no_tax: parseAmount(warehouseForm.warehouse_amount_no_tax),
         };
         updated = editingRecord
-          ? await api.updateWarehouseEntry(editingRecord.id, data)
-          : await api.addWarehouseEntry(selectedPurchase.orderLineId, data);
+          ? await editApi.updateWarehouseEntry(editingRecord.id, data)
+          : await editApi.addWarehouseEntry(selectedPurchase.orderLineId, data);
       } else if (entryMode === 'financeCheck') {
         const data = {
           received_invoice_date: financeCheckForm.received_invoice_date || null,
@@ -446,8 +456,8 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
           voucher_code: financeCheckForm.voucher_code || null,
         };
         updated = editingRecord
-          ? await api.updateFinanceInvoiceCheck(editingRecord.id, data)
-          : await api.addFinanceInvoiceCheck(selectedPurchase.orderLineId, data);
+          ? await editApi.updateFinanceInvoiceCheck(editingRecord.id, data)
+          : await editApi.addFinanceInvoiceCheck(selectedPurchase.orderLineId, data);
       } else if (entryMode === 'financePayment') {
         const data = {
           payment_date: financePaymentForm.payment_date || null,
@@ -455,8 +465,8 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
           booked_amount: parseAmount(financePaymentForm.booked_amount),
         };
         updated = editingRecord
-          ? await api.updateFinancePayment(editingRecord.id, data)
-          : await api.addFinancePayment(selectedPurchase.orderLineId, data);
+          ? await editApi.updateFinancePayment(editingRecord.id, data)
+          : await editApi.addFinancePayment(selectedPurchase.orderLineId, data);
       } else {
         const data = {
           due_payment_date: nextPaymentPhase === 1 ? paymentForm.due_payment_date || null : null,
@@ -465,8 +475,8 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
           payment_amount: parseAmount(paymentForm.payment_amount),
         };
         updated = editingRecord
-          ? await api.updatePurchasePayment(editingRecord.id, { ...data, due_payment_date: paymentForm.due_payment_date || null })
-          : await api.addPurchasePayment(selectedPurchase.orderLineId, data);
+          ? await editApi.updatePurchasePayment(editingRecord.id, { ...data, due_payment_date: paymentForm.due_payment_date || null })
+          : await editApi.addPurchasePayment(selectedPurchase.orderLineId, data);
       }
       setDetail(updated);
       setEntryMode(null);
@@ -480,6 +490,24 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
   };
 
   const summary = detail?.summary;
+  const draftUnsigned = differenceMoney(summary?.purchase_amount,
+    sumMoney(...(detail?.contracts || []).filter(item => !(editingRecord?.mode === 'contract' && item.id === editingRecord.id)).map(item => item.signed_amount)),
+    contractForm.signed_amount);
+  const updateSummaryPrice = (field: 'purchase_tax_rate' | 'purchase_unit_price_no_tax' | 'purchase_unit_price', value: string) => {
+    const next = { ...summaryForm, [field]: value };
+    const calculated = calculateTaxAmounts({
+      quantity: summary?.quantity,
+      taxRate: next.purchase_tax_rate,
+      unitPriceNoTax: field === 'purchase_unit_price' && next.purchase_tax_rate !== '' ? '' : next.purchase_unit_price_no_tax,
+      unitPrice: next.purchase_unit_price,
+    });
+    setSummaryForm({ ...next,
+      purchase_unit_price_no_tax: editableNumber(calculated.unitPriceNoTax),
+      purchase_unit_price: editableNumber(calculated.unitPrice),
+      cost_no_tax: editableNumber(calculated.amountNoTax, 2),
+      purchase_amount: editableNumber(calculated.amount, 2),
+    });
+  };
 
   return (
     <div className="space-y-6">
@@ -516,6 +544,7 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
           <FilterInput label="项目编号" placeholder="输入项目编号" value={projectId} onChange={setProjectId} />
           <FilterInput label="销售订单号" placeholder="输入销售订单号" value={orderId} onChange={setOrderId} />
           <FilterInput label="客户经理" placeholder="输入经理姓名" value={manager} onChange={setManager} />
+          <label className="flex items-center gap-2 text-xs text-slate-600"><input type="checkbox" checked={includeHistoryManager === 'true'} onChange={e => setIncludeHistoryManager(e.target.checked ? 'true' : '')} />包含历史负责人</label>
           <FilterInput label="采购厂商" placeholder="输入采购厂商" value={supplier} onChange={setSupplier} />
           <FilterInput label="公司合同号" placeholder="输入公司合同号" value={contractNo} onChange={setContractNo} />
           <div className="space-y-1.5 md:col-span-2">
@@ -619,7 +648,7 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
                       <td className="px-6 py-4 text-xs font-mono text-slate-500">{item.orderId}</td>
                       <td className="px-6 py-4 align-top text-xs leading-5 text-slate-700 whitespace-normal break-words">{order?.projectName || '-'}</td>
                       <td className="px-6 py-4 align-top text-xs leading-5 text-slate-700 whitespace-normal break-words">{item.supplier || '-'}</td>
-                      <td className="px-6 py-4 text-xs text-slate-700 font-medium">{item.manager}</td>
+                      <td className="px-6 py-4 text-xs text-slate-700 font-medium">{item.manager}{matchedManagers(item, submittedFilters.manager, submittedFilters.includeHistoryManager) && <small className="block text-amber-700">历史：{matchedManagers(item, submittedFilters.manager, submittedFilters.includeHistoryManager)}</small>}</td>
                       <td className="px-6 py-4 text-xs font-mono text-slate-800">{item.contractNo}</td>
                       <td className="px-6 py-4 text-xs text-right font-mono font-medium text-slate-900">{formatMoney(item.contractAmount)}</td>
                       <td className="px-6 py-4 text-xs text-right font-mono text-slate-600">{formatMoney(item.invoiceAmount)}</td>
@@ -740,13 +769,13 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
                     ['项目编号', summary?.project_code ?? selectedPurchase.projectId],
                     ['项目名称', summary?.project_name],
                     ['销售订单号', summary?.order_no ?? selectedPurchase.orderId],
-                    ['订单日期', summary?.order_date],
+                    ['销售订单日期', summary?.order_date],
                     ['客户单位名称', summary?.customer_unit_name],
                     ['客户经理', summary?.account_manager ?? selectedPurchase.manager],
                     ['部门', summary?.department ?? selectedPurchase.department],
                     ['物资/服务名称', summary?.goods_name],
                     ['规格型号', summary?.specification_model],
-                    ['销售订单金额', formatMoney(Number(summary?.order_value || 0))],
+                    ['销售订单金额', formatMoney(summary?.order_value)],
                   ]} />
 
                   <InfoSection title="采购信息" actions={canEditPurchases && (
@@ -761,18 +790,18 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
                   )} items={[
                     ['采购厂商', summary?.supplier_name ?? selectedPurchase.supplier],
                     ['采购税率', `${Number(summary?.purchase_tax_rate || 0)}%`],
-                    ['不含税采购单价', formatMoney(Number(summary?.purchase_unit_price_no_tax || 0))],
-                    ['含税采购单价', formatMoney(Number(summary?.purchase_unit_price || 0))],
-                    ['含税采购金额', formatMoney(Number(summary?.purchase_amount || selectedPurchase.invoiceAmount || 0))],
-                    ['不含税采购金额', formatMoney(Number(summary?.cost_no_tax || 0))],
-                    ['采购税金', formatMoney(Number(summary?.purchase_tax_amount || 0))],
-                    ['人工成本', formatMoney(Number(summary?.labor_cost || 0))],
-                    ['其他成本', formatMoney(Number(summary?.other_cost || 0))],
-                    ['付款合计', formatMoney(Number(summary?.total_paid || selectedPurchase.paymentAmount || 0))],
-                    ['应付账款（自动）', formatMoney(Number(summary?.accounts_payable || 0))],
-                    ['财务入账付款合计', formatMoney(Number(summary?.total_finance_paid || 0))],
-                    ['应付账款（财务账面）', formatMoney(Number(summary?.financial_accounts_payable || 0))],
-                    ['不含税毛利润', formatMoney(Number(summary?.gross_profit_no_tax || 0))],
+                    ['不含税采购单价', formatMoney(summary?.purchase_unit_price_no_tax)],
+                    ['含税采购单价', formatMoney(summary?.purchase_unit_price)],
+                    ['采购金额', formatMoney(summary?.purchase_amount ?? selectedPurchase.invoiceAmount)],
+                    ['不含税采购金额', formatMoney(summary?.cost_no_tax)],
+                    ['采购税金', formatMoney(summary?.purchase_tax_amount)],
+                    ['人工成本', formatMoney(summary?.labor_cost)],
+                    ['其他成本', formatMoney(summary?.other_cost)],
+                    ['付款合计', formatMoney(summary?.total_paid ?? selectedPurchase.paymentAmount)],
+                    ['应付账款（自动）', formatMoney(summary?.accounts_payable)],
+                    ['财务入账付款合计', formatMoney(summary?.total_finance_paid)],
+                    ['应付账款（财务账面）', formatMoney(summary?.financial_accounts_payable)],
+                    ['不含税毛利润', formatMoney(summary?.gross_profit_no_tax)],
                     ['不含税毛利率', `${Number(summary?.gross_profit_margin_no_tax || 0).toFixed(2)}%`],
                   ]} />
 
@@ -895,7 +924,7 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
                       <FormInput label="付款期限" value={contractForm.payment_terms} onChange={(value) => setContractForm({ ...contractForm, payment_terms: value })} />
                       <FormInput label="履行期限" value={contractForm.performance_period} onChange={(value) => setContractForm({ ...contractForm, performance_period: value })} />
                       <FormInput label="合同签订金额" type="number" value={contractForm.signed_amount} onChange={(value) => setContractForm({ ...contractForm, signed_amount: value })} />
-                      <FormInput label="待签合同金额" type="number" value={contractForm.unsigned_amount} onChange={(value) => setContractForm({ ...contractForm, unsigned_amount: value })} className="sm:col-span-2" />
+                      <FormInput label="待签合同金额（自动计算）" readOnly value={draftUnsigned} className="sm:col-span-2" />
                     </div>
                   )}
                   {entryMode === 'invoice' && (
@@ -958,12 +987,12 @@ export default function PurchasesScreen({ purchases, orders, canEnterPurchases, 
                 </div>
                 <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <FormInput label="采购厂商" value={summaryForm.supplier_name} onChange={(value) => setSummaryForm({ ...summaryForm, supplier_name: value })} className="sm:col-span-2" />
-                  <FormInput label="采购税率（%）" type="number" value={summaryForm.purchase_tax_rate} onChange={(value) => setSummaryForm({ ...summaryForm, purchase_tax_rate: value })} />
+                  <FormInput label="采购税率（%）" type="number" value={summaryForm.purchase_tax_rate} onChange={(value) => updateSummaryPrice('purchase_tax_rate', value)} />
                   <div className="hidden sm:block" />
-                  <FormInput label="不含税采购单价" type="number" value={summaryForm.purchase_unit_price_no_tax} onChange={(value) => setSummaryForm({ ...summaryForm, purchase_unit_price_no_tax: value })} />
-                  <FormInput label="含税采购单价" type="number" value={summaryForm.purchase_unit_price} onChange={(value) => setSummaryForm({ ...summaryForm, purchase_unit_price: value })} />
-                  <FormInput label="不含税采购金额" type="number" value={summaryForm.cost_no_tax} onChange={(value) => setSummaryForm({ ...summaryForm, cost_no_tax: value })} />
-                  <FormInput label="含税采购金额" type="number" value={summaryForm.purchase_amount} onChange={(value) => setSummaryForm({ ...summaryForm, purchase_amount: value })} />
+                  <FormInput label="不含税采购单价" type="number" value={summaryForm.purchase_unit_price_no_tax} onChange={(value) => updateSummaryPrice('purchase_unit_price_no_tax', value)} />
+                  <FormInput label="含税采购单价" type="number" value={summaryForm.purchase_unit_price} onChange={(value) => updateSummaryPrice('purchase_unit_price', value)} />
+                  <FormInput label="不含税采购金额" type="number" value={summaryForm.cost_no_tax} readOnly />
+                  <FormInput label="采购金额" type="number" value={summaryForm.purchase_amount} readOnly />
                   <FormInput label="人工成本" type="number" value={summaryForm.labor_cost} onChange={(value) => setSummaryForm({ ...summaryForm, labor_cost: value })} />
                   <FormInput label="其他成本" type="number" value={summaryForm.other_cost} onChange={(value) => setSummaryForm({ ...summaryForm, other_cost: value })} />
                 </div>
@@ -1067,11 +1096,11 @@ function EntryButton({ icon, label, onClick }: { icon: React.ReactNode; label: s
   );
 }
 
-function FormInput({ label, value, onChange, type = 'text', className = '' }: { label: string; value: string; onChange: (value: string) => void; type?: string; className?: string }) {
+function FormInput({ label, value, onChange, readOnly = false, type = 'text', className = '' }: { label: string; value: string; onChange?: (value: string) => void; readOnly?: boolean; type?: string; className?: string }) {
   return (
     <label className={`space-y-1 ${className}`}>
       <span className="block text-xs font-semibold text-slate-600">{label}</span>
-      <input type={type} lang={type === 'date' ? 'zh-CN' : undefined} min={type === 'number' ? '0' : undefined} step={type === 'number' ? 'any' : undefined} value={value} onChange={(e) => onChange(e.target.value)} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" />
+      <input type={type} lang={type === 'date' ? 'zh-CN' : undefined} min={type === 'number' ? '0' : undefined} step={type === 'number' ? 'any' : undefined} value={value} readOnly={readOnly} aria-readonly={readOnly} onChange={(e) => onChange?.(e.target.value)} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" />
     </label>
   );
 }

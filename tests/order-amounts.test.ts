@@ -19,4 +19,9 @@ assert.equal(updated.amount, 317.97);
 assert.equal(updated.taxAmount, 18);
 assert.equal(editableNumber(updated.unitPrice), '105.9894');
 
+// The API uses Decimal ROUND_HALF_UP; binary floating point used to show 10.07 here.
+assert.equal(calculateTaxAmounts({ quantity: 1, taxRate: null, unitPriceNoTax: '10.075', unitPrice: '10.075' }).amount, 10.08);
+assert.equal(calculateTaxAmounts({ quantity: 5, taxRate: null, unitPriceNoTax: '2.015', unitPrice: '2.015' }).amountNoTax, 10.08);
+assert.equal(calculateTaxAmounts({ quantity: 1, taxRate: 13, unitPriceNoTax: '0.335' }).amountNoTax, 0.34);
+
 console.log('order amount tests passed');

@@ -1,0 +1,13 @@
+[Unit]
+Description=ERP full database backup to two verified disks
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash /opt/erp-ledger-backup/full-backup.sh
+User=root
+UMask=0077
+TimeoutStartSec=6h
+NoNewPrivileges=true
+PrivateTmp=true

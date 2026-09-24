@@ -1,4 +1,8 @@
-import React, { useState, useMemo } from 'react';
+import HistoryChange from './HistoryChange';
+import React, { useState, useMemo, useRef } from 'react';
+import { api, ApiError } from '../api';
+import ImportIssues from './ImportIssues';
+import type { ImportIssue } from '../lib/importReport';
 import { 
   Plus, 
   Search, 
@@ -16,42 +20,45 @@ import {
 } from 'lucide-react';
 import { OrderRecord } from '../types';
 import BatchOrderEditor from './BatchOrderEditor';
+import LegacyImportPreview from './LegacyImportPreview';
+import SourceLedgerImport from './SourceLedgerImport';
 import {
   ORDER_DETAIL_TABLE_WIDTHS,
 } from '../lib/orderDetailTables';
 import { calculateTaxAmounts, editableNumber } from '../lib/orderAmounts';
 import { applyOrderFilters, emptyOrderFilters, submitQueryFilters } from '../lib/queryFilterModel';
+import { formatMoney as formatExactMoney, type MoneyValue } from '../lib/money';
 
 interface OrderPurchaseEntry {
   id: string;
   supplier: string;
   purchaseTaxRate?: number;
-  netPurchaseUnitPrice?: number;
-  purchaseUnitPrice?: number;
-  netCost?: number;
-  purchaseAmount?: number;
-  purchaseTaxAmount?: number;
-  laborCost?: number;
-  otherCost?: number;
+  netPurchaseUnitPrice?: MoneyValue;
+  purchaseUnitPrice?: MoneyValue;
+  netCost?: MoneyValue;
+  purchaseAmount?: MoneyValue;
+  purchaseTaxAmount?: MoneyValue;
+  laborCost?: MoneyValue;
+  otherCost?: MoneyValue;
 }
 
 interface OrderDeliveryEntry {
   id: string;
   deliveryDate: string;
-  deliveredQty?: number;
-  deliveredNetRevenue?: number;
-  deliveryValue?: number;
-  deliveredNetCost?: number;
-  deliveryCost?: number;
-  pendingQty?: number;
-  pendingNetAmount?: number;
-  pendingAmount?: number;
+  deliveredQty?: MoneyValue;
+  deliveredNetRevenue?: MoneyValue;
+  deliveryValue?: MoneyValue;
+  deliveredNetCost?: MoneyValue;
+  deliveryCost?: MoneyValue;
+  pendingQty?: MoneyValue;
+  pendingNetAmount?: MoneyValue;
+  pendingAmount?: MoneyValue;
 }
 
 interface OrdersScreenProps {
   orders: OrderRecord[];
   onAddOrder: (order: OrderRecord) => Promise<void>;
-  onImportExcel: (file: File) => Promise<{ success_rows: number; skipped_rows: number }>;
+  onImportExcel: (file: File) => Promise<{ batch_id: number; source_sha256: string; success_rows: number; skipped_rows: number }>;
   onUpdateOrder: (target: OrderRecord, order: OrderRecord) => Promise<void>;
   onDeleteOrder: (target: OrderRecord) => Promise<void>;
   onBatchSaved: () => Promise<void>;
@@ -75,6 +82,10 @@ function optionalFormNumber(value: string) {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+function optionalFormAmount(value: string) {
+  return value.trim() || undefined;
+}
+
 const deleteVerificationAlphabet = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 
 function createDeleteVerificationCode() {
@@ -84,6 +95,10 @@ function createDeleteVerificationCode() {
 }
 
 export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpdateOrder, onDeleteOrder, onBatchSaved, canEnterOrders, canEditOrders, canDeleteOrders, canImportLedger }: OrdersScreenProps) {
+  const [importBusy,setImportBusy] = useState(false);
+  const importWorking = useRef(false);
+  const [importResult,setImportResult] = useState<{message: string; issues: ImportIssue[]} | null>(null);
+  const [importDigest,setImportDigest] = useState('');
   // Query Filters State
   const [projectId, setProjectId] = useState('');
   const [orderId, setOrderId] = useState('');
@@ -107,6 +122,9 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
   const [deleteVerificationInput, setDeleteVerificationInput] = useState('');
   const [deleteVerificationError, setDeleteVerificationError] = useState('');
   const [deletingOrder, setDeletingOrder] = useState(false);
+  const [showLegacyPreview, setShowLegacyPreview] = useState(false);
+  const [showSourceImport, setShowSourceImport] = useState(false);
+  const [historyChange, setHistoryChange] = useState<{orders: OrderRecord[]; mode: 'rename'|'transfer'} | null>(null);
 
   // Pagination State
   const [currentPage, setCurrentPage] = useState(1);
@@ -266,9 +284,8 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
   const selectedPurchases = selectedOrderKey ? [...backendPurchase, ...(orderPurchases[selectedOrderKey] || [])] : [];
   const selectedDeliveries = selectedOrderKey ? [...backendDelivery, ...(orderDeliveries[selectedOrderKey] || [])] : [];
 
-  const formatMoney = (value: number) =>
-    new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value);
-  const formatOptionalMoney = (value: number | undefined) =>
+  const formatMoney = formatExactMoney;
+  const formatOptionalMoney = (value: MoneyValue | undefined) =>
     value === undefined ? '' : `¥${formatMoney(value)}`;
   const blank = (value: string | number | undefined | null) => value === undefined || value === null ? '' : String(value);
   const canManageOrderRows = canEditOrders || canDeleteOrders;
@@ -461,12 +478,12 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
     unitName: form.quantityUnit,
     quantity: `${form.quantityVal} ${form.quantityUnit}`,
     salesTaxRate: optionalFormNumber(form.salesTaxRate),
-    netUnitPrice: optionalFormNumber(form.netUnitPrice),
-    unitPrice: optionalFormNumber(form.unitPrice),
-    netRevenue: optionalFormNumber(form.netRevenue),
-    orderValue: parseFloat(form.orderValue) || 0,
-    salesTaxAmount: optionalFormNumber(form.salesTaxAmount),
-    deliveredQty: parseFloat(form.deliveredQty) || 0,
+    netUnitPrice: optionalFormAmount(form.netUnitPrice),
+    unitPrice: optionalFormAmount(form.unitPrice),
+    netRevenue: optionalFormAmount(form.netRevenue),
+    orderValue: form.orderValue.trim() || '0',
+    salesTaxAmount: optionalFormAmount(form.salesTaxAmount),
+    deliveredQty: form.deliveredQty.trim() || '0',
     businessType: form.businessType,
     clientUnit: form.clientUnit,
     supplierName: existing?.supplierName,
@@ -507,7 +524,7 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
 
   const updatePurchaseCalculation = (updates: Partial<typeof newPurchase>) => {
     const next = { ...newPurchase, ...updates };
-    const quantity = Number(String(selectedOrder?.quantity || '').match(/[\d.]+/)?.[0] || 0);
+    const quantity = String(selectedOrder?.quantity || '').match(/[\d.]+/)?.[0] || '0';
     const calculated = calculateTaxAmounts({
       quantity,
       taxRate: next.purchaseTaxRate,
@@ -566,7 +583,7 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
       resetNewOrder();
       setShowAddModal(false);
     } catch (error) {
-      alert(error instanceof Error ? error.message : '订单修改失败');
+      if (!(error instanceof ApiError && error.code==='EDIT_CONFLICT')) alert(error instanceof Error ? error.message : '订单修改失败');
     } finally {
       setSavingOrder(false);
     }
@@ -618,16 +635,26 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
   const handleBatchImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
+    if (importWorking.current) return;
+    importWorking.current=true;setImportBusy(true);setImportResult(null);
     try {
+      setImportDigest('');
+      if (crypto.subtle) {
+        const digest=await crypto.subtle.digest('SHA-256',await file.arrayBuffer());
+        setImportDigest(Array.from(new Uint8Array(digest),v=>v.toString(16).padStart(2,'0')).join(''));
+      }
       const result = await onImportExcel(file);
       setCurrentPage(1);
       const skipped = result.skipped_rows
         ? `，跳过 ${result.skipped_rows} 行非业务数据（如表格末尾的 AIGC 标识行）`
         : '';
-      alert(`批量导入完成：成功导入 ${result.success_rows} 条业务台账明细${skipped}。`);
+      setImportResult({message:`批量导入完成：成功导入 ${result.success_rows} 条业务台账明细${skipped}。\n批次 ${result.batch_id}\n文件摘要：${result.source_sha256}`,issues:[]});
     } catch (error) {
-      alert(error instanceof Error ? error.message : '批量导入失败，未写入任何数据');
+      const message=error instanceof TypeError || (error instanceof ApiError && error.status>=500) ? '导入结果尚未确认。请先核对当前文件的已完成批次，不要重复提交。'
+        : error instanceof Error ? error.message : '导入结果尚未确认，请先核对导入批次。';
+      setImportResult({message,issues:error instanceof ApiError ? error.report?.errors || [] : []});
     } finally {
+      importWorking.current=false;setImportBusy(false);
       event.target.value = '';
     }
   };
@@ -642,13 +669,13 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
       id: `purchase-${Date.now()}`,
       supplier: newPurchase.supplier,
       purchaseTaxRate: optionalFormNumber(newPurchase.purchaseTaxRate),
-      netPurchaseUnitPrice: optionalFormNumber(newPurchase.netPurchaseUnitPrice),
-      purchaseUnitPrice: optionalFormNumber(newPurchase.purchaseUnitPrice),
-      netCost: optionalFormNumber(newPurchase.netCost),
-      purchaseAmount: optionalFormNumber(newPurchase.purchaseAmount),
-      purchaseTaxAmount: optionalFormNumber(newPurchase.purchaseTaxAmount),
-      laborCost: optionalFormNumber(newPurchase.laborCost),
-      otherCost: optionalFormNumber(newPurchase.otherCost),
+      netPurchaseUnitPrice: optionalFormAmount(newPurchase.netPurchaseUnitPrice),
+      purchaseUnitPrice: optionalFormAmount(newPurchase.purchaseUnitPrice),
+      netCost: optionalFormAmount(newPurchase.netCost),
+      purchaseAmount: optionalFormAmount(newPurchase.purchaseAmount),
+      purchaseTaxAmount: optionalFormAmount(newPurchase.purchaseTaxAmount),
+      laborCost: optionalFormAmount(newPurchase.laborCost),
+      otherCost: optionalFormAmount(newPurchase.otherCost),
     };
 
     if (editingPurchaseId === 'backend-purchase') {
@@ -696,14 +723,14 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
     const entry: OrderDeliveryEntry = {
       id: `delivery-${Date.now()}`,
       deliveryDate: newDelivery.deliveryDate,
-      deliveredQty: parseFloat(newDelivery.deliveredQty) || 0,
-      deliveredNetRevenue: parseFloat(newDelivery.deliveredNetRevenue) || 0,
-      deliveryValue: parseFloat(newDelivery.deliveryValue) || 0,
-      deliveredNetCost: parseFloat(newDelivery.deliveredNetCost) || 0,
-      deliveryCost: parseFloat(newDelivery.deliveryCost) || 0,
-      pendingQty: parseFloat(newDelivery.pendingQty) || 0,
-      pendingNetAmount: parseFloat(newDelivery.pendingNetAmount) || 0,
-      pendingAmount: parseFloat(newDelivery.pendingAmount) || 0,
+      deliveredQty: newDelivery.deliveredQty.trim() || '0',
+      deliveredNetRevenue: optionalFormAmount(newDelivery.deliveredNetRevenue),
+      deliveryValue: optionalFormAmount(newDelivery.deliveryValue),
+      deliveredNetCost: optionalFormAmount(newDelivery.deliveredNetCost),
+      deliveryCost: optionalFormAmount(newDelivery.deliveryCost),
+      pendingQty: newDelivery.pendingQty.trim() || '0',
+      pendingNetAmount: optionalFormAmount(newDelivery.pendingNetAmount),
+      pendingAmount: optionalFormAmount(newDelivery.pendingAmount),
     };
 
     if (editingDeliveryId === 'backend-delivery') {
@@ -833,20 +860,25 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
 
   return (
     <div className="space-y-6 min-w-0">
+      {importResult && <section className="rounded-xl border bg-white p-5 space-y-3" role="status"><div className="flex justify-between gap-4"><p className="whitespace-pre-wrap break-all text-sm">{importResult.message}</p><button onClick={() => setImportResult(null)} aria-label="关闭导入报告">关闭</button></div><ImportIssues issues={importResult.issues} />{importDigest && <button className="text-blue-700 text-sm" onClick={async () => {
+        try {const result=await api.importStatus(importDigest);setImportResult({issues:[],message:result.items.length ? result.items.map(i=>`批次 ${i.id}：${i.source_file_name}，成功 ${i.success_rows} 条，${i.uploaded_at}`).join('\n') : result.message});}
+        catch(error){setImportResult({issues:[],message:error instanceof Error ? error.message : '暂时无法核对'});}
+      }}>核对当前文件的已完成批次</button>}</section>}
+      {importBusy && <p role="status">正在校验、备份并导入文件，请等待结果，勿重复提交。</p>}
+      {historyChange && <HistoryChange {...historyChange} onClose={() => setHistoryChange(null)} onSaved={async () => { await onBatchSaved?.(); setSelectedOrder(null); }} />}
+      {canEditOrders && selectedBatchOrderIds.size > 0 && <button className="m-4 px-3 py-2 text-sm border rounded" onClick={() => setHistoryChange({orders:orders.filter(o => o.orderLineId && selectedBatchOrderIds.has(o.orderLineId)), mode:'rename'})}>变更所选订单号</button>}
+      {showLegacyPreview && canImportLedger && <LegacyImportPreview onClose={() => setShowLegacyPreview(false)} onImported={onBatchSaved} />}
+      {showSourceImport && canImportLedger && <SourceLedgerImport onClose={() => setShowSourceImport(false)} onImported={onBatchSaved}
+        onHistory={() => { setShowSourceImport(false); setShowLegacyPreview(true); }}
+        onDirectImport={event => { setShowSourceImport(false); void handleBatchImport(event); }} />}
       {/* Page Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
+      <div className="flex flex-col gap-4">
+        <div className="shrink-0">
           <h1 className="text-2xl font-bold tracking-tight text-slate-900 font-sans">基本信息列表</h1>
           <p className="text-sm text-slate-500 font-sans mt-1">查看和管理客户订单的基础业务信息</p>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2 self-start sm:self-center">
-          {canImportLedger && (
-            <label className="flex items-center gap-1.5 px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-lg shadow-sm transition-all text-xs font-semibold cursor-pointer">
-              <FileUp className="w-4 h-4 text-blue-600" />
-              <span>导入Excel</span>
-              <input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={handleBatchImport} className="hidden" />
-            </label>
-          )}
+          {canImportLedger && <button type="button" disabled={importBusy} onClick={() => setShowSourceImport(true)} className="flex items-center gap-1.5 px-4 py-2 bg-blue-600 text-white rounded-lg text-xs font-semibold"><FileUp className="w-4 h-4" />导入台账</button>}
           {canEnterOrders && (
             <>
               <button
@@ -923,7 +955,7 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
 
           {/* Order Date */}
           <div className="space-y-1.5">
-            <label className="text-xs font-medium text-slate-500">订单日期</label>
+            <label className="text-xs font-medium text-slate-500">销售订单日期</label>
             <input 
               type="date" 
               lang="zh-CN"
@@ -970,7 +1002,7 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
 
           {/* Date range selection */}
           <div className="md:col-span-2 space-y-1.5">
-            <label className="text-xs font-medium text-slate-500">订单日期范围</label>
+            <label className="text-xs font-medium text-slate-500">销售订单日期范围</label>
             <div className="flex items-center gap-2">
               <input 
                 type="date" 
@@ -1031,7 +1063,7 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
                 <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 w-[120px]">客户经理</th>
                 <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 w-[140px]">用户</th>
                 <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 w-[220px]">项目名称</th>
-                <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 w-[120px]">订单日期</th>
+                <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 w-[120px]">销售订单日期</th>
                 <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 w-[240px]">物资/服务名称</th>
                 <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 text-center w-[90px]">数量</th>
                 <th className="px-6 py-3.5 font-semibold text-xs text-slate-500 text-right w-[140px]">销售订单金额</th>
@@ -1069,7 +1101,7 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
                     <td className="px-6 py-4 text-xs font-medium text-slate-900 truncate" title={item.goodsName}>{item.goodsName}</td>
                     <td className="px-6 py-4 text-xs text-center text-slate-700 font-sans">{item.quantity}</td>
                     <td className="px-6 py-4 text-xs text-right font-mono font-medium text-slate-900">
-                      ¥{new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2 }).format(item.orderValue)}
+                      ¥{formatMoney(item.orderValue)}
                     </td>
                     <td className="px-6 py-4 text-xs text-center font-mono font-semibold text-slate-800">{item.deliveredQty}</td>
                     <td className="px-6 py-4 text-xs text-right font-mono font-medium text-slate-900">¥{formatMoney(item.deliveryValue || 0)}</td>
@@ -1287,7 +1319,7 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
             <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
               <div className="min-w-0">
                 <p className="text-xs font-semibold text-blue-600 mb-1">{selectedOrder.orderId}</p>
-                <h2 className="text-base font-bold text-slate-900 truncate">{selectedOrder.goodsName}</h2>
+                <h2 className="text-base font-bold text-slate-900 truncate">{selectedOrder.goodsName}</h2>{canEditOrders && <div className="flex gap-3 mt-2 text-xs"><button type="button" className="text-blue-700" onClick={() => setHistoryChange({orders:[selectedOrder],mode:'rename'})}>变更订单号</button><button type="button" className="text-blue-700" onClick={() => setHistoryChange({orders:[selectedOrder],mode:'transfer'})}>框架整体交接</button></div>}
               </div>
               <button
                 type="button"
@@ -1312,7 +1344,7 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
                     ['部门', selectedOrder.department || ''],
                     ['分公司', selectedOrder.branchCompany || ''],
                     ['客户经理', selectedOrder.manager || ''],
-                    ['订单日期', selectedOrder.orderDate],
+                    ['销售订单日期', selectedOrder.orderDate],
                     ['业务类型', selectedOrder.businessType],
                     ['统计类别', selectedOrder.statisticalCategory || ''],
                     ['三级团队名称', selectedOrder.teamName || ''],
@@ -1320,6 +1352,8 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
                     ['用户', selectedOrder.userName || ''],
                     ['区域平台', selectedOrder.regionalPlatform || ''],
                     ['销售订单号', selectedOrder.orderId],
+                    ['订单号历史', (selectedOrder.orderNumberHistory || [selectedOrder.orderId]).join(' → ')],
+                    ['负责人历史', (selectedOrder.managerHistory || []).join(' → ')],
                     ['项目名称', selectedOrder.projectName || ''],
                     ['物资/服务名称', selectedOrder.goodsName],
                     ['规格型号', selectedOrder.specModel || ''],
@@ -1353,7 +1387,7 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
                         <th className="px-4 py-2 font-semibold text-right whitespace-nowrap">不含税采购单价</th>
                         <th className="px-4 py-2 font-semibold text-right whitespace-nowrap">采购单价</th>
                         <th className="px-4 py-2 font-semibold text-right whitespace-nowrap">不含税采购金额</th>
-                        <th className="px-4 py-2 font-semibold text-right whitespace-nowrap">含税采购金额</th>
+                        <th className="px-4 py-2 font-semibold text-right whitespace-nowrap">采购金额</th>
                         <th className="px-4 py-2 font-semibold text-right whitespace-nowrap">采购税金</th>
                         <th className="px-4 py-2 font-semibold text-right whitespace-nowrap">人工成本</th>
                         <th className="px-4 py-2 font-semibold text-right whitespace-nowrap">其他成本</th>
@@ -1420,7 +1454,7 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
                         <th className="px-4 py-2 font-semibold whitespace-nowrap">交付日期</th>
                         <th className="px-4 py-2 font-semibold text-right whitespace-nowrap">交付数量</th>
                         <th className="px-4 py-2 font-semibold text-right whitespace-nowrap">交付不含税收入</th>
-                        <th className="px-4 py-2 font-semibold text-right whitespace-nowrap">交付价值</th>
+                        <th className="px-4 py-2 font-semibold text-right whitespace-nowrap">交付收入</th>
                         <th className="px-4 py-2 font-semibold text-right whitespace-nowrap">交付不含税成本</th>
                         <th className="px-4 py-2 font-semibold text-right whitespace-nowrap">交付成本</th>
                         <th className="px-4 py-2 font-semibold text-right whitespace-nowrap">待交付数量</th>
@@ -1533,7 +1567,7 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
                   <input type="number" readOnly value={newPurchase.netCost} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs bg-slate-50 text-slate-600" />
                 </div>
                 <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-600">含税采购金额</label>
+                  <label className="text-xs font-semibold text-slate-600">采购金额</label>
                   <input type="number" readOnly value={newPurchase.purchaseAmount} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs bg-slate-50 text-slate-600" />
                 </div>
                 <div className="space-y-1">
@@ -1576,7 +1610,7 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
                 {[
                   ['交付数量', 'deliveredQty'],
                   ['交付不含税收入', 'deliveredNetRevenue'],
-                  ['交付价值', 'deliveryValue'],
+                  ['交付收入', 'deliveryValue'],
                   ['交付不含税成本', 'deliveredNetCost'],
                   ['交付成本', 'deliveryCost'],
                   ['待交付数量', 'pendingQty'],
@@ -1658,7 +1692,7 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
                     type="text" 
                     required
                     placeholder="如: ORD-2023-9009"
-                    value={newOrder.orderId}
+                    readOnly={Boolean(editingOrder)} title={editingOrder ? "请在订单详情使用变更订单号或框架整体交接" : undefined} value={newOrder.orderId}
                     onChange={e => setNewOrder({...newOrder, orderId: e.target.value})}
                     className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                   />
@@ -1668,7 +1702,7 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
                   <label className="text-xs font-semibold text-slate-600">部门</label>
                   <input
                     type="text"
-                    value={newOrder.department}
+                    readOnly={Boolean(editingOrder)} title={editingOrder ? "请在订单详情使用变更订单号或框架整体交接" : undefined} value={newOrder.department}
                     onChange={e => setNewOrder({...newOrder, department: e.target.value})}
                     className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500"
                   />
@@ -1678,7 +1712,7 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
                   <label className="text-xs font-semibold text-slate-600">分公司</label>
                   <input
                     type="text"
-                    value={newOrder.branchCompany}
+                    readOnly={Boolean(editingOrder)} title={editingOrder ? "请在订单详情使用变更订单号或框架整体交接" : undefined} value={newOrder.branchCompany}
                     onChange={e => setNewOrder({...newOrder, branchCompany: e.target.value})}
                     className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500"
                   />
@@ -1688,7 +1722,7 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
                   <label className="text-xs font-semibold text-slate-600">客户经理</label>
                   <input
                     type="text"
-                    value={newOrder.manager}
+                    readOnly={Boolean(editingOrder)} title={editingOrder ? "请在订单详情使用变更订单号或框架整体交接" : undefined} value={newOrder.manager}
                     onChange={e => setNewOrder({...newOrder, manager: e.target.value})}
                     className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500"
                   />
@@ -1696,7 +1730,7 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
 
                 {/* Order Date */}
                 <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-600">订单日期 *</label>
+                  <label className="text-xs font-semibold text-slate-600">销售订单日期 *</label>
                   <input 
                     type="date" 
                     lang="zh-CN"
@@ -1734,7 +1768,7 @@ export default function OrdersScreen({ orders, onAddOrder, onImportExcel, onUpda
                   <label className="text-xs font-semibold text-slate-600">三级团队名称</label>
                   <input
                     type="text"
-                    value={newOrder.teamName}
+                    readOnly={Boolean(editingOrder)} title={editingOrder ? "请在订单详情使用变更订单号或框架整体交接" : undefined} value={newOrder.teamName}
                     onChange={e => setNewOrder({...newOrder, teamName: e.target.value})}
                     className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-500"
                   />

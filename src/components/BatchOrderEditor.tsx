@@ -1,3 +1,4 @@
+import { editingApi } from '../api';
 import React, { useEffect, useMemo, useState } from 'react';
 import { ClipboardPaste, LoaderCircle, Plus, Save, Trash2, X } from 'lucide-react';
 import {
@@ -85,7 +86,7 @@ export default function BatchOrderEditor({
           ? (result.rows || []).map((row) => ({ ...row, values: [...row.values] }))
           : [{ order_line_id: 0, values: createBlankEditorRow(result.columns) }];
         resetHistory();
-        setColumns(result.columns);
+        setColumns(result.columns.map(c => mode === 'update' && ['order_no','account_manager','department','branch_company','team_name'].includes(c.key || '') ? {...c, editable:false} : c));
         setRows(loadedRows);
         setInitialRows(
           mode === 'update'
@@ -225,7 +226,7 @@ export default function BatchOrderEditor({
       setSaving(true);
       let count: number;
       if (mode === 'update') {
-        const result = await api.updateBasicOrdersBatch(items);
+        const result = await editingApi(initialRows[0]?.edit_context).updateBasicOrdersBatch(items);
         count = result.updated;
       } else {
         const result = await api.createBasicOrdersBatch(items);
